@@ -1,0 +1,49 @@
+# MediaVault v2 — .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Node / Electron
+node_modules/
+dist/
+out/
+.vite/
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Runtime data
+backend/data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
