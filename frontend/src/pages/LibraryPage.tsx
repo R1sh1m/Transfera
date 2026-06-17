@@ -1,0 +1,361 @@
+// ---------------------------------------------------------------------------
+// MediaVault v2 — Library Page
+// Masonry view of completed items with infinite scroll.
+// ---------------------------------------------------------------------------
+
+import { useEffect, useRef, useCallback, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  Image,
+  Film,
+  Music,
+  FileText,
+  Search,
+  Grid3X3,
+  LayoutList,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  HardDrive,
+} from 'lucide-react'
+import { useMediaList } from '@/lib/queries'
+import { useTransferStore } from '@/store/transfer'
+import { cn } from '@/lib/utils'
+import type { MediaItemInfo, HopStatus } from '@/types/api'
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const extIconMap: Record<string, React.ReactNode> = {
+  '.jpg': <Image className="w-5 h-5" />,
+  '.jpeg': <Image className="w-5 h-5" />,
+  '.png': <Image className="w-5 h-5" />,
+  '.gif': <Image className="w-5 h-5" />,
+  '.heic': <Image className="w-5 h-5" />,
+  '.webp': <Image className="w-5 h-5" />,
+  '.raw': <Image className="w-5 h-5" />,
+  '.mp4': <Film className="w-5 h-5" />,
+  '.mkv': <Film className="w-5 h-5" />,
+  '.mov': <Film className="w-5 h-5" />,
+  '.avi': <Film className="w-5 h-5" />,
+  '.mp3': <Music className="w-5 h-5" />,
+  '.flac': <Music className="w-5 h-5" />,
+  '.wav': <Music className="w-5 h-5" />,
+  '.pdf': <FileText className="w-5 h-5" />,
+}
+
+function getIcon(ext?: string) {
+  if (!ext) return <FileText className="w-5 h-5 text-muted-foreground" />
+  return extIconMap[ext.toLowerCase()] ?? <FileText className="w-5 h-5 text-muted-foreground" />
+}
+
+function getStatusIcon(status: HopStatus) {
+  switch (status) {
+    case 'completed':
+      return <CheckCircle2 className="w-3 h-3 text-green-500" />
+    case 'failed':
+      return <XCircle className="w-3 h-3 text-red-500" />
+    case 'transferring':
+    case 'hashing':
+      return <Loader2 className="w-3 h-3 text-blue-500 animate-spin" />
+    default:
+      return null
+  }
+}
+
+function formatSize(bytes: number) {
+  if (bytes > 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+  if (bytes > 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes > 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
+}
+
+// ---------------------------------------------------------------------------
+// Masonry Grid Column Heights
+// ---------------------------------------------------------------------------
+function useMasonryColumns(items: MediaItemInfo[], containerWidth: number, gap = 8) {
+  const [columns, setColumns] = useState<MediaItemInfo[][]>([])
+
+  useEffect(() => {
+    const colCount = containerWidth > 900 ? 4 : containerWidth > 600 ? 3 : 2
+    const cols: MediaItemInfo[][] = Array.from({ length: colCount }, () => [])
+    const heights = Array(colCount).fill(0)
+
+    for (const item of items) {
+      const shortestCol = heights.indexOf(Math.min(...heights))
+      const col = cols[shortestCol]
+      if (col) {
+        col.push(item)
+      }
+      // Vary height by extension type
+      const isVideo = item.extension === '.mp4' || item.extension === '.mov' || item.extension === '.mkv'
+      heights[shortestCol] += isVideo ? 220 : 160
+    }
+
+    setColumns(cols)
+  }, [items, containerWidth, gap])
+
+  return columns
+}
+
+// ---------------------------------------------------------------------------
+// LibraryCard
+// ---------------------------------------------------------------------------
+function LibraryCard({ item }: { item: MediaItemInfo }) {
+  const isImage = item.extension && ['.jpg', '.jpeg', '.png', '.gif', '.heic', '.webp', '.raw'].includes(item.extension)
+  const isVideo = item.extension && ['.mp4', '.mov', '.mkv', '.avi', '.webm'].includes(item.extension)
+  const isAudio = item.extension && ['.mp3', '.flac', '.wav', '.aac', '.ogg'].includes(item.extension)
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="bg-card border border-border rounded-lg overflow-hidden hover:shadow-md transition-shadow group"
+    >
+      {/* Preview Area */}
+      <div className={cn(
+        'relative flex items-center justify-center',
+        isVideo ? 'aspect-[4/3]' : isImage ? 'aspect-square' : 'aspect-[4/3]',
+        isImage ? 'bg-blue-50' : isVideo ? 'bg-purple-50' : isAudio ? 'bg-green-50' : 'bg-muted',
+      )}>
+        <div className={cn(
+          'opacity-40 group-hover:opacity-60 transition-opacity',
+          isImage ? 'text-blue-400' : isVideo ? 'text-purple-400' : isAudio ? 'text-green-400' : 'text-muted-foreground',
+        )}>
+          {getIcon(item.extension)}
+        </div>
+        {/* Status overlay */}
+        <div className="absolute top-2 right-2">
+          {getStatusIcon(item.final_status)}
+        </div>
+        {item.live_photo_group && (
+          <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-primary/80 text-primary-foreground rounded text-[9px] font-medium">
+            Live Photo
+          </div>
+        )}
+      </div>
+
+      {/* Info */}
+      <div className="p-2.5">
+        <p className="text-xs font-medium text-foreground truncate" title={item.file_name}>
+          {item.file_name}
+        </p>
+        <div className="flex items-center justify-between mt-1">
+          <span className="text-[10px] text-muted-foreground">{formatSize(item.file_size)}</span>
+          <span className="text-[10px] text-muted-foreground font-mono">{item.extension}</span>
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// LibraryPage
+// ---------------------------------------------------------------------------
+export default function LibraryPage() {
+  const [search, setSearch] = useState('')
+  const [extension, setExtension] = useState('')
+  const [finalStatus, setFinalStatus] = useState('')
+  const [viewMode, setViewMode] = useState<'masonry' | 'list'>('masonry')
+
+  const library = useTransferStore((s) => s.library)
+  const appendLibraryItems = useTransferStore((s) => s.appendLibraryItems)
+  const resetLibrary = useTransferStore((s) => s.resetLibrary)
+  const setLoadingMore = useTransferStore((s) => s.setLoadingMore)
+
+  const { data, isLoading } = useMediaList({
+    page: 1,
+    pageSize: 50,
+    extension: extension || undefined,
+    finalStatus: finalStatus || undefined,
+    search: search || undefined,
+  })
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [containerWidth, setContainerWidth] = useState(800)
+
+  // Reset library on filter change
+  useEffect(() => {
+    resetLibrary()
+  }, [search, extension, finalStatus, resetLibrary])
+
+  // Load initial data into store
+  useEffect(() => {
+    if (data && data.items.length > 0 && library.items.length === 0) {
+      appendLibraryItems(data.items, data.total, data.pages)
+    }
+  }, [data, library.items.length, appendLibraryItems])
+
+  // Measure container
+  useEffect(() => {
+    if (!containerRef.current) return
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width)
+      }
+    })
+    observer.observe(containerRef.current)
+    return () => observer.disconnect()
+  }, [])
+
+  const columns = useMasonryColumns(library.items, containerWidth)
+
+  // Infinite scroll observer
+  const loadMore = useCallback(async () => {
+    if (library.isLoadingMore || library.page >= library.totalPages) return
+    setLoadingMore(true)
+    // In production this would fetch the next page
+    setLoadingMore(false)
+  }, [library.isLoadingMore, library.page, library.totalPages, setLoadingMore])
+
+  useEffect(() => {
+    if (!sentinelRef.current) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadMore()
+        }
+      },
+      { threshold: 0.1 },
+    )
+    observer.observe(sentinelRef.current)
+    return () => observer.disconnect()
+  }, [loadMore])
+
+  const allExtensions = ['.jpg', '.png', '.mp4', '.mov', '.mp3', '.pdf', '.raw', '.heic']
+
+  return (
+    <div className="h-full flex flex-col space-y-4">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-bold text-foreground">Library</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          {library.total} items completed
+        </p>
+      </div>
+
+      {/* Toolbar */}
+      <div className="flex items-center gap-3">
+        <div className="flex-1 relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search files..."
+            className="w-full pl-9 pr-3 py-2 bg-background border border-input rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
+
+        <select
+          value={extension}
+          onChange={(e) => setExtension(e.target.value)}
+          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        >
+          <option value="">All types</option>
+          {allExtensions.map((ext) => (
+            <option key={ext} value={ext}>{ext}</option>
+          ))}
+        </select>
+
+        <select
+          value={finalStatus}
+          onChange={(e) => setFinalStatus(e.target.value)}
+          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        >
+          <option value="">All statuses</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+          <option value="pending">Pending</option>
+        </select>
+
+        <div className="flex items-center border border-input rounded-md">
+          <button
+            onClick={() => setViewMode('masonry')}
+            className={cn(
+              'p-2 rounded-l-md transition-colors',
+              viewMode === 'masonry' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
+            )}
+          >
+            <Grid3X3 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setViewMode('list')}
+            className={cn(
+              'p-2 rounded-r-md transition-colors',
+              viewMode === 'list' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
+            )}
+          >
+            <LayoutList className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div ref={containerRef} className="flex-1 overflow-y-auto">
+        {isLoading && library.items.length === 0 ? (
+          <div className="grid grid-cols-3 gap-3">
+            {Array.from({ length: 9 }).map((_, i) => (
+              <div key={i} className="bg-card border border-border rounded-lg overflow-hidden animate-pulse">
+                <div className="aspect-square bg-muted" />
+                <div className="p-2.5 space-y-1.5">
+                  <div className="h-3 bg-muted rounded w-3/4" />
+                  <div className="h-2 bg-muted rounded w-1/2" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : library.items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
+            <HardDrive className="w-12 h-12 mb-3 opacity-30" />
+            <p className="text-sm">No items in library yet</p>
+            <p className="text-xs mt-1">Complete a transfer to see files here</p>
+          </div>
+        ) : viewMode === 'masonry' ? (
+          <div className="flex gap-2" style={{ minHeight: 400 }}>
+            {columns.map((col, colIdx) => (
+              <div key={colIdx} className="flex-1 space-y-2">
+                {col.map((item) => (
+                  <LibraryCard key={item.id} item={item} />
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-1">
+            <AnimatePresence>
+              {library.items.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md hover:bg-muted/50 transition-colors"
+                >
+                  <div className="w-8 h-8 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                    {getIcon(item.extension)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-foreground truncate">{item.file_name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{item.source_path}</p>
+                  </div>
+                  <span className="text-xs text-muted-foreground flex-shrink-0">{formatSize(item.file_size)}</span>
+                  {getStatusIcon(item.final_status)}
+                </div>
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* Infinite scroll sentinel */}
+        <div ref={sentinelRef} className="h-10" />
+
+        {/* Loading more indicator */}
+        {library.isLoadingMore && (
+          <div className="flex justify-center py-4">
+            <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

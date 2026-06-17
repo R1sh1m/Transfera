@@ -31,15 +31,18 @@ DB_DIR: Path = DATA_DIR / "db"
 CACHE_DIR: Path = DATA_DIR / "cache"
 LOG_DIR: Path = DATA_DIR / "logs"
 EXPORT_DIR: Path = DATA_DIR / "exports"
+EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
+THUMBNAIL_DEFAULT_LOGO: Path = BACKEND_ROOT.parent / "frontend" / "src" / "assets" / "logo.png"
 
 # Ensure runtime directories exist at import time.
-for _d in (DATA_DIR, DB_DIR, CACHE_DIR, LOG_DIR, EXPORT_DIR):
+for _d in (DATA_DIR, DB_DIR, CACHE_DIR, LOG_DIR, EXPORT_DIR, EXIFTOOL_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
-DATABASE_URL: str = f"sqlite:///{DB_DIR / 'mediavault.db'}"
+DATABASE_URL: str = f"sqlite+aiosqlite:///{DB_DIR / 'mediavault.db'}"
+DATABASE_URL_SYNC: str = f"sqlite:///{DB_DIR / 'mediavault.db'}"
 
 # ---------------------------------------------------------------------------
 # Media Extension Sets  (frozensets for immutability & O(1) lookup)

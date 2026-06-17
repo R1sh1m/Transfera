@@ -1,49 +1,75 @@
-# MediaVault v2 — .gitignore
+# MediaVault v2 — Git Ignore
 
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 *.egg-info/
 dist/
-build/
 *.egg
-.venv/
-venv/
-env/
+.eggs/
 
-# Node / Electron
-node_modules/
-dist/
-out/
-.vite/
-
-# Database
+# --- SQLite databases ---
 *.db
-*.db-journal
 *.db-wal
 *.db-shm
 
-# Runtime data
-backend/data/
+# --- Node.js ---
+node_modules/
+frontend/dist/
+frontend/dist-electron/
+frontend/release/
 
-# IDE
+# --- Environment ---
+.env
+.env.local
+.env.*.local
+*.env
+venv/
+.venv/
+
+# --- IDE / Editor ---
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-Desktop.ini
 
-# Env / secrets
-.env
-.env.local
-.env.*.local
+# --- OS ---
+desktop.ini
+._*
 
-# Logs
+# --- Logs ---
 *.log
+backend/data/logs/
+
+# --- Cache ---
+.cache/
+frontend/.cache/
+backend/data/cache/
+
+# --- Partial / temp files ---
+*.partial
+*.tmp
+
+# --- Electron build artifacts ---
+frontend/release/
+*.blockmap
+
+# --- Test databases (created during test runs) ---
+backend/data/db/test_*.db*
+
+# --- ExifTool downloaded binaries ---
+backend/bin/exiftool/
+
+# --- Misc ---
+*.bak
+*.backup
+coverage/
+htmlcov/
+.coverage
+coverage.xml
+digest.txt
