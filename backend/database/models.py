@@ -182,6 +182,16 @@ class TransferSession(Base):
     completed_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # --- Volume tracking ---
+    total_bytes_volume: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, default=None
+    )
+
+    # --- Report path ---
+    session_report_path: Mapped[Optional[str]] = mapped_column(
+        String(4096), nullable=True, default=None
+    )
+
     # --- Error tracking ---
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

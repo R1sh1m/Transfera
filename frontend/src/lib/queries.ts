@@ -10,6 +10,7 @@ import type {
   DirSizeResponse,
   FolderMetadataResponse,
   HealthResponse,
+  PreflightValidateResponse,
   ScanRequest,
   ScanResponse,
   SessionCreate,
@@ -243,6 +244,29 @@ export function useCheckDuplicates() {
       )
       return data
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Preflight Disk Validation
+// ---------------------------------------------------------------------------
+export function usePreflightValidate(sourcePath: string | null, destPath: string | null) {
+  return useQuery({
+    queryKey: ['preflight', sourcePath, destPath],
+    queryFn: async () => {
+      const { data } = await apiClient.post<PreflightValidateResponse>(
+        '/utils/preflight-validate',
+        { source_path: sourcePath, dest_path: destPath },
+      )
+      return data
+    },
+    enabled:
+      !!sourcePath &&
+      sourcePath.trim().length > 0 &&
+      !!destPath &&
+      destPath.trim().length > 0,
+    retry: 1,
+    staleTime: 10000,
   })
 }
 

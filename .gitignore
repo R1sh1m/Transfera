@@ -77,3 +77,6 @@ digest.txt
 AGENTS.md
 skills-lock.json
 Transfera_Architecture_Spec_v2.pdf
+
+# Exclude internal backend testing scripts
+backend/tests/

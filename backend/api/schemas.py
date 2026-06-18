@@ -118,6 +118,8 @@ class SessionInfo(BaseModel):
     total_items: int
     completed_items: int
     failed_items: int
+    total_bytes_volume: Optional[int] = None
+    session_report_path: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     started_at: Optional[datetime] = None
@@ -269,6 +271,28 @@ class FolderMetadataRequest(BaseModel):
 class FolderMetadataResponse(BaseModel):
     path: str
     size_gb: float
+    file_count: int
+
+
+# ---------------------------------------------------------------------------
+# Preflight Disk Validation
+# ---------------------------------------------------------------------------
+class PreflightValidateRequest(BaseModel):
+    source_path: str = Field(..., min_length=1, description="Source directory to measure")
+    dest_path: str = Field(..., min_length=1, description="Destination drive/directory to check free space")
+
+    @field_validator("source_path", "dest_path")
+    @classmethod
+    def path_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("path must not be blank")
+        return v.strip()
+
+
+class PreflightValidateResponse(BaseModel):
+    source_size_bytes: int
+    dest_free_bytes: int
+    is_sufficient: bool
     file_count: int
 
 

@@ -22,5 +22,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     isMaximized: () => electron_1.ipcRenderer.invoke('window:isMaximized'),
     // Backend status
     getBackendStatus: () => electron_1.ipcRenderer.invoke('backend:status'),
+    // Shell
+    showItemInFolder: (fullPath) => electron_1.ipcRenderer.invoke('shell:showItemInFolder', fullPath),
 });
 //# sourceMappingURL=preload.js.map

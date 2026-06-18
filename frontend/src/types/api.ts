@@ -67,6 +67,8 @@ export interface SessionInfo {
   updated_at: string
   started_at?: string
   completed_at?: string
+  total_bytes_volume?: number
+  session_report_path?: string
 }
 
 export interface SessionList {
@@ -203,6 +205,19 @@ export interface WSEvent {
   event: WSEventType
   data: Record<string, unknown>
   timestamp: string
+}
+
+// --- Preflight Disk Validation --------------------------------------------
+export interface PreflightValidateRequest {
+  source_path: string
+  dest_path: string
+}
+
+export interface PreflightValidateResponse {
+  source_size_bytes: number
+  dest_free_bytes: number
+  is_sufficient: boolean
+  file_count: number
 }
 
 // --- Error ----------------------------------------------------------------

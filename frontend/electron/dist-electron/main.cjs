@@ -119,7 +119,7 @@ function createWindow() {
         titleBarStyle: 'hidden',
         backgroundColor: '#ffffff',
         webPreferences: {
-            preload: path_1.default.join(__dirname, 'preload.js'),
+            preload: path_1.default.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: false,
@@ -198,6 +198,10 @@ function registerIPC() {
     });
     electron_1.ipcMain.handle('window:close', () => mainWindow?.close());
     electron_1.ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
+    // Shell
+    electron_1.ipcMain.handle('shell:showItemInFolder', (_event, fullPath) => {
+        electron_1.shell.showItemInFolder(fullPath);
+    });
     // System info
     electron_1.ipcMain.handle('system:platform', () => process.platform);
     electron_1.ipcMain.handle('system:version', () => electron_1.app.getVersion());

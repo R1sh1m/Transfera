@@ -35,6 +35,9 @@ export interface ElectronAPI {
 
   // Backend status
   getBackendStatus: () => Promise<{ running: boolean; port: number }>
+
+  // Shell
+  showItemInFolder: (fullPath: string) => Promise<void>
 }
 
 declare global {

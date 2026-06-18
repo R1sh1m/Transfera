@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -30,6 +32,8 @@ from backend.api.schemas import (
     HealthResponse,
     MediaItemInfo,
     MediaList,
+    PreflightValidateRequest,
+    PreflightValidateResponse,
     ScanRequest,
     ScanResponse,
     SessionActionResponse,
@@ -65,6 +69,7 @@ from backend.engines.cache_manager import cache_batch
 from backend.engines.duplicate_detector import check_batch
 from backend.engines.importer import import_batch
 from backend.engines.recovery import recover_interrupted_batches
+from backend.engines.reporter import generate_session_report
 from backend.engines.scanner import scan as run_scan
 
 logger = logging.getLogger(__name__)
@@ -353,6 +358,18 @@ async def _run_transfer_background(session_id: int) -> None:
             "failed_items": ts.failed_items if ts else 0,
         })
 
+        # --- Post-session report generation ---
+        try:
+            report_path = await generate_session_report(session_id)
+            async with session_scope() as session:
+                ts = await session.get(TransferSession, session_id)
+                if ts:
+                    ts.session_report_path = str(report_path)
+                    ts.touch()
+            logger.info("Session %d report saved at %s", session_id, report_path)
+        except Exception as report_exc:
+            logger.error("Failed to generate report for session %d: %s", session_id, report_exc)
+
     except Exception as exc:
         logger.error("Transfer background failed for session %d: %s", session_id, exc)
         await ws_events.emit_error(session_id, str(exc))
@@ -362,6 +379,18 @@ async def _run_transfer_background(session_id: int) -> None:
                 ts.status = SessionStatus.FAILED.value
                 ts.error_message = str(exc)
                 ts.touch()
+
+        # --- Post-session report generation (failure case) ---
+        try:
+            report_path = await generate_session_report(session_id)
+            async with session_scope() as session:
+                ts = await session.get(TransferSession, session_id)
+                if ts:
+                    ts.session_report_path = str(report_path)
+                    ts.touch()
+            logger.info("Session %d failure report saved at %s", session_id, report_path)
+        except Exception as report_exc:
+            logger.error("Failed to generate failure report for session %d: %s", session_id, report_exc)
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +611,120 @@ async def get_folder_metadata(req: FolderMetadataRequest) -> FolderMetadataRespo
 
 
 # ---------------------------------------------------------------------------
+# Preflight Disk Capacity Validation
+# ---------------------------------------------------------------------------
+def _scan_source_volume(source_path: str) -> dict:
+    """Walk source directory with os.scandir and return aggregate size + file count."""
+    total_bytes = 0
+    file_count = 0
+    try:
+        with os.scandir(source_path) as scanner:
+            for entry in scanner:
+                if entry.is_file(follow_symlinks=False):
+                    try:
+                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+                    file_count += 1
+                elif entry.is_dir(follow_symlinks=False):
+                    for sub_file in _scan_dir_tree(entry.path):
+                        total_bytes += sub_file[0]
+                        file_count += sub_file[1]
+    except FileNotFoundError:
+        return {"source_size_bytes": 0, "file_count": 0, "exists": False}
+    except PermissionError:
+        return {"source_size_bytes": 0, "file_count": 0, "exists": False}
+    return {"source_size_bytes": total_bytes, "file_count": file_count, "exists": True}
+
+
+def _scan_dir_tree(dir_path: str) -> list[tuple[int, int]]:
+    """Recursive scandir walker yielding (byte_size, file_count) per subdirectory."""
+    results: list[tuple[int, int]] = []
+    try:
+        with os.scandir(dir_path) as scanner:
+            for entry in scanner:
+                if entry.is_file(follow_symlinks=False):
+                    try:
+                        sz = entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        sz = 0
+                    results.append((sz, 1))
+                elif entry.is_dir(follow_symlinks=False):
+                    results.extend(_scan_dir_tree(entry.path))
+    except (FileNotFoundError, PermissionError):
+        pass
+    return results
+
+
+def _get_dest_free_space(dest_path: str) -> int:
+    """Return free bytes on the drive hosting dest_path."""
+    usage = shutil.disk_usage(dest_path)
+    return usage.free
+
+
+def _preflight_validate_sync(source_path: str, dest_path: str) -> dict:
+    """Synchronous pre-flight: source volume scan + destination free space check."""
+    source = _scan_source_volume(source_path)
+    dest_free = _get_dest_free_space(dest_path)
+
+    source_size = source["source_size_bytes"]
+    is_sufficient = dest_free >= source_size
+
+    return {
+        "source_size_bytes": source_size,
+        "dest_free_bytes": dest_free,
+        "is_sufficient": is_sufficient,
+        "file_count": source["file_count"],
+    }
+
+
+@router.post("/utils/preflight-validate", response_model=PreflightValidateResponse)
+async def preflight_validate(req: PreflightValidateRequest) -> PreflightValidateResponse:
+    """Pre-flight disk capacity check: compare source volume against destination free space."""
+    # Validate paths exist
+    if not Path(req.source_path).exists():
+        raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
+    if not Path(req.dest_path).exists():
+        raise HTTPException(status_code=404, detail=f"Destination path not found: {req.dest_path}")
+
+    try:
+        result = await asyncio.to_thread(_preflight_validate_sync, req.source_path, req.dest_path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Preflight validation failed: {exc}")
+
+    # --- Logging warnings ---
+    src_human = _format_size(result["source_size_bytes"])
+    free_human = _format_size(result["dest_free_bytes"])
+
+    if not result["is_sufficient"]:
+        logger.warning(
+            "PREFLIGHT BLOCKED: destination free space (%s) is LESS than source volume (%s, %d files) "
+            "at dest=%s",
+            free_human, src_human, result["file_count"], req.dest_path,
+        )
+    else:
+        margin = result["dest_free_bytes"] - result["source_size_bytes"]
+        if margin < result["source_size_bytes"] * 0.1:
+            logger.warning(
+                "PREFLIGHT WARNING: destination free space (%s) is dangerously close to source volume "
+                "(%s, %d files) — only %s headroom at dest=%s",
+                free_human, src_human, result["file_count"], _format_size(margin), req.dest_path,
+            )
+        else:
+            logger.info(
+                "PREFLIGHT OK: source=%s (%d files), dest_free=%s at dest=%s",
+                src_human, result["file_count"], free_human, req.dest_path,
+            )
+
+    return PreflightValidateResponse(
+        source_size_bytes=result["source_size_bytes"],
+        dest_free_bytes=result["dest_free_bytes"],
+        is_sufficient=result["is_sufficient"],
+        file_count=result["file_count"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
 async def ws_transfer(websocket: WebSocket, session_id: int) -> None:
@@ -613,6 +756,8 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
         total_items=ts.total_items,
         completed_items=ts.completed_items,
         failed_items=ts.failed_items,
+        total_bytes_volume=ts.total_bytes_volume,
+        session_report_path=ts.session_report_path,
         created_at=ts.created_at,
         updated_at=ts.updated_at,
         started_at=ts.started_at,

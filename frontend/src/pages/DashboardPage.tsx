@@ -21,11 +21,22 @@ import {
   Database,
   Shield,
   Zap,
+  FileText,
 } from 'lucide-react'
 import { useSessionList, useRecovery, useFolderMetadata } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
-import { cn } from '@/lib/utils'
+import { cn, isElectron } from '@/lib/utils'
 import type { SessionInfo, SessionStatus } from '@/types/api'
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  return `${(bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${units[i]}`
+}
 
 // ---------------------------------------------------------------------------
 // Status Badge
@@ -52,30 +63,7 @@ function StatusBadge({ status }: { status: SessionStatus }) {
 }
 
 // ---------------------------------------------------------------------------
-// Progress Bar
-// ---------------------------------------------------------------------------
-function ProgressBar({ completed, total }: { completed: number; total: number }) {
-  const pct = total > 0 ? Math.round((completed / total) * 100) : 0
-  return (
-    <div className="w-full">
-      <div className="flex justify-between text-xs text-muted-foreground mb-1">
-        <span>{completed} / {total} files</span>
-        <span>{pct}%</span>
-      </div>
-      <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
-        <motion.div
-          className="h-full bg-primary rounded-full"
-          initial={{ width: 0 }}
-          animate={{ width: `${pct}%` }}
-          transition={{ duration: 0.3 }}
-        />
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Directory Metrics Card — live folder-metadata endpoint
+// Directory Metrics Card
 // ---------------------------------------------------------------------------
 interface DirMetricsCardProps {
   label: string
@@ -150,61 +138,6 @@ function DirMetricsCard({ label, sublabel, icon, iconBg, path, sessionName, tran
 }
 
 // ---------------------------------------------------------------------------
-// Session Card
-// ---------------------------------------------------------------------------
-function SessionCard({ session }: { session: SessionInfo }) {
-  const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
-  const initTransfer = useTransferStore((s) => s.initTransfer)
-
-  const handleResume = () => {
-    initTransfer(session)
-    setCurrentPage('transfer')
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="bg-card border border-border rounded-lg p-4 hover:shadow-md transition-shadow"
-    >
-      <div className="flex items-start justify-between mb-3">
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold text-foreground truncate">{session.session_name}</h3>
-          <p className="text-xs text-muted-foreground mt-0.5 truncate">{session.source_root}</p>
-        </div>
-        <StatusBadge status={session.status} />
-      </div>
-
-      <ProgressBar completed={session.completed_items} total={session.total_items} />
-
-      <div className="flex items-center justify-between mt-3">
-        <span className="text-xs text-muted-foreground">
-          {new Date(session.created_at).toLocaleDateString()}
-        </span>
-        {session.status === 'paused' && (
-          <button
-            onClick={handleResume}
-            className="no-drag inline-flex items-center gap-1 px-2.5 py-1 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors"
-          >
-            <Play className="w-3 h-3" />
-            Resume
-          </button>
-        )}
-        {session.status === 'completed' && (
-          <button
-            onClick={handleResume}
-            className="no-drag inline-flex items-center gap-1 px-2.5 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
-          >
-            <ArrowRight className="w-3 h-3" />
-            View
-          </button>
-        )}
-      </div>
-    </motion.div>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Resume Alert
 // ---------------------------------------------------------------------------
 function ResumeAlert() {
@@ -260,6 +193,96 @@ const sysStats = [
 ]
 
 // ---------------------------------------------------------------------------
+// Session Table Row
+// ---------------------------------------------------------------------------
+function SessionRow({ session }: { session: SessionInfo }) {
+  const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
+  const initTransfer = useTransferStore((s) => s.initTransfer)
+
+  const handleResume = () => {
+    initTransfer(session)
+    setCurrentPage('transfer')
+  }
+
+  const handleViewReport = () => {
+    if (session.session_report_path) {
+      window.electronAPI?.showItemInFolder(session.session_report_path)
+    }
+  }
+
+  return (
+    <tr className="border-b border-border hover:bg-muted/30 transition-colors">
+      <td className="py-2.5 pr-3">
+        <StatusBadge status={session.status} />
+      </td>
+      <td className="py-2.5 pr-3">
+        <p className="text-sm font-medium text-foreground truncate max-w-[180px]" title={session.session_name}>
+          {session.session_name}
+        </p>
+      </td>
+      <td className="py-2.5 pr-3">
+        <p className="text-xs text-muted-foreground truncate max-w-[220px]" title={session.source_root}>
+          {session.source_root}
+        </p>
+      </td>
+      <td className="py-2.5 pr-3">
+        <p className="text-xs text-muted-foreground truncate max-w-[220px]" title={session.dest_root}>
+          {session.dest_root}
+        </p>
+      </td>
+      <td className="py-2.5 pr-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">
+            {session.completed_items.toLocaleString()} / {session.total_items.toLocaleString()}
+          </span>
+          {session.total_bytes_volume != null && session.total_bytes_volume > 0 && (
+            <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+              {formatBytes(session.total_bytes_volume)}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="py-2.5 pr-3">
+        <span className="text-xs text-muted-foreground">
+          {new Date(session.created_at).toLocaleDateString()}
+        </span>
+      </td>
+      <td className="py-2.5">
+        <div className="flex items-center gap-1.5">
+          {session.status === 'paused' && (
+            <button
+              onClick={handleResume}
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors"
+            >
+              <Play className="w-3 h-3" />
+              Resume
+            </button>
+          )}
+          {session.status === 'completed' && session.session_report_path && isElectron && (
+            <button
+              onClick={handleViewReport}
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
+            >
+              <FileText className="w-3 h-3" />
+              Report
+            </button>
+          )}
+          {session.status === 'completed' && (
+            <button
+              onClick={handleResume}
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
+            >
+              <ArrowRight className="w-3 h-3" />
+              View
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 export default function DashboardPage() {
@@ -268,7 +291,6 @@ export default function DashboardPage() {
   const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot)
   const destRoot = useTransferStore((s) => s.transfer.destRoot)
 
-  // Pull paths from most recent session if no active transfer
   const latestSession = sessionList?.sessions[0]
   const activeSource = sourceRoot || latestSession?.source_root || null
   const activeDest = destRoot || latestSession?.dest_root || null
@@ -286,7 +308,7 @@ export default function DashboardPage() {
       {/* Resume Alert */}
       <ResumeAlert />
 
-      {/* Directory Metrics — live folder-metadata */}
+      {/* Directory Metrics */}
       <div className="grid grid-cols-2 gap-3">
         <DirMetricsCard
           label="Source Directory"
@@ -340,7 +362,7 @@ export default function DashboardPage() {
         <ArrowRight className="w-5 h-5" />
       </motion.button>
 
-      {/* Session History */}
+      {/* Session History Table */}
       <div>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold text-foreground">Recent Sessions</h2>
@@ -350,12 +372,15 @@ export default function DashboardPage() {
         </div>
 
         {isLoading ? (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="bg-card border border-border rounded-lg p-6 space-y-3">
             {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="bg-card border border-border rounded-lg p-4 animate-pulse">
-                <div className="h-4 bg-muted rounded w-1/2 mb-2" />
-                <div className="h-3 bg-muted rounded w-3/4 mb-3" />
-                <div className="h-1.5 bg-muted rounded-full" />
+              <div key={i} className="flex items-center gap-4 animate-pulse">
+                <div className="h-5 w-16 bg-muted rounded-full" />
+                <div className="h-4 bg-muted rounded w-32" />
+                <div className="h-4 bg-muted rounded w-48" />
+                <div className="h-4 bg-muted rounded w-48" />
+                <div className="h-4 bg-muted rounded w-20" />
+                <div className="h-4 bg-muted rounded w-16" />
               </div>
             ))}
           </div>
@@ -365,10 +390,25 @@ export default function DashboardPage() {
             <p className="text-sm text-muted-foreground">No sessions yet. Start your first backup!</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
-            {sessionList?.sessions.map((s) => (
-              <SessionCard key={s.id} session={s} />
-            ))}
+          <div className="bg-card border border-border rounded-lg overflow-hidden">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border bg-muted/30">
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 px-4 pr-3 w-[100px]">Status</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[180px]">Session</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">Source</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">Destination</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[160px]">Progress</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[90px]">Date</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 w-[120px]">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessionList?.sessions.map((s) => (
+                  <SessionRow key={s.id} session={s} />
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

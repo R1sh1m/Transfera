@@ -18,7 +18,7 @@ import {
   Info,
 } from 'lucide-react'
 import { useTransferStore } from '@/store/transfer'
-import { cn } from '@/lib/utils'
+import { cn, isElectron } from '@/lib/utils'
 import type { UIState } from '@/store/transfer'
 
 import DashboardPage from '@/pages/DashboardPage'
@@ -145,26 +145,28 @@ function TitleBar() {
         <HardDrive className="w-4 h-4 text-primary" />
         <span className="text-sm font-semibold text-foreground">Transfera</span>
       </div>
-      <div className="no-drag flex items-center gap-1">
-        <button
-          onClick={() => window.electronAPI?.minimizeWindow()}
-          className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
-        >
-          <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1"/></svg>
-        </button>
-        <button
-          onClick={() => window.electronAPI?.maximizeWindow()}
-          className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
-        </button>
-        <button
-          onClick={() => window.electronAPI?.closeWindow()}
-          className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 1L9 9M9 1L1 9"/></svg>
-        </button>
-      </div>
+      {isElectron && (
+        <div className="no-drag flex items-center gap-1">
+          <button
+            onClick={() => window.electronAPI?.minimizeWindow()}
+            className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
+          >
+            <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1"/></svg>
+          </button>
+          <button
+            onClick={() => window.electronAPI?.maximizeWindow()}
+            className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
+          </button>
+          <button
+            onClick={() => window.electronAPI?.closeWindow()}
+            className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 1L9 9M9 1L1 9"/></svg>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

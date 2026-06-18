@@ -359,8 +359,8 @@ def _launch_backend() -> subprocess.Popen | None:
 
 
 def _launch_frontend_dev() -> subprocess.Popen | None:
-    _info(f"Starting Vite dev server on port {VITE_PORT}...")
-    cmd = ["npm", "run", "dev"]
+    _info(f"Starting Electron dev shell (Vite + Electron on port {VITE_PORT})...")
+    cmd = ["npm", "run", "electron:dev"]
     try:
         proc = subprocess.Popen(
             cmd,
@@ -370,10 +370,10 @@ def _launch_frontend_dev() -> subprocess.Popen | None:
             shell=IS_WINDOWS,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
         )
-        _ok(f"Frontend process started (PID {proc.pid})")
+        _ok(f"Electron dev process started (PID {proc.pid})")
         return proc
     except OSError as exc:
-        _err(f"Failed to start frontend: {exc}")
+        _err(f"Failed to start Electron dev shell: {exc}")
         return None
 
 
@@ -451,7 +451,7 @@ def main() -> None:
     |          Transfera v2  Dev Stack           |
     |     Backend : http://127.0.0.1:{BACKEND_PORT}      |
     |     Frontend: http://127.0.0.1:{BACKEND_PORT}      |
-    |     Vite:    http://127.0.0.1:{VITE_PORT}  (dev)  |
+    |     Electron: Vite + Electron (dev)   |
     +------------------------------------------+
 {_C.RESET}""")
 
