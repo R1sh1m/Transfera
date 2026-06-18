@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Zustand Transfer Store
+// Transfera v2 — Zustand Transfer Store
 // Global client-side state for real-time transfer tracking and WS events.
 // ---------------------------------------------------------------------------
 
@@ -14,6 +14,7 @@ import type {
   HopStatus,
   BatchStatus,
   SessionStatus,
+  TransferMode,
 } from '@/types/api'
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,7 @@ export interface TransferSnapshot {
   sessionName: string
   sourceRoot: string
   destRoot: string
+  transferMode: TransferMode
   status: SessionStatus
   totalItems: number
   completedItems: number
@@ -124,6 +126,7 @@ const initialTransfer: TransferSnapshot = {
   sessionName: '',
   sourceRoot: '',
   destRoot: '',
+  transferMode: 'copy',
   status: 'created',
   totalItems: 0,
   completedItems: 0,
@@ -405,6 +408,7 @@ export const useTransferStore = create<TransferStore>((set) => ({
         sessionName: session.session_name,
         sourceRoot: session.source_root,
         destRoot: session.dest_root,
+        transferMode: session.transfer_mode ?? 'copy',
         status: session.status,
         totalItems: session.total_items,
         completedItems: session.completed_items,

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Axios Client Configuration
+// Transfera v2 — Axios Client Configuration
 // Dynamically resolves the API base URL from the current origin so the app
 // works identically when served by FastAPI (port 47821) or Vite dev (5173).
 // ---------------------------------------------------------------------------

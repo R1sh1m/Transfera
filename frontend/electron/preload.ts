@@ -32,6 +32,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     buttons?: string[]
   }) => ipcRenderer.invoke('dialog:message', options),
 
+  // Directory picker — returns selected folder path or null
+  openDirectory: (defaultPath?: string) =>
+    ipcRenderer.invoke('dialog:open-directory', defaultPath),
+
   // Window controls
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),

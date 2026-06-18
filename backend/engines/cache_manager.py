@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Cache Manager (Hop 1: Source -> PC Local Cache)
+Transfera v2 — Cache Manager (Hop 1: Source -> PC Local Cache)
 Stream-by-stream copy with simultaneous BLAKE3 hash computation.
 Writes .partial first; renames on verified hash match.
 """

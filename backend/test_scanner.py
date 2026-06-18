@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Scanner Test Suite
+Transfera v2 — Scanner Test Suite
 Verifies chronological sorting, Live Photo UUID grouping, and dedup behaviour.
 Run: python -m backend.test_scanner
 """
@@ -293,7 +293,7 @@ async def test_empty_dir_scan() -> None:
 # ======================================================================
 async def main() -> None:
     print("=" * 60)
-    print("  MediaVault v2 — Scanner Test Suite")
+    print("  Transfera v2 — Scanner Test Suite")
     print("=" * 60)
 
     # Pure-logic tests (no DB)

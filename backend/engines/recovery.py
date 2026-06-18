@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Crash Recovery
+Transfera v2 — Crash Recovery
 Handles interrupted batches on startup:
   - LOADING (Hop 1 interrupted): delete partials, reset items to PENDING.
   - ARCHIVED (Hop 2 interrupted): verify destination, mark VERIFIED or retry.

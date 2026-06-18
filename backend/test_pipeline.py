@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Pipeline Interruption Test Suite
+Transfera v2 — Pipeline Interruption Test Suite
 Tests crash recovery, .partial cleanup, and data integrity across Hop 1 & 2.
 Run: python -m backend.test_pipeline
 """
@@ -510,7 +510,7 @@ async def test_pipeline_integrity() -> None:
 # ======================================================================
 async def main() -> None:
     print("=" * 60)
-    print("  MediaVault v2 -- Pipeline Integrity Test Suite")
+    print("  Transfera v2 — Pipeline Integrity Test Suite")
     print("=" * 60)
 
     await _reset_db()

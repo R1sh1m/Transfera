@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Core Database & Hashing Tests
+Transfera v2 — Core Database & Hashing Tests
 Run: python -m backend.test_db_core
 """
 
@@ -223,7 +223,7 @@ def test_hashing_sync() -> None:
 
     # Create a temp file with known content
     with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
-        f.write(b"MediaVault v2 hashing test payload 1234567890")
+        f.write(b"Transfera v2 hashing test payload 1234567890")
         tmp_path = Path(f.name)
 
     try:
@@ -293,7 +293,7 @@ async def test_hashing_async() -> None:
 # ======================================================================
 async def main() -> None:
     print("=" * 60)
-    print("  MediaVault v2 — Core DB & Hashing Test Suite")
+    print("  Transfera v2 — Core DB & Hashing Test Suite")
     print("=" * 60)
 
     await test_database()

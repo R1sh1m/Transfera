@@ -1,5 +1,5 @@
 """
-MediaVault v2 — File Organizer
+Transfera v2 — File Organizer
 Resolves hierarchical destination paths (Year/Month/Day) with conflict
 resolution via numerical suffixes.  Live Photo pairs are placed in the
 same folder using the image component's timestamp.

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Error Boundary
+// Transfera v2 — Error Boundary
 // Catches rendering crashes and displays a recovery UI instead of a white screen.
 // ---------------------------------------------------------------------------
 
@@ -24,7 +24,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error('[MediaVault ErrorBoundary]', error, info.componentStack)
+    console.error('[Transfera ErrorBoundary]', error, info.componentStack)
   }
 
   handleReset = () => {

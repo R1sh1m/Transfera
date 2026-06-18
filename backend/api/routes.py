@@ -1,6 +1,6 @@
 """
-MediaVault v2 — API Routes
-All HTTP endpoints for the MediaVault backend.
+Transfera v2 — API Routes
+All HTTP endpoints for the Transfera backend.
 """
 
 from __future__ import annotations
@@ -19,10 +19,14 @@ from backend.api.schemas import (
     BatchInfo,
     BatchList,
     ConfigResponse,
+    DirSizeRequest,
+    DirSizeResponse,
     DuplicateCheckRequest,
     DuplicateReportResponse,
     DuplicateEntrySchema,
     ErrorResponse,
+    FolderMetadataRequest,
+    FolderMetadataResponse,
     HealthResponse,
     MediaItemInfo,
     MediaList,
@@ -177,6 +181,7 @@ async def create_session(req: SessionCreate) -> SessionInfo:
             session_name=req.session_name,
             source_root=req.source_root,
             dest_root=req.dest_root,
+            transfer_mode=req.transfer_mode,
         )
         session.add(ts)
         await session.flush()
@@ -490,6 +495,93 @@ async def trigger_recovery() -> SessionActionResponse:
 
 
 # ---------------------------------------------------------------------------
+# Directory Size Metrics
+# ---------------------------------------------------------------------------
+def _measure_directory(dir_path: str) -> dict:
+    """Synchronous directory traversal — total size, file count, folder count."""
+    total_bytes = 0
+    file_count = 0
+    folder_count = 0
+    p = Path(dir_path)
+    if not p.exists():
+        return {"total_bytes": 0, "file_count": 0, "folder_count": 0, "exists": False}
+    for entry in p.rglob("*"):
+        if entry.is_file():
+            try:
+                total_bytes += entry.stat().st_size
+            except OSError:
+                pass  # skip inaccessible files
+            file_count += 1
+        elif entry.is_dir():
+            folder_count += 1
+    return {"total_bytes": total_bytes, "file_count": file_count, "folder_count": folder_count, "exists": True}
+
+
+def _format_size(size_bytes: int) -> str:
+    """Convert bytes to a human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 ** 3:
+        return f"{size_bytes / (1024 ** 2):.1f} MB"
+    return f"{size_bytes / (1024 ** 3):.2f} GB"
+
+
+@router.post("/utils/dir-size", response_model=DirSizeResponse)
+async def get_dir_size(req: DirSizeRequest) -> DirSizeResponse:
+    try:
+        result = await asyncio.to_thread(_measure_directory, req.path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot measure directory: {exc}")
+
+    if not result["exists"]:
+        raise HTTPException(status_code=404, detail=f"Path not found: {req.path}")
+
+    return DirSizeResponse(
+        path=req.path,
+        total_bytes=result["total_bytes"],
+        file_count=result["file_count"],
+        folder_count=result["folder_count"],
+        readable=_format_size(result["total_bytes"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Folder Metadata (lightweight size + count for dashboard cards)
+# ---------------------------------------------------------------------------
+def _measure_folder_metadata(dir_path: str) -> dict:
+    """Synchronous directory traversal returning size in GB and file count."""
+    total_bytes = 0
+    file_count = 0
+    p = Path(dir_path)
+    if not p.exists():
+        return {"size_gb": 0.0, "file_count": 0}
+    for entry in p.rglob("*"):
+        if entry.is_file():
+            try:
+                total_bytes += entry.stat().st_size
+            except OSError:
+                pass
+            file_count += 1
+    return {"size_gb": round(total_bytes / (1024 ** 3), 2), "file_count": file_count}
+
+
+@router.post("/utils/folder-metadata", response_model=FolderMetadataResponse)
+async def get_folder_metadata(req: FolderMetadataRequest) -> FolderMetadataResponse:
+    """Return aggregate file size (GB) and file count for a directory."""
+    try:
+        result = await asyncio.to_thread(_measure_folder_metadata, req.path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot measure folder: {exc}")
+    return FolderMetadataResponse(
+        path=req.path,
+        size_gb=result["size_gb"],
+        file_count=result["file_count"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
 async def ws_transfer(websocket: WebSocket, session_id: int) -> None:
@@ -516,6 +608,7 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
         session_name=ts.session_name,
         source_root=ts.source_root,
         dest_root=ts.dest_root,
+        transfer_mode=ts.transfer_mode,
         status=ts.status,
         total_items=ts.total_items,
         completed_items=ts.completed_items,

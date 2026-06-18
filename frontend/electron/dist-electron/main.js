@@ -115,7 +115,7 @@ function createWindow() {
         height: 800,
         minWidth: 800,
         minHeight: 600,
-        title: 'MediaVault',
+        title: 'Transfera',
         titleBarStyle: 'hidden',
         backgroundColor: '#ffffff',
         webPreferences: {

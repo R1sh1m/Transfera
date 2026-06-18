@@ -1,5 +1,5 @@
 """
-MediaVault v2 -- Metadata Extractor
+Transfera v2 — Metadata Extractor
 ExifTool subprocess integration with automated bootstrapper and filesystem fallback.
 
 Bootstrapper priority:
@@ -174,7 +174,7 @@ def _fetch_latest_version() -> str | None:
     try:
         req = Request(
             _EXIFTOOL_HOME,
-            headers={"User-Agent": "MediaVault/2.0"},
+            headers={"User-Agent": "Transfera/2.0"},
         )
         with urlopen(req, timeout=_CONNECT_TIMEOUT) as resp:
             html = resp.read().decode("utf-8", errors="replace")
@@ -215,7 +215,7 @@ def _download_exiftool() -> Path | None:
     zip_path = tmp_dir / zip_name
 
     try:
-        req = Request(url, headers={"User-Agent": "MediaVault/2.0"})
+        req = Request(url, headers={"User-Agent": "Transfera/2.0"})
         with urlopen(req, timeout=_READ_TIMEOUT) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0

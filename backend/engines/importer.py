@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Importer (Hop 2: PC Cache -> Organised Destination)
+Transfera v2 — Importer (Hop 2: PC Cache -> Organised Destination)
 Copies cached files to the destination archive, verifies against cache_hash,
 and handles Move Mode (unlink source after verified commit).
 """

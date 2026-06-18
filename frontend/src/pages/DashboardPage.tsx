@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Dashboard Page
-// Activity cards, historical session logs, amber alert for paused workloads.
+// Transfera v2 — Dashboard Page
+// Live system metrics, directory analysis, session management.
 // ---------------------------------------------------------------------------
 
 import { motion } from 'framer-motion'
@@ -12,25 +12,33 @@ import {
   AlertTriangle,
   RefreshCw,
   ArrowRight,
+  Folder,
+  Archive,
+  Loader2,
+  Copy,
+  ArrowRightLeft,
   Activity,
-  Zap,
   Database,
   Shield,
+  Zap,
 } from 'lucide-react'
-import { useSessionList, useRecovery } from '@/lib/queries'
+import { useSessionList, useRecovery, useFolderMetadata } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { cn } from '@/lib/utils'
 import type { SessionInfo, SessionStatus } from '@/types/api'
 
+// ---------------------------------------------------------------------------
+// Status Badge
+// ---------------------------------------------------------------------------
 const fallbackBadge = { color: 'text-muted-foreground', bg: 'bg-muted', icon: <Clock className="w-3.5 h-3.5" /> }
 
 const statusConfig: Record<SessionStatus, { color: string; bg: string; icon: React.ReactNode }> = {
-  created:   { color: 'text-muted-foreground', bg: 'bg-muted',         icon: <Clock className="w-3.5 h-3.5" /> },
-  running:   { color: 'text-blue-600',         bg: 'bg-blue-50',       icon: <Play className="w-3.5 h-3.5" /> },
-  paused:    { color: 'text-amber-600',        bg: 'bg-amber-50',      icon: <AlertTriangle className="w-3.5 h-3.5" /> },
-  completed: { color: 'text-green-600',        bg: 'bg-green-50',      icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
-  failed:    { color: 'text-red-600',           bg: 'bg-red-50',         icon: <AlertTriangle className="w-3.5 h-3.5" /> },
-  cancelled: { color: 'text-muted-foreground', bg: 'bg-muted',         icon: <Clock className="w-3.5 h-3.5" /> },
+  created:   { color: 'text-muted-foreground', bg: 'bg-muted',               icon: <Clock className="w-3.5 h-3.5" /> },
+  running:   { color: 'text-blue-600 dark:text-blue-400',   bg: 'bg-blue-50 dark:bg-blue-950',   icon: <Play className="w-3.5 h-3.5" /> },
+  paused:    { color: 'text-amber-600 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-950', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
+  completed: { color: 'text-green-600 dark:text-green-400', bg: 'bg-green-50 dark:bg-green-950', icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
+  failed:    { color: 'text-red-600 dark:text-red-400',     bg: 'bg-red-50 dark:bg-red-950',     icon: <AlertTriangle className="w-3.5 h-3.5" /> },
+  cancelled: { color: 'text-muted-foreground', bg: 'bg-muted',               icon: <Clock className="w-3.5 h-3.5" /> },
 }
 
 function StatusBadge({ status }: { status: SessionStatus }) {
@@ -43,6 +51,9 @@ function StatusBadge({ status }: { status: SessionStatus }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Progress Bar
+// ---------------------------------------------------------------------------
 function ProgressBar({ completed, total }: { completed: number; total: number }) {
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0
   return (
@@ -63,6 +74,84 @@ function ProgressBar({ completed, total }: { completed: number; total: number })
   )
 }
 
+// ---------------------------------------------------------------------------
+// Directory Metrics Card — live folder-metadata endpoint
+// ---------------------------------------------------------------------------
+interface DirMetricsCardProps {
+  label: string
+  sublabel: string
+  icon: React.ReactNode
+  iconBg: string
+  path: string | null
+  sessionName?: string
+  transferMode?: 'copy' | 'move'
+}
+
+function DirMetricsCard({ label, sublabel, icon, iconBg, path, sessionName, transferMode }: DirMetricsCardProps) {
+  const { data: metrics, isLoading } = useFolderMetadata(path)
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-4">
+      <div className="flex items-center gap-3 mb-3">
+        <div className={cn('w-9 h-9 rounded-lg flex items-center justify-center', iconBg)}>
+          {icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-foreground">{label}</p>
+          <p className="text-[11px] text-muted-foreground truncate" title={path ?? undefined}>
+            {path || 'No path selected'}
+          </p>
+        </div>
+        {sessionName && (
+          <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]" title={sessionName}>
+            {sessionName}
+          </span>
+        )}
+      </div>
+
+      {isLoading && path ? (
+        <div className="flex items-center gap-2 py-2">
+          <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
+          <span className="text-xs text-muted-foreground">Analyzing...</span>
+        </div>
+      ) : metrics ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="text-center">
+              <p className="text-sm font-bold text-foreground">{metrics.size_gb} GB</p>
+              <p className="text-[10px] text-muted-foreground">Total Size</p>
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-bold text-foreground">{metrics.file_count.toLocaleString()}</p>
+              <p className="text-[10px] text-muted-foreground">Files</p>
+            </div>
+          </div>
+          {transferMode && (
+            <div className="flex items-center justify-center gap-1.5 pt-1 border-t border-border">
+              {transferMode === 'copy' ? (
+                <Copy className="w-3 h-3 text-blue-500 dark:text-blue-400" />
+              ) : (
+                <ArrowRightLeft className="w-3 h-3 text-amber-500 dark:text-amber-400" />
+              )}
+              <span className={cn(
+                'text-[10px] font-medium',
+                transferMode === 'copy' ? 'text-blue-600 dark:text-blue-400' : 'text-amber-600 dark:text-amber-400',
+              )}>
+                {transferMode === 'copy' ? 'Backup (Copy)' : 'Space Saver (Move)'}
+              </span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground py-2">{sublabel}</p>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Session Card
+// ---------------------------------------------------------------------------
 function SessionCard({ session }: { session: SessionInfo }) {
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
   const initTransfer = useTransferStore((s) => s.initTransfer)
@@ -115,6 +204,9 @@ function SessionCard({ session }: { session: SessionInfo }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Resume Alert
+// ---------------------------------------------------------------------------
 function ResumeAlert() {
   const { data: sessionList } = useSessionList(1, 100)
   const recovery = useRecovery()
@@ -128,17 +220,17 @@ function ResumeAlert() {
     <motion.div
       initial={{ opacity: 0, y: -8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6"
+      className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mb-6"
     >
       <div className="flex items-start gap-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
-          <AlertTriangle className="w-4 h-4 text-amber-600" />
+        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-900 flex items-center justify-center">
+          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-semibold text-amber-800">
+          <h3 className="text-sm font-semibold text-amber-800 dark:text-amber-200">
             Interrupted Workloads Detected
           </h3>
-          <p className="text-xs text-amber-700 mt-1">
+          <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
             {pausedSessions.length} session{pausedSessions.length > 1 ? 's' : ''} can be resumed.
           </p>
           <div className="flex gap-2 mt-2">
@@ -157,31 +249,68 @@ function ResumeAlert() {
   )
 }
 
-const stats = [
-  { icon: Database, label: 'SQLite WAL', value: 'Atomic' },
+// ---------------------------------------------------------------------------
+// System Stats (static info badges)
+// ---------------------------------------------------------------------------
+const sysStats = [
+  { icon: Database, label: 'Storage', value: 'SQLite WAL' },
   { icon: Shield, label: 'Hashing', value: 'BLAKE3' },
   { icon: Zap, label: 'Pipeline', value: 'Two-Hop' },
   { icon: Activity, label: 'Status', value: 'Online' },
 ]
 
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
 export default function DashboardPage() {
   const { data: sessionList, isLoading } = useSessionList(1, 20)
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
+  const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot)
+  const destRoot = useTransferStore((s) => s.transfer.destRoot)
+
+  // Pull paths from most recent session if no active transfer
+  const latestSession = sessionList?.sessions[0]
+  const activeSource = sourceRoot || latestSession?.source_root || null
+  const activeDest = destRoot || latestSession?.dest_root || null
+  const activeSessionName = latestSession?.session_name
+  const activeTransferMode = latestSession?.transfer_mode
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
-        <p className="text-sm text-muted-foreground mt-1">Media backup overview and session management</p>
+        <p className="text-sm text-muted-foreground mt-1">Live system metrics and session management</p>
       </div>
 
       {/* Resume Alert */}
       <ResumeAlert />
 
-      {/* Stats Row */}
+      {/* Directory Metrics — live folder-metadata */}
+      <div className="grid grid-cols-2 gap-3">
+        <DirMetricsCard
+          label="Source Directory"
+          sublabel="Select a source path to analyze"
+          icon={<Folder className="w-4.5 h-4.5 text-blue-600 dark:text-blue-400" />}
+          iconBg="bg-blue-50 dark:bg-blue-950"
+          path={activeSource}
+          sessionName={activeSessionName}
+          transferMode={activeTransferMode}
+        />
+        <DirMetricsCard
+          label="Backup Destination"
+          sublabel="Select a destination path to analyze"
+          icon={<Archive className="w-4.5 h-4.5 text-green-600 dark:text-green-400" />}
+          iconBg="bg-green-50 dark:bg-green-950"
+          path={activeDest}
+          sessionName={activeSessionName}
+          transferMode={activeTransferMode}
+        />
+      </div>
+
+      {/* System Stats */}
       <div className="grid grid-cols-4 gap-3">
-        {stats.map((s) => (
+        {sysStats.map((s) => (
           <div key={s.label} className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
               <s.icon className="w-4.5 h-4.5 text-primary" />

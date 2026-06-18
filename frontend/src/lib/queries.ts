@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — React Query Hooks
+// Transfera v2 — React Query Hooks
 // Server-state bindings for all backend endpoints.
 // ---------------------------------------------------------------------------
 
@@ -7,6 +7,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import apiClient from './api-client'
 import type {
   ConfigResponse,
+  DirSizeResponse,
+  FolderMetadataResponse,
   HealthResponse,
   ScanRequest,
   ScanResponse,
@@ -192,6 +194,40 @@ export function useMediaList(params: {
       })
       return data
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Directory Size Metrics
+// ---------------------------------------------------------------------------
+export function useDirSize(path: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ['dir-size', path],
+    queryFn: async () => {
+      const { data } = await apiClient.post<DirSizeResponse>('/utils/dir-size', { path })
+      return data
+    },
+    enabled: enabled && !!path && path.trim().length > 0,
+    refetchInterval: 30000,
+    retry: 1,
+    staleTime: 15000,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Folder Metadata (lightweight size + count for dashboard)
+// ---------------------------------------------------------------------------
+export function useFolderMetadata(path: string | null) {
+  return useQuery({
+    queryKey: ['folder-metadata', path],
+    queryFn: async () => {
+      const { data } = await apiClient.post<FolderMetadataResponse>('/utils/folder-metadata', { path })
+      return data
+    },
+    enabled: !!path && path.trim().length > 0,
+    refetchInterval: 30000,
+    retry: 1,
+    staleTime: 15000,
   })
 }
 

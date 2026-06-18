@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Crash Recovery & Live Photo Integration Tests
+Transfera v2 — Crash Recovery & Live Photo Integration Tests
 Section 12 validation: 1000 HEIC crash recovery, Hop 2 archive verification,
 and HEIC+MOV Live Photo bundle resolution.
 Run: python -m backend.test_crash_recovery
@@ -556,7 +556,7 @@ async def test_mixed_bundle_crash() -> None:
 # ======================================================================
 async def main() -> None:
     print("=" * 60)
-    print("  MediaVault v2 -- Crash Recovery & Live Photo Tests")
+    print("  Transfera v2 — Crash Recovery & Live Photo Tests")
     print("=" * 60)
 
     await _reset_db()

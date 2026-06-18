@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Transfer Page
+// Transfera v2 — Transfer Page
 // Split layout: PreviewPanel (media thumbnails) + TransferMonitor (stats).
 // ---------------------------------------------------------------------------
 
@@ -320,7 +320,17 @@ export default function TransferPage() {
           </button>
           <div>
             <h1 className="text-lg font-bold text-foreground">{transfer.sessionName || 'Transfer'}</h1>
-            <p className="text-xs text-muted-foreground">{transfer.sourceRoot} {'->'} {transfer.destRoot}</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-xs text-muted-foreground">{transfer.sourceRoot} {'->'} {transfer.destRoot}</p>
+              <span className={cn(
+                'text-[10px] font-mono px-1.5 py-0.5 rounded',
+                transfer.transferMode === 'copy'
+                  ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300'
+                  : 'bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300',
+              )}>
+                {transfer.transferMode === 'copy' ? 'COPY' : 'MOVE'}
+              </span>
+            </div>
           </div>
         </div>
 

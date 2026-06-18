@@ -1,4 +1,4 @@
-# MediaVault v2 — Git Ignore
+# Transfera v2 — Git Ignore
 
 # --- Python ---
 __pycache__/
@@ -76,3 +76,4 @@ digest.txt
 .agents/
 AGENTS.md
 skills-lock.json
+Transfera_Architecture_Spec_v2.pdf

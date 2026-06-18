@@ -1,5 +1,5 @@
 """
-MediaVault v2 — FastAPI Engine
+Transfera v2 — FastAPI Engine
 Application entry point with lifespan management.
 Serves compiled React frontend as SPA from frontend/dist/.
 """
@@ -33,7 +33,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
-logger = logging.getLogger("mediavault")
+logger = logging.getLogger("transfera")
 
 # ---------------------------------------------------------------------------
 # Resolve the compiled React asset directory (frontend/dist/)
@@ -60,7 +60,7 @@ class SPAStaticFiles(StaticFiles):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: init DB + recovery. Shutdown: dispose engine."""
-    logger.info("MediaVault v2 starting on %s:%d", HOST, PORT)
+    logger.info("Transfera v2 starting on %s:%d", HOST, PORT)
 
     if not FRONTEND_DIST.is_dir():
         logger.warning(
@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     await dispose_engine()
-    logger.info("MediaVault v2 shutdown complete")
+    logger.info("Transfera v2 shutdown complete")
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="MediaVault v2",
+        title="Transfera v2",
         description="Local media backup engine",
         version="2.0.0",
         lifespan=lifespan,
@@ -128,7 +128,7 @@ def create_app() -> FastAPI:
         @app.get("/")
         async def root():
             return {
-                "name": "MediaVault Backend API",
+                "name": "Transfera Backend API",
                 "status": "active",
                 "version": "2.0.0",
                 "note": "Frontend not built — run 'npm run build' in frontend/",

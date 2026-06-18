@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Duplicate Modal
+// Transfera v2 — Duplicate Modal
 // Sheet modal for handling structural collisions with manual action selectors
 // and bulk execution toggles.
 // ---------------------------------------------------------------------------
@@ -30,14 +30,14 @@ const actionConfig: Record<DuplicateAction, { label: string; icon: React.ReactNo
   overwrite: {
     label: 'Overwrite',
     icon: <Trash2 className="w-4 h-4" />,
-    color: 'text-red-600',
-    bg: 'bg-red-50 hover:bg-red-100',
+    color: 'text-red-600 dark:text-red-400',
+    bg: 'bg-red-50 dark:bg-red-950 hover:bg-red-100 dark:hover:bg-red-900',
   },
   keep_both: {
     label: 'Keep Both',
     icon: <Copy className="w-4 h-4" />,
-    color: 'text-blue-600',
-    bg: 'bg-blue-50 hover:bg-blue-100',
+    color: 'text-blue-600 dark:text-blue-400',
+    bg: 'bg-blue-50 dark:bg-blue-950 hover:bg-blue-100 dark:hover:bg-blue-900',
   },
 }
 
@@ -96,7 +96,7 @@ function DuplicateEntryRow({
           </span>
           <span className={cn(
             'text-[10px] px-1.5 py-0.5 rounded',
-            entry.match_type === 'exact' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700',
+            entry.match_type === 'exact' ? 'bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300' : 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300',
           )}>
             {entry.match_type === 'exact' ? 'Exact Match' : 'Potential Match'}
           </span>
@@ -172,8 +172,8 @@ export default function DuplicateModal() {
               {/* Header */}
               <div className="flex items-center justify-between px-5 py-4 border-b border-border">
                 <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center">
-                    <AlertTriangle className="w-5 h-5 text-amber-600" />
+                  <div className="w-9 h-9 rounded-lg bg-amber-100 dark:bg-amber-900 flex items-center justify-center">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400" />
                   </div>
                   <div>
                     <h2 className="text-base font-semibold text-foreground">Duplicate Files Detected</h2>

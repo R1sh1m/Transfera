@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Library Page
+// Transfera v2 — Library Page
 // Masonry view of completed items with infinite scroll.
 // ---------------------------------------------------------------------------
 
@@ -117,7 +117,7 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
       <div className={cn(
         'relative flex items-center justify-center',
         isVideo ? 'aspect-[4/3]' : isImage ? 'aspect-square' : 'aspect-[4/3]',
-        isImage ? 'bg-blue-50' : isVideo ? 'bg-purple-50' : isAudio ? 'bg-green-50' : 'bg-muted',
+        isImage ? 'bg-blue-50 dark:bg-blue-950' : isVideo ? 'bg-purple-50 dark:bg-purple-950' : isAudio ? 'bg-green-50 dark:bg-green-950' : 'bg-muted',
       )}>
         <div className={cn(
           'opacity-40 group-hover:opacity-60 transition-opacity',

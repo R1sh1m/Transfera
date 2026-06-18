@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Batch Manager
+Transfera v2 — Batch Manager
 Chunks sorted media_items into strict 100-file TransferBatch rows.
 """
 

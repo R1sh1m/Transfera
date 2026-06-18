@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — WebSocket Hook
+// Transfera v2 — WebSocket Hook
 // Manages connection to /ws/transfer/{sessionId} with auto-reconnect.
 // ---------------------------------------------------------------------------
 

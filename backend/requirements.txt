@@ -1,4 +1,4 @@
-# MediaVault v2 — Python Backend Dependencies
+# Transfera v2 — Python Backend Dependencies
 # Install: pip install -r requirements.txt
 
 fastapi>=0.111,<1.0

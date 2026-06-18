@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Organizer & Duplicate Detection Test Suite
+Transfera v2 — Organizer & Duplicate Detection Test Suite
 Validates path resolution, conflict handling, Live Photo grouping,
 duplicate detection, and hash collision scenarios.
 Run: python -m backend.test_organizer
@@ -584,7 +584,7 @@ def test_conflict_exhaustion() -> None:
 # ======================================================================
 async def main() -> None:
     print("=" * 60)
-    print("  MediaVault v2 -- Organizer & Duplicate Detection Tests")
+    print("  Transfera v2 — Organizer & Duplicate Detection Tests")
     print("=" * 60)
 
     # Pure logic tests (no DB)

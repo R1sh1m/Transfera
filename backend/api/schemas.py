@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Pydantic Schemas
+Transfera v2 — Pydantic Schemas
 Request / Response validation for all API endpoints.
 """
 
@@ -101,6 +101,11 @@ class SessionCreate(BaseModel):
     session_name: str = Field(..., min_length=1, max_length=255)
     source_root: str = Field(..., min_length=1)
     dest_root: str = Field(..., min_length=1)
+    transfer_mode: str = Field(
+        "copy",
+        pattern="^(copy|move)$",
+        description="'copy' for backup mode, 'move' for space-saver mode",
+    )
 
 
 class SessionInfo(BaseModel):
@@ -108,6 +113,7 @@ class SessionInfo(BaseModel):
     session_name: str
     source_root: str
     dest_root: str
+    transfer_mode: str = "copy"
     status: str
     total_items: int
     completed_items: int
@@ -236,6 +242,34 @@ class WSEvent(BaseModel):
     event: str
     data: dict[str, Any]
     timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
+
+
+# ---------------------------------------------------------------------------
+# Directory Size
+# ---------------------------------------------------------------------------
+class DirSizeRequest(BaseModel):
+    path: str = Field(..., min_length=1, description="Directory path to measure")
+
+
+class DirSizeResponse(BaseModel):
+    path: str
+    total_bytes: int
+    file_count: int
+    folder_count: int
+    readable: str  # human-readable size string (e.g. "12.4 GB")
+
+
+# ---------------------------------------------------------------------------
+# Folder Metadata
+# ---------------------------------------------------------------------------
+class FolderMetadataRequest(BaseModel):
+    path: str = Field(..., min_length=1, description="Absolute directory path to analyze")
+
+
+class FolderMetadataResponse(BaseModel):
+    path: str
+    size_gb: float
+    file_count: int
 
 
 # ---------------------------------------------------------------------------

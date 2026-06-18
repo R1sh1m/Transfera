@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Shared TypeScript Types
+// Transfera v2 — Shared TypeScript Types
 // Mirrors backend Pydantic schemas exactly.
 // ---------------------------------------------------------------------------
 
@@ -44,10 +44,13 @@ export interface ScanResponse {
 }
 
 // --- Session --------------------------------------------------------------
+export type TransferMode = 'copy' | 'move'
+
 export interface SessionCreate {
   session_name: string
   source_root: string
   dest_root: string
+  transfer_mode: TransferMode
 }
 
 export interface SessionInfo {
@@ -55,6 +58,7 @@ export interface SessionInfo {
   session_name: string
   source_root: string
   dest_root: string
+  transfer_mode: TransferMode
   status: SessionStatus
   total_items: number
   completed_items: number
@@ -150,6 +154,30 @@ export type DuplicateAction = 'skip' | 'overwrite' | 'keep_both'
 export interface DuplicateResolution {
   item_id: number
   action: DuplicateAction
+}
+
+// --- Directory Size --------------------------------------------------------
+export interface DirSizeRequest {
+  path: string
+}
+
+export interface DirSizeResponse {
+  path: string
+  total_bytes: number
+  file_count: number
+  folder_count: number
+  readable: string
+}
+
+// --- Folder Metadata -------------------------------------------------------
+export interface FolderMetadataRequest {
+  path: string
+}
+
+export interface FolderMetadataResponse {
+  path: string
+  size_gb: number
+  file_count: number
 }
 
 // --- WebSocket Events (15 system-wide) ------------------------------------

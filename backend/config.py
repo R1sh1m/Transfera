@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Central Configuration
+Transfera v2 — Central Configuration
 Single source of truth for all backend constants.
 """
 
@@ -41,8 +41,8 @@ for _d in (DATA_DIR, DB_DIR, CACHE_DIR, LOG_DIR, EXPORT_DIR, EXIFTOOL_DIR):
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
-DATABASE_URL: str = f"sqlite+aiosqlite:///{DB_DIR / 'mediavault.db'}"
-DATABASE_URL_SYNC: str = f"sqlite:///{DB_DIR / 'mediavault.db'}"
+DATABASE_URL: str = f"sqlite+aiosqlite:///{DB_DIR / 'transfera.db'}"
+DATABASE_URL_SYNC: str = f"sqlite:///{DB_DIR / 'transfera.db'}"
 
 # ---------------------------------------------------------------------------
 # Media Extension Sets  (frozensets for immutability & O(1) lookup)
@@ -88,5 +88,5 @@ SUPPORTED_PLATFORMS: frozenset[str] = frozenset({"win32", "darwin", "linux"})
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-LOG_LEVEL: str = os.environ.get("MEDIAVAULT_LOG_LEVEL", "INFO")
+LOG_LEVEL: str = os.environ.get("TRANSFERA_LOG_LEVEL", "INFO")
 LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"

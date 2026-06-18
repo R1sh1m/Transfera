@@ -1,5 +1,5 @@
 """
-MediaVault v2 — File Hashing Utility
+Transfera v2 — File Hashing Utility
 Optimised BLAKE3 streaming with hashlib SHA-256 fallback.
 """
 

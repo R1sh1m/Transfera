@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — App Shell
+// Transfera v2 — App Shell
 // Zustand-driven page routing, providers, notification toast, duplicate modal.
 // ---------------------------------------------------------------------------
 
@@ -26,6 +26,7 @@ import DeviceSetupPage from '@/pages/DeviceSetupPage'
 import TransferPage from '@/pages/TransferPage'
 import LibraryPage from '@/pages/LibraryPage'
 import DuplicateModal from '@/components/DuplicateModal'
+import ThemeToggle from '@/components/ThemeToggle'
 
 // ---------------------------------------------------------------------------
 // React Query client
@@ -81,6 +82,9 @@ function Sidebar() {
 
       {/* Spacer */}
       <div className="flex-1" />
+
+      {/* Theme Toggle */}
+      <ThemeToggle />
 
       {/* Connection indicator */}
       <div
@@ -139,7 +143,7 @@ function TitleBar() {
     <div className="drag-region h-10 flex items-center justify-between px-4 border-b border-border bg-card/80 backdrop-blur-sm flex-shrink-0">
       <div className="flex items-center gap-2">
         <HardDrive className="w-4 h-4 text-primary" />
-        <span className="text-sm font-semibold text-foreground">MediaVault</span>
+        <span className="text-sm font-semibold text-foreground">Transfera</span>
       </div>
       <div className="no-drag flex items-center gap-1">
         <button

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// MediaVault v2 — Device Setup Page
+// Transfera v2 — Device Setup Page
 // Configuration selectors and directory destination target validation.
 // ---------------------------------------------------------------------------
 
@@ -19,6 +19,8 @@ import {
 import { useConfig, useCreateSession } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { cn } from '@/lib/utils'
+import type { TransferMode } from '@/types/api'
+import ModeSelector from '@/components/ModeSelector'
 
 interface FolderPickerProps {
   label: string
@@ -30,12 +32,9 @@ interface FolderPickerProps {
 function FolderPicker({ label, value, onChange, placeholder }: FolderPickerProps) {
   const handleBrowse = async () => {
     if (window.electronAPI) {
-      const result = await window.electronAPI.showOpenDialog({
-        title: `Select ${label}`,
-        properties: ['openDirectory'],
-      })
-      if (!result.canceled && result.filePaths[0]) {
-        onChange(result.filePaths[0])
+      const selected = await window.electronAPI.openDirectory(value || undefined)
+      if (selected) {
+        onChange(selected)
       }
     } else {
       // Fallback for browser dev: prompt
@@ -58,11 +57,11 @@ function FolderPicker({ label, value, onChange, placeholder }: FolderPickerProps
             placeholder={placeholder ?? `Select ${label.toLowerCase()}...`}
             className={cn(
               'w-full px-3 py-2 bg-background border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring',
-              isValid ? 'border-green-300' : 'border-input',
+              isValid ? 'border-green-300 dark:border-green-700' : 'border-input',
             )}
           />
           {isValid && (
-            <FolderCheck className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-green-500" />
+            <FolderCheck className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-green-500 dark:text-green-400" />
           )}
         </div>
         <button
@@ -106,6 +105,7 @@ export default function DeviceSetupPage() {
   const [sourcePath, setSourcePath] = useState('')
   const [destPath, setDestPath] = useState('')
   const [sessionName, setSessionName] = useState('')
+  const [transferMode, setTransferMode] = useState<TransferMode>('copy')
 
   const { data: config, isLoading: configLoading } = useConfig()
   const createSession = useCreateSession()
@@ -120,6 +120,7 @@ export default function DeviceSetupPage() {
       session_name: name,
       source_root: sourcePath,
       dest_root: destPath,
+      transfer_mode: transferMode,
     })
     initTransfer(session)
     setCurrentPage('transfer')
@@ -168,6 +169,16 @@ export default function DeviceSetupPage() {
             className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
+      </motion.div>
+
+      {/* Transfer Mode Selection */}
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="bg-card border border-border rounded-lg p-6"
+      >
+        <ModeSelector value={transferMode} onChange={setTransferMode} />
       </motion.div>
 
       {/* Supported Formats */}

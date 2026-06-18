@@ -1,20 +1,25 @@
-================================================================================
-███╗   ███╗███████╗██████╗ ██╗ █████╗ ██╗   ██╗ █████╗ ██╗   ██╗██╗  ████████╗
-████╗ ████║██╔════╝██╔═══██╗██║██╔══██╗██║   ██║██╔══██╗██║   ██║██║  ╚══██╔══╝
-██╔████╔██║█████╗  ██║   ██║██║███████║██║   ██║███████║██║   ██║██║     ██║   
-██║╚██╔╝██║██╔══╝  ██║   ██║██║██╔══██║╚██╗ ██╔╝██╔══██║██║   ██║██║     ██║   
-██║ ╚═╝ ██║███████╗██████╔╝██║██║  ██║ ╚████╔╝ ██║  ██║╚██████╔╝███████╗██║   
-╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝   
- 💾 [Two-Stage Verified Media Vaulting Engine] • [FastAPI + Electron + React]
-================================================================================
 
-# MediaVault v2
+=============================================================================================
+=        ==       ======  =====  =======  ===      ===        ==        ==       ======  ====
+====  =====  ====  ====    ====   ======  ==  ====  ==  ========  ========  ====  ====    ===
+====  =====  ====  ===  ==  ===    =====  ==  ====  ==  ========  ========  ====  ===  ==  ==
+====  =====  ===   ==  ====  ==  ==  ===  ===  =======  ========  ========  ===   ==  ====  =
+====  =====      ====  ====  ==  ===  ==  =====  =====      ====      ====      ====  ====  =
+====  =====  ====  ==        ==  ====  =  =======  ===  ========  ========  ====  ==        =
+====  =====  ====  ==  ====  ==  =====    ==  ====  ==  ========  ========  ====  ==  ====  =
+====  =====  ====  ==  ====  ==  ======   ==  ====  ==  ========  ========  ====  ==  ====  =
+====  =====  ====  ==  ====  ==  =======  ===      ===  ========        ==  ====  ==  ====  =
+=============================================================================================
+ 💾 [Two-Stage Verified Media Vaulting Engine] • [FastAPI + Electron + React]
+=============================================================================================
+
+# Transfera v2
 
 A local desktop media backup application with verified file transfers, crash recovery, and duplicate detection.
 
 ## Architecture
 
-MediaVault uses a two-hop pipeline to ensure data integrity:
+Transfera uses a two-hop pipeline to ensure data integrity:
 
 ```
 Source Files -> [Hop 1: Cache] -> [Hop 2: Archive] -> Verified Backup
@@ -36,18 +41,18 @@ Source Files -> [Hop 1: Cache] -> [Hop 2: Archive] -> Verified Backup
 
 ## Quick Download & Local Deployment Guide
 
-Get MediaVault running on your machine in under two minutes.
+Get Transfera running on your machine in under two minutes.
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-username/MediaVault.git
-cd MediaVault
+git clone https://github.com/your-username/Transfera.git
+cd Transfera
 ```
 
 ### 2. Install System Requirements
 
-MediaVault requires two runtimes. Check that both are installed:
+Transfera requires two runtimes. Check that both are installed:
 
 ```bash
 python --version   # Must be 3.12 or higher
@@ -70,13 +75,13 @@ That's it. On first run, the script will automatically:
 - Launch the FastAPI backend server (port 47821)
 - Launch the Vite development server (port 5173)
 
-Open your browser to **http://127.0.0.1:5173** to use MediaVault.
+Open your browser to **http://127.0.0.1:5173** to use Transfera.
 
 Press **Ctrl+C** in the terminal to shut down all services cleanly.
 
 ### Troubleshooting
 
-- **ExifTool** — MediaVault includes an automated ExifTool manager. If the binary isn't found on your system, the app will download it automatically on first launch. No manual installation needed.
+- **ExifTool** — Transfera includes an automated ExifTool manager. If the binary isn't found on your system, the app will download it automatically on first launch. No manual installation needed.
 - **Port already in use** — If port 47821 or 5173 is occupied, stop the other process first or reboot.
 - **Permission errors on Windows** — Run your terminal as Administrator if `npm install` fails.
 
@@ -141,12 +146,12 @@ npm run build
 npx electron-builder --win
 ```
 
-Output: `frontend/release/MediaVault-Setup-2.0.0.exe`
+Output: `frontend/release/Transfera-Setup-2.0.0.exe`
 
 ## Project Structure
 
 ```
-MediaVault/
+Transfera/
   backend/
     api/
       routes.py          # HTTP endpoints (health, scan, sessions, media, duplicates)

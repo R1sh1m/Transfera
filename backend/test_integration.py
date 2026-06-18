@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Integration Tests
+Transfera v2 — Integration Tests
 Tests HTTP endpoints, WebSocket, and end-to-end pipeline.
 Run: python -m backend.test_integration
 """
@@ -285,7 +285,7 @@ def main() -> None:
     global _PASS, _FAIL
 
     print("=" * 60)
-    print("MediaVault v2 - Integration Tests")
+    print("Transfera v2 - Integration Tests")
     print("=" * 60)
 
     # Start server in background thread

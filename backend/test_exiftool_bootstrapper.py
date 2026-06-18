@@ -1,5 +1,5 @@
 """
-MediaVault v2 -- ExifTool Bootstrapper Test Suite
+Transfera v2 — ExifTool Bootstrapper Test Suite
 Tests the three-tier fallback resolution: local -> PATH -> download.
 Run: python -m backend.test_exiftool_bootstrapper
 """
@@ -324,7 +324,7 @@ def test_bootstrap_idempotent() -> None:
 # ======================================================================
 def main() -> None:
     print("=" * 60)
-    print("  MediaVault v2 -- ExifTool Bootstrapper Test Suite")
+    print("  Transfera v2 — ExifTool Bootstrapper Test Suite")
     print("=" * 60)
 
     _reset_state()

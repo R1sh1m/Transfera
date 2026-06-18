@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MediaVault v2 -- Development Stack Orchestrator
+Transfera v2 — Development Stack Orchestrator
 Single-command startup for the full backend + frontend development environment.
 
 Enforces Python 3.12 for stable pre-compiled wheel availability (pillow-heif, blake3).
@@ -418,7 +418,7 @@ def _shutdown(sig=None, _frame=None) -> None:
     _shutdown_event.set()
 
     print()  # newline after ^C
-    _phase("TEARDOWN: Shutting down MediaVault stack")
+    _phase("TEARDOWN: Shutting down Transfera stack")
 
     _kill_tree(_backend_proc, "Backend")
     _kill_tree(_frontend_proc, "Frontend")
@@ -431,7 +431,7 @@ def _shutdown(sig=None, _frame=None) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MediaVault development stack orchestrator")
+    parser = argparse.ArgumentParser(description="Transfera development stack orchestrator")
     parser.add_argument("--backend", action="store_true", help="Start backend only")
     parser.add_argument("--frontend", action="store_true", help="Start Vite dev server only")
     parser.add_argument("--skip-deps", action="store_true", help="Skip dependency checks")
@@ -448,7 +448,7 @@ def main() -> None:
     print(f"""
 {_C.BOLD}{_C.CYAN}
     +------------------------------------------+
-    |          MediaVault v2  Dev Stack         |
+    |          Transfera v2  Dev Stack           |
     |     Backend : http://127.0.0.1:{BACKEND_PORT}      |
     |     Frontend: http://127.0.0.1:{BACKEND_PORT}      |
     |     Vite:    http://127.0.0.1:{VITE_PORT}  (dev)  |
@@ -467,7 +467,7 @@ def main() -> None:
         if python312 is None:
             _err("=" * 56)
             _err("")
-            _err("  MediaVault requires Python 3.12 to fetch stable")
+            _err("  Transfera requires Python 3.12 to fetch stable")
             _err("  pre-compiled wheels. Please ensure Python 3.12 is")
             _err("  selected or installed.")
             _err("")

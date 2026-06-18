@@ -1,15 +1,14 @@
 {
-  "name": "mediavault-frontend",
+  "name": "transfera-frontend",
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "MediaVault v2 - Local media backup desktop app",
+  "description": "Transfera v2 - Local media backup desktop app",
   "main": "electron/dist-electron/main.js",
-  "author": "MediaVault Team",
+  "author": "Transfera Team",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "icons": "node generate-icons.js",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "electron:dev": "concurrently \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
@@ -38,18 +37,16 @@
     "concurrently": "^9.1.2",
     "electron": "^33.3.1",
     "electron-builder": "^25.1.8",
-    "png-to-ico": "^3.0.1",
     "postcss": "^8.4.49",
-    "sharp": "^0.35.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
     "wait-on": "^8.0.3"
   },
   "build": {
-    "appId": "com.mediavault.app",
-    "productName": "MediaVault",
-    "copyright": "Copyright 2024 MediaVault Team",
+    "appId": "com.transfera.app",
+    "productName": "Transfera",
+    "copyright": "Copyright 2024 Transfera Team",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -73,7 +70,7 @@
       }
     ],
     "win": {
-      "icon": "build/icon.ico",
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "nsis",
@@ -91,9 +88,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "MediaVault",
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
+      "shortcutName": "Transfera",
+      "installerIcon": "build/icon.png",
+      "uninstallerIcon": "build/icon.png",
       "warningsAsErrors": false
     },
     "linux": {

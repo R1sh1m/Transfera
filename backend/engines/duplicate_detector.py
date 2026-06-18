@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Duplicate Detection Subsystem
+Transfera v2 — Duplicate Detection Subsystem
 Compares batch items against the completed archive and generates a
 DuplicateReport.  Includes ``check_batch()`` which pauses processing
 and emits a WebSocket event alert.

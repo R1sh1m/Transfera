@@ -30,6 +30,9 @@ export interface ElectronAPI {
   closeWindow: () => Promise<void>
   isMaximized: () => Promise<boolean>
 
+  // Directory picker — returns selected folder path or null
+  openDirectory: (defaultPath?: string) => Promise<string | null>
+
   // Backend status
   getBackendStatus: () => Promise<{ running: boolean; port: number }>
 }

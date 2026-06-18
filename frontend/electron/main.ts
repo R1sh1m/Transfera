@@ -123,8 +123,8 @@ function createWindow(): void {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: 'MediaVault',
-    icon: path.join(__dirname, '..', 'build', 'icon.ico'),
+    title: 'Transfera',
+    icon: path.join(__dirname, '..', 'build', 'icon.png'),
     frame: false,
     backgroundColor: '#0f0f0f',
     webPreferences: {
@@ -198,6 +198,16 @@ function registerIPC(): void {
       detail: options.detail,
       buttons: options.buttons,
     })
+  })
+
+  // System directory picker — dedicated convenience handler
+  ipcMain.handle('dialog:open-directory', async (_event, defaultPath?: string) => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      defaultPath,
+    })
+    return result.canceled ? null : result.filePaths[0]
   })
 
   // Window controls

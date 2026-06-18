@@ -1,5 +1,5 @@
 """
-MediaVault v2 — SQLAlchemy ORM Models
+Transfera v2 — SQLAlchemy ORM Models
 Mapped-column API (SQLAlchemy 2.0 style).
 Tables: media_items, transfer_sessions, transfer_batches.
 """
@@ -170,6 +170,9 @@ class TransferSession(Base):
     session_name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_root: Mapped[str] = mapped_column(String(4096), nullable=False)
     dest_root: Mapped[str] = mapped_column(String(4096), nullable=False)
+    transfer_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="copy"
+    )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=SessionStatus.CREATED.value
     )

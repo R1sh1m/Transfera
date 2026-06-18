@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Strict Oldest-First Media Scanner
+Transfera v2 — Strict Oldest-First Media Scanner
 Walks directories, detects Live Photo pairs, enforces chronological insertion order.
 """
 

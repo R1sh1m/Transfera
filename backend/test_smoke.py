@@ -1,5 +1,5 @@
 """
-MediaVault v2 — End-to-End Smoke Test
+Transfera v2 — End-to-End Smoke Test
 Validates the full integrated pipeline: scan -> batch -> Hop1 -> Hop2 -> recovery.
 Run: python -m backend.test_smoke
 """
@@ -48,7 +48,7 @@ def _check(name: str, condition: bool) -> None:
 
 async def smoke_test() -> None:
     print("=" * 60)
-    print("  MediaVault v2 -- End-to-End Smoke Test")
+    print("  Transfera v2 — End-to-End Smoke Test")
     print("=" * 60)
 
     await dispose_engine()

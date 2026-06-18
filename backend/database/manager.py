@@ -1,5 +1,5 @@
 """
-MediaVault v2 — Database Manager
+Transfera v2 — Database Manager
 Async SQLAlchemy 2.0 engine for SQLite with WAL mode and FK enforcement.
 """
 

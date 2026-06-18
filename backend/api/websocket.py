@@ -1,5 +1,5 @@
 """
-MediaVault v2 — WebSocket Event Pipeline
+Transfera v2 — WebSocket Event Pipeline
 Manages per-session WS connections with 30s keepalive ping/pong.
 Broadcasts all 15 system-wide events to connected clients.
 """
