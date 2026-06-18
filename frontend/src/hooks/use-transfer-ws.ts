@@ -23,6 +23,10 @@ export function useTransferWs(sessionId: number | null) {
       reconnectTimer.current = null
     }
     if (wsRef.current) {
+      wsRef.current.onopen = null
+      wsRef.current.onmessage = null
+      wsRef.current.onclose = null
+      wsRef.current.onerror = null
       wsRef.current.close()
       wsRef.current = null
     }
@@ -34,10 +38,16 @@ export function useTransferWs(sessionId: number | null) {
     cleanup()
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host || '127.0.0.1:47821'
+    const host = window.location.host
     const url = `${protocol}//${host}/ws/transfer/${sessionId}`
 
-    const ws = new WebSocket(url)
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(url)
+    } catch {
+      console.warn('[ws] Failed to create WebSocket connection')
+      return
+    }
     wsRef.current = ws
 
     ws.onopen = () => {

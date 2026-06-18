@@ -1,3 +1,13 @@
+================================================================================
+███╗   ███╗███████╗██████╗ ██╗ █████╗ ██╗   ██╗ █████╗ ██╗   ██╗██╗  ████████╗
+████╗ ████║██╔════╝██╔═══██╗██║██╔══██╗██║   ██║██╔══██╗██║   ██║██║  ╚══██╔══╝
+██╔████╔██║█████╗  ██║   ██║██║███████║██║   ██║███████║██║   ██║██║     ██║   
+██║╚██╔╝██║██╔══╝  ██║   ██║██║██╔══██║╚██╗ ██╔╝██╔══██║██║   ██║██║     ██║   
+██║ ╚═╝ ██║███████╗██████╔╝██║██║  ██║ ╚████╔╝ ██║  ██║╚██████╔╝███████╗██║   
+╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝   
+ 💾 [Two-Stage Verified Media Vaulting Engine] • [FastAPI + Electron + React]
+================================================================================
+
 # MediaVault v2
 
 A local desktop media backup application with verified file transfers, crash recovery, and duplicate detection.
@@ -80,28 +90,7 @@ Press **Ctrl+C** in the terminal to shut down all services cleanly.
 
 ## Local Development
 
-### Quick Start (single command)
-
-```bash
-python run.py
-```
-
-This automatically:
-1. Creates the backend virtual environment and installs Python dependencies (first run only)
-2. Installs frontend `node_modules` (first run only)
-3. Starts the FastAPI backend on `http://127.0.0.1:47821`
-4. Starts the Vite dev server on `http://127.0.0.1:5173`
-
-Press **Ctrl+C** to gracefully shut down both services.
-
-**Flags:**
-- `--backend` — start backend only
-- `--frontend` — start frontend only
-- `--skip-deps` — skip dependency checks
-
-### Manual Setup
-
-#### Backend
+### Backend
 
 ```bash
 cd backend
@@ -109,7 +98,7 @@ pip install -r requirements.txt
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 47821
 ```
 
-#### Frontend
+### Frontend
 
 ```bash
 cd frontend
@@ -122,15 +111,15 @@ The frontend dev server runs on `http://127.0.0.1:5173` and proxies API requests
 ## Running Tests
 
 ```bash
-# Backend unit tests (246 tests total)
-python -m backend.test_db_core           # 36 tests - DB, hashing, config
-python -m backend.test_scanner           # 28 tests - Scanner, Live Photos
-python -m backend.test_pipeline          # 25 tests - Pipeline interruption
-python -m backend.test_organizer         # 33 tests - Organizer, duplicates
-python -m backend.test_crash_recovery    # 53 tests - HEIC crash, Live Photo bundles
-python -m backend.test_integration       # 42 tests - HTTP endpoints
-python -m backend.test_smoke             #  9 tests - End-to-end smoke test
-python -m backend.test_exiftool_bootstrapper  # 20 tests - ExifTool bootstrapper
+# Backend unit tests (122 tests)
+cd backend
+python -m pytest test_db_core.py test_scanner.py test_pipeline.py test_organizer.py
+
+# Crash recovery & Live Photo tests (53 tests)
+python -m backend.test_crash_recovery
+
+# Integration tests (42 tests)
+python -m backend.test_integration
 ```
 
 ## Production Build
@@ -158,7 +147,6 @@ Output: `frontend/release/MediaVault-Setup-2.0.0.exe`
 
 ```
 MediaVault/
-  run.py               # Single-command development stack orchestrator
   backend/
     api/
       routes.py          # HTTP endpoints (health, scan, sessions, media, duplicates)

@@ -3,10 +3,12 @@
 MediaVault v2 -- Development Stack Orchestrator
 Single-command startup for the full backend + frontend development environment.
 
+Enforces Python 3.12 for stable pre-compiled wheel availability (pillow-heif, blake3).
+
 Usage:
-    python run.py              # Start everything
-    python run.py --backend    # Backend only
-    python run.py --frontend   # Frontend only
+    python run.py              # Start everything (backend serves compiled frontend)
+    python run.py --backend    # Backend only (serves compiled frontend)
+    python run.py --frontend   # Vite dev server only (hot-reload)
     python run.py --skip-deps  # Skip dependency checks
 """
 
@@ -27,7 +29,8 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = ROOT_DIR / "backend"
 FRONTEND_DIR = ROOT_DIR / "frontend"
-VENV_DIR = BACKEND_DIR / "venv"
+FRONTEND_DIST = FRONTEND_DIR / "dist"
+VENV_DIR = ROOT_DIR / ".venv"
 NODE_MODULES = FRONTEND_DIR / "node_modules"
 REQ_FILE = BACKEND_DIR / "requirements.txt"
 
@@ -35,6 +38,82 @@ BACKEND_PORT = 47821
 VITE_PORT = 5173
 
 IS_WINDOWS = sys.platform == "win32"
+
+# ---------------------------------------------------------------------------
+# Python 3.12 discovery -- stable wheel availability is critical
+# ---------------------------------------------------------------------------
+# Ordered list of paths to probe for a Python 3.12 installation on Windows.
+_PYTHON312_CANDIDATES: list[Path] = [
+    Path(r"C:\Users\Rishi Misra\AppData\Local\Programs\Python\Python312\python.exe"),
+    Path(r"C:\Program Files\Python312\python.exe"),
+    Path(r"C:\Python312\python.exe"),
+]
+
+
+def _find_python312() -> Path | None:
+    """
+    Locate a Python 3.12 interpreter on the system.
+
+    Search order:
+      1. Hardcoded candidate paths (user-level and system-level installs).
+      2. ``py -3.12`` launcher (if available on PATH).
+      3. ``python3.12`` on PATH (Linux/macOS fallback).
+
+    Returns the resolved Path to the interpreter, or None if not found.
+    """
+    # 1. Probe known Windows install locations
+    for candidate in _PYTHON312_CANDIDATES:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    # 2. Try the Windows Python launcher (py.exe)
+    try:
+        result = subprocess.run(
+            ["py", "-3.12", "-c", "import sys; print(sys.executable)"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        if result.returncode == 0:
+            path = Path(result.stdout.strip())
+            if path.is_file():
+                return path.resolve()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # 3. Try python3.12 directly (Unix-style)
+    try:
+        result = subprocess.run(
+            ["python3.12", "-c", "import sys; print(sys.executable)"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            path = Path(result.stdout.strip())
+            if path.is_file():
+                return path.resolve()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
+def _verify_python312(python_path: Path) -> bool:
+    """Confirm the given interpreter is actually Python 3.12.x."""
+    try:
+        result = subprocess.run(
+            [str(python_path), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        return result.stdout.strip() == "3.12"
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        return False
+
 
 # ---------------------------------------------------------------------------
 # ANSI colors for terminal output
@@ -106,35 +185,72 @@ def _stream_output(proc: subprocess.Popen, tag: str, color: str) -> None:
     t_err.start()
 
 # ---------------------------------------------------------------------------
-# STEP 1: Backend virtual environment
+# STEP 1: Backend virtual environment (Python 3.12 enforced)
 # ---------------------------------------------------------------------------
-def _ensure_backend_venv() -> bool:
+def _ensure_backend_venv(python312: Path) -> bool:
     _phase("STEP 1: Backend Environment")
 
-    if VENV_DIR.is_dir():
-        _ok(f"Virtual environment found at {VENV_DIR.relative_to(ROOT_DIR)}")
-        return True
+    # If venv already exists, verify it uses Python 3.12
+    venv_python = VENV_DIR / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+    if venv_python.is_file():
+        try:
+            result = subprocess.run(
+                [str(venv_python), "-c",
+                 "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+            )
+            version = result.stdout.strip()
+            if version == "3.12":
+                _ok(f"Virtual environment found at .venv (Python {version})")
+                return True
+            else:
+                _warn(f"Existing venv uses Python {version} -- recreating with Python 3.12")
+                import shutil
+                shutil.rmtree(str(VENV_DIR))
+        except Exception:
+            _warn("Could not verify existing venv -- recreating")
+            import shutil
+            shutil.rmtree(str(VENV_DIR), ignore_errors=True)
 
-    _warn("Virtual environment not found -- creating one")
+    # Create venv using the discovered Python 3.12
+    _info(f"Creating virtual environment with {python312}")
     try:
         subprocess.run(
-            [sys.executable, "-m", "venv", str(VENV_DIR)],
+            [str(python312), "-m", "venv", str(VENV_DIR)],
             check=True,
             cwd=str(BACKEND_DIR),
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
         _ok("Virtual environment created")
     except subprocess.CalledProcessError as exc:
         _err(f"Failed to create virtual environment: {exc}")
         return False
 
+    # Install dependencies using the venv's pip
     if REQ_FILE.is_file():
-        _info("Installing backend dependencies from requirements.txt")
         pip = VENV_DIR / ("Scripts/pip.exe" if IS_WINDOWS else "bin/pip")
+        _info("Upgrading pip...")
+        try:
+            subprocess.run(
+                [str(pip), "install", "--upgrade", "pip"],
+                check=True,
+                cwd=str(BACKEND_DIR),
+                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+            )
+            _ok("pip upgraded")
+        except subprocess.CalledProcessError:
+            _warn("pip upgrade failed -- continuing with existing version")
+
+        _info("Installing backend dependencies from requirements.txt")
         try:
             subprocess.run(
                 [str(pip), "install", "-r", str(REQ_FILE)],
                 check=True,
                 cwd=str(BACKEND_DIR),
+                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
             )
             _ok("Backend dependencies installed")
         except subprocess.CalledProcessError as exc:
@@ -162,6 +278,7 @@ def _ensure_frontend_deps() -> bool:
             check=True,
             cwd=str(FRONTEND_DIR),
             shell=IS_WINDOWS,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
         _ok("Frontend dependencies installed")
     except subprocess.CalledProcessError as exc:
@@ -171,15 +288,50 @@ def _ensure_frontend_deps() -> bool:
     return True
 
 # ---------------------------------------------------------------------------
+# STEP 2.5: Build compiled frontend assets (if not present)
+# ---------------------------------------------------------------------------
+def _build_frontend() -> bool:
+    """Build the React frontend into frontend/dist/ if it does not exist."""
+    if FRONTEND_DIST.is_dir():
+        # Verify dist has actual content (index.html + assets)
+        index = FRONTEND_DIST / "index.html"
+        assets = FRONTEND_DIST / "assets"
+        if index.is_file() and assets.is_dir():
+            _ok(f"Frontend dist found at {FRONTEND_DIST.relative_to(ROOT_DIR)}")
+            return True
+        _warn("Frontend dist directory exists but appears incomplete -- rebuilding")
+
+    _phase("STEP 2.5: Building Frontend")
+    _info("Compiling React frontend (npm run build)...")
+
+    try:
+        subprocess.run(
+            ["npm", "run", "build"],
+            check=True,
+            cwd=str(FRONTEND_DIR),
+            shell=IS_WINDOWS,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        if not (FRONTEND_DIST / "index.html").is_file():
+            _err("Build completed but frontend/dist/index.html not found")
+            return False
+        _ok("Frontend compiled successfully")
+        return True
+    except subprocess.CalledProcessError as exc:
+        _err(f"Failed to build frontend: {exc}")
+        return False
+
+# ---------------------------------------------------------------------------
 # STEP 3: Concurrent process launch
 # ---------------------------------------------------------------------------
 def _python_bin() -> str:
-    """Return the Python executable inside the backend venv, falling back to system Python."""
+    """Return the Python executable inside the .venv -- never fall back to system Python."""
     venv_py = VENV_DIR / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
     if venv_py.is_file():
         return str(venv_py)
-    # Fallback: use the Python that invoked this script
-    return sys.executable
+    # This should never happen if _ensure_backend_venv succeeded, but be explicit
+    _err("Cannot find .venv Python -- the venv may be corrupted")
+    sys.exit(1)
 
 
 def _launch_backend() -> subprocess.Popen | None:
@@ -206,7 +358,7 @@ def _launch_backend() -> subprocess.Popen | None:
         return None
 
 
-def _launch_frontend() -> subprocess.Popen | None:
+def _launch_frontend_dev() -> subprocess.Popen | None:
     _info(f"Starting Vite dev server on port {VITE_PORT}...")
     cmd = ["npm", "run", "dev"]
     try:
@@ -237,14 +389,12 @@ def _kill_tree(proc: subprocess.Popen, label: str) -> None:
 
     try:
         if IS_WINDOWS:
-            # taskkill /T kills the entire process tree; /F forces after grace
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         else:
-            # Send SIGTERM to the process group
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     except (ProcessLookupError, OSError):
         pass  # already dead
@@ -283,7 +433,7 @@ def _shutdown(sig=None, _frame=None) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="MediaVault development stack orchestrator")
     parser.add_argument("--backend", action="store_true", help="Start backend only")
-    parser.add_argument("--frontend", action="store_true", help="Start frontend only")
+    parser.add_argument("--frontend", action="store_true", help="Start Vite dev server only")
     parser.add_argument("--skip-deps", action="store_true", help="Skip dependency checks")
     args = parser.parse_args()
 
@@ -300,18 +450,55 @@ def main() -> None:
     +------------------------------------------+
     |          MediaVault v2  Dev Stack         |
     |     Backend : http://127.0.0.1:{BACKEND_PORT}      |
-    |     Frontend: http://127.0.0.1:{VITE_PORT}       |
+    |     Frontend: http://127.0.0.1:{BACKEND_PORT}      |
+    |     Vite:    http://127.0.0.1:{VITE_PORT}  (dev)  |
     +------------------------------------------+
 {_C.RESET}""")
 
+    # -----------------------------------------------------------------------
+    # Python 3.12 enforcement (must happen before any venv/pip work)
+    # -----------------------------------------------------------------------
+    python312: Path | None = None
+
+    if start_backend and not args.skip_deps:
+        _phase("PYTHON: Locating Python 3.12 interpreter")
+        python312 = _find_python312()
+
+        if python312 is None:
+            _err("=" * 56)
+            _err("")
+            _err("  MediaVault requires Python 3.12 to fetch stable")
+            _err("  pre-compiled wheels. Please ensure Python 3.12 is")
+            _err("  selected or installed.")
+            _err("")
+            _err("  Expected locations checked:")
+            for c in _PYTHON312_CANDIDATES:
+                _err(f"    - {c}")
+            _err("")
+            _err("  Download: https://www.python.org/downloads/")
+            _err("")
+            _err("=" * 56)
+            sys.exit(1)
+
+        if not _verify_python312(python312):
+            _err(f"Found interpreter at {python312} but it is NOT Python 3.12")
+            sys.exit(1)
+
+        _ok(f"Python 3.12 located at {python312}")
+
     # STEP 1 & 2: Dependency checks
     if not args.skip_deps:
-        if start_backend and not _ensure_backend_venv():
+        if start_backend and not _ensure_backend_venv(python312):
             sys.exit(1)
         if start_frontend and not _ensure_frontend_deps():
             sys.exit(1)
     else:
         _info("Skipping dependency checks (--skip-deps)")
+
+    # STEP 2.5: Build frontend if serving through FastAPI
+    if start_backend:
+        if not _build_frontend():
+            _warn("Frontend build failed -- backend will run in API-only mode")
 
     # STEP 3: Launch processes
     _phase("STEP 3: Launching Services")
@@ -326,7 +513,7 @@ def main() -> None:
         _stream_output(_backend_proc, "BACKEND ", _C.BLUE)
 
     if start_frontend:
-        _frontend_proc = _launch_frontend()
+        _frontend_proc = _launch_frontend_dev()
         if _frontend_proc is None:
             _err("Cannot continue without frontend -- exiting")
             _kill_tree(_backend_proc, "Backend")

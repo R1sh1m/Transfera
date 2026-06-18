@@ -22,6 +22,8 @@ import { useTransferStore } from '@/store/transfer'
 import { cn } from '@/lib/utils'
 import type { SessionInfo, SessionStatus } from '@/types/api'
 
+const fallbackBadge = { color: 'text-muted-foreground', bg: 'bg-muted', icon: <Clock className="w-3.5 h-3.5" /> }
+
 const statusConfig: Record<SessionStatus, { color: string; bg: string; icon: React.ReactNode }> = {
   created:   { color: 'text-muted-foreground', bg: 'bg-muted',         icon: <Clock className="w-3.5 h-3.5" /> },
   running:   { color: 'text-blue-600',         bg: 'bg-blue-50',       icon: <Play className="w-3.5 h-3.5" /> },
@@ -32,7 +34,7 @@ const statusConfig: Record<SessionStatus, { color: string; bg: string; icon: Rea
 }
 
 function StatusBadge({ status }: { status: SessionStatus }) {
-  const c = statusConfig[status]
+  const c = statusConfig[status] ?? fallbackBadge
   return (
     <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', c.bg, c.color)}>
       {c.icon}

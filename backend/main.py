@@ -1,18 +1,22 @@
 """
 MediaVault v2 — FastAPI Engine
 Application entry point with lifespan management.
+Serves compiled React frontend as SPA from frontend/dist/.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.config import BATCH_SIZE, CACHE_DIR, HOST, PORT
 from backend.database.manager import create_all_tables, dispose_engine
@@ -31,6 +35,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mediavault")
 
+# ---------------------------------------------------------------------------
+# Resolve the compiled React asset directory (frontend/dist/)
+# ---------------------------------------------------------------------------
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+
+# ---------------------------------------------------------------------------
+# SPA StaticFiles — serves index.html for any path not matching a real asset
+# ---------------------------------------------------------------------------
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles subclass that falls back to index.html for client-side routes."""
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except Exception:
+            return FileResponse(str(FRONTEND_DIST / "index.html"))
+
 
 # ---------------------------------------------------------------------------
 # Lifespan (startup/shutdown)
@@ -39,6 +61,13 @@ logger = logging.getLogger("mediavault")
 async def lifespan(app: FastAPI):
     """Startup: init DB + recovery. Shutdown: dispose engine."""
     logger.info("MediaVault v2 starting on %s:%d", HOST, PORT)
+
+    if not FRONTEND_DIST.is_dir():
+        logger.warning(
+            "Frontend dist not found at %s — API-only mode", FRONTEND_DIST
+        )
+    else:
+        logger.info("Serving frontend from %s", FRONTEND_DIST)
 
     # Ensure tables exist
     await create_all_tables()
@@ -70,22 +99,40 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS for Electron renderer
+    # CORS for Electron renderer and same-origin dev
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Electron uses file:// or custom protocol
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Register routes
+    # Register API routes FIRST — these take priority over the SPA catch-all
     app.include_router(router)
 
     # WebSocket endpoint
     @app.websocket("/ws/transfer/{session_id}")
     async def websocket_endpoint(websocket, session_id: int):
         await ws_transfer(websocket, session_id)
+
+    # Mount compiled React frontend (SPA catch-all)
+    if FRONTEND_DIST.is_dir():
+        app.mount(
+            "/",
+            SPAStaticFiles(directory=str(FRONTEND_DIST), html=True),
+            name="spa",
+        )
+    else:
+        # Fallback: return JSON status when frontend is not built
+        @app.get("/")
+        async def root():
+            return {
+                "name": "MediaVault Backend API",
+                "status": "active",
+                "version": "2.0.0",
+                "note": "Frontend not built — run 'npm run build' in frontend/",
+            }
 
     return app
 

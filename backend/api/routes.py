@@ -71,17 +71,9 @@ router = APIRouter(prefix="/api")
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
-@router.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
-    db_status = "connected"
-    try:
-        engine = await get_engine()
-        async with engine.connect() as conn:
-            await conn.execute(func.now())
-    except Exception:
-        db_status = "error"
-
-    return HealthResponse(port=PORT, database=db_status)
+@router.get("/health")
+async def health_check() -> dict:
+    return {"status": "ok", "version": "2.0"}
 
 
 # ---------------------------------------------------------------------------

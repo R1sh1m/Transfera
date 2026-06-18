@@ -73,3 +73,6 @@ htmlcov/
 .coverage
 coverage.xml
 digest.txt
+.agents/
+AGENTS.md
+skills-lock.json

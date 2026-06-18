@@ -1,7 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import path from 'path'
-import fs from 'fs'
 import net from 'net'
 
 // ---------------------------------------------------------------------------
@@ -126,8 +125,8 @@ function createWindow(): void {
     minHeight: 600,
     title: 'MediaVault',
     icon: path.join(__dirname, '..', 'build', 'icon.ico'),
-    titleBarStyle: 'hidden',
-    backgroundColor: '#ffffff',
+    frame: false,
+    backgroundColor: '#0f0f0f',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -234,10 +233,10 @@ function registerIPC(): void {
 // ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   registerIPC()
-  await startBackend()
   createWindow()
+  startBackend()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
