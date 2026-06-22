@@ -93,6 +93,10 @@ def _build_json_payload(session: TransferSession, items: list[MediaItem]) -> dic
         }
         if item.source_hash:
             record["source_hash"] = item.source_hash
+        if item.date_taken:
+            record["date_taken"] = item.date_taken.isoformat()
+        if item.date_source:
+            record["date_source"] = item.date_source
         if item.error_message:
             record["error_message"] = item.error_message
         file_records.append(record)
@@ -416,7 +420,7 @@ def _build_html(payload: dict[str, Any]) -> str:
     # Throughput
     bps = throughput["bytes_per_second"]
     if bps > 0:
-        throughput_str = f"{_format_bytes(int(bps))}/s"
+        throughput_str = f"{bps / (1024*1024):.2f} MB/s"
     else:
         throughput_str = "—"
 

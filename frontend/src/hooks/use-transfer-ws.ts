@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
 // Transfera v2 — WebSocket Hook
 // Manages connection to /ws/transfer/{sessionId} with auto-reconnect.
+// Surfaces connection errors to the store so the UI can display them.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useRef, useCallback } from 'react'
@@ -16,6 +17,7 @@ export function useTransferWs(sessionId: number | null) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleWsEvent = useTransferStore((s) => s.handleWsEvent)
   const setWsConnected = useTransferStore((s) => s.setWsConnected)
+  const setWsError = useTransferStore((s) => s.setWsError)
 
   const cleanup = useCallback(() => {
     if (reconnectTimer.current) {
@@ -38,21 +40,25 @@ export function useTransferWs(sessionId: number | null) {
     cleanup()
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
+    // In packaged Electron (file:// protocol), window.location.host is empty.
+    // Fall back to direct backend connection on port 47821.
+    const host = window.location.host || '127.0.0.1:47821'
     const url = `${protocol}//${host}/ws/transfer/${sessionId}`
 
     let ws: WebSocket
     try {
       ws = new WebSocket(url)
-    } catch {
-      console.warn('[ws] Failed to create WebSocket connection')
+    } catch (err) {
+      console.warn('[ws] Failed to create WebSocket connection:', err)
       return
     }
     wsRef.current = ws
 
     ws.onopen = () => {
       setWsConnected(true)
+      setWsError(null)
       reconnectCount.current = 0
+      console.log('[ws] Connected to session', sessionId)
     }
 
     ws.onmessage = (msg) => {
@@ -68,8 +74,10 @@ export function useTransferWs(sessionId: number | null) {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setWsConnected(false)
+      console.warn('[ws] Disconnected:', event.reason || 'connection closed', '(code:', event.code, ')')
+
       if (reconnectCount.current < WS_MAX_RECONNECT) {
         reconnectTimer.current = setTimeout(() => {
           reconnectCount.current += 1
@@ -78,10 +86,11 @@ export function useTransferWs(sessionId: number | null) {
       }
     }
 
-    ws.onerror = () => {
+    ws.onerror = (event) => {
+      console.warn('[ws] Error:', event)
       ws.close()
     }
-  }, [sessionId, handleWsEvent, setWsConnected, cleanup])
+  }, [sessionId, handleWsEvent, setWsConnected, setWsError, cleanup])
 
   useEffect(() => {
     if (sessionId) {

@@ -552,6 +552,57 @@ The structural breakpoints that matter for agents: 1440px (content lock), 1068px
 6. The single drop-shadow (`rgba(0, 0, 0, 0.22) 3px 5px 30px`) is reserved for product photography only.
 7. When in doubt about emphasis: alternate surface (light → dark tile) before adding chrome.
 
+## Transfera Component Patterns
+
+These are Transfera-specific UI components built from the token system above. They are documented here because they represent reusable patterns not found in Apple's web surfaces but consistent with this project's design language.
+
+### `component.media-preview-panel`
+
+The live preview panel on the Transfer page showing thumbnails of transferred media items as they complete.
+
+**Structure:**
+- Outer container: `bg-card`, `border border-border`, `rounded-lg`, `flex-1`
+- Header: `px-4 py-3 border-b border-border`, title `text-sm font-semibold text-foreground` with a `w-4 h-4 text-primary` icon, counter `text-xs text-muted-foreground` showing `completed / total`
+- Body: `p-4 overflow-y-auto` containing a `grid grid-cols-3 gap-2` of thumbnails
+
+**Thumbnail card:**
+- `aspect-square rounded-md overflow-hidden bg-muted hover:bg-muted/80`
+- Current/latest item (first in sort order): `bg-primary/10 border border-primary/20`
+- Contains a `<div className="flex-1 min-h-0">` with the actual thumbnail and a `text-[10px] text-muted-foreground truncate` filename label
+
+**Entry animation (`AnimatePresence` + `motion.div`):**
+- Initial: `opacity: 0, scale: 0.8`
+- Animate: `opacity: 1, scale: 1`
+- Exit: `opacity: 0, scale: 0.8`
+- Transition: `duration: 0.2s` with staggered delay `i * 0.03s`
+
+**Thumbnail loading states:**
+- Loading: `animate-pulse bg-muted` placeholder
+- Loaded: rendered `<img>` with `object-cover`
+- Failed (after 1 retry with 800ms delay): file-extension icon fallback (from `lucide-react`: `Image`, `Film`, `Music`, `FileText`)
+
+**Progressive accumulation:**
+- Items accumulate in a `Map<item_id, RecentItemProgress>` as they arrive from server polls — they never disappear once they have appeared
+- Sorted by `updated_at DESC` so the most-recently-completed item appears first (and is highlighted)
+
+### `component.thumbnail-image`
+
+Generated thumbnail for any media item in the library or transfer preview.
+
+**Specs:**
+- Max dimension: 512px on the longest edge (`THUMBNAIL_MAX_SIZE`)
+- Format: JPEG quality 85, with `optimize=True`
+- Resampling: LANCZOS (Pillow) or `force_original_aspect_ratio=decrease` (ffmpeg)
+- EXIF orientation applied before resize (supports tags 1-8)
+- Named `{item_id}.jpg` and stored in `THUMBNAIL_DIR`
+- Skipped if output file already exists (idempotent)
+- Served via `GET /api/media/{id}/thumbnail` with `Cache-Control: public, max-age=86400`
+
+**Generation strategies (tried in order):**
+1. ExifTool embedded-thumbnail extraction (fastest, zero-decode)
+2. Pillow decode + resize (handles HEIC via pillow-heif)
+3. ffmpeg frame extraction (video, 2.0s offset)
+
 ## Known Gaps
 
 - Form validation and error states were not surfaced on the analyzed pages; only the neutral search input is documented.

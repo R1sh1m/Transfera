@@ -34,6 +34,10 @@ class DuplicateEntry:
     file_size: int
     match_type: str  # "exact" | "potential"
     matched_path: Optional[str] = None  # path of the existing archive copy
+    matched_item_id: Optional[int] = None  # ID of the matched library item
+    matched_file_size: Optional[int] = None  # size of the matched item
+    matched_date_taken: Optional[str] = None  # ISO datetime of the matched item
+    matched_thumbnail_url: Optional[str] = None  # thumbnail URL for the matched item
 
 
 @dataclass
@@ -190,6 +194,16 @@ def _detect_duplicates(
             hash_index.setdefault(ai.source_hash.lower(), []).append(ai)
         name_index.setdefault(ai.file_name.lower(), []).append(ai)
 
+    def _make_matched_url(mi: MediaItem) -> Optional[str]:
+        if mi.thumbnail_path:
+            return f"/api/media/{mi.id}/thumbnail"
+        return None
+
+    def _make_matched_date(mi: MediaItem) -> Optional[str]:
+        if mi.date_taken:
+            return mi.date_taken.isoformat()
+        return None
+
     # Check each batch item
     for item in items:
         item_hash = (item.source_hash or "").lower()
@@ -206,6 +220,10 @@ def _detect_duplicates(
                         file_size=item.file_size,
                         match_type="exact",
                         matched_path=archived.source_path,
+                        matched_item_id=archived.id,
+                        matched_file_size=archived.file_size,
+                        matched_date_taken=_make_matched_date(archived),
+                        matched_thumbnail_url=_make_matched_url(archived),
                     ))
                     break
 
@@ -226,6 +244,10 @@ def _detect_duplicates(
                             file_size=item.file_size,
                             match_type="potential",
                             matched_path=archived.source_path,
+                            matched_item_id=archived.id,
+                            matched_file_size=archived.file_size,
+                            matched_date_taken=_make_matched_date(archived),
+                            matched_thumbnail_url=_make_matched_url(archived),
                         ))
                         break
                 elif not item_hash and archived.file_size == item.file_size:
@@ -238,6 +260,10 @@ def _detect_duplicates(
                         file_size=item.file_size,
                         match_type="potential",
                         matched_path=archived.source_path,
+                        matched_item_id=archived.id,
+                        matched_file_size=archived.file_size,
+                        matched_date_taken=_make_matched_date(archived),
+                        matched_thumbnail_url=_make_matched_url(archived),
                     ))
                     break
 
@@ -283,7 +309,7 @@ async def check_batch(
             batch_id, report.summary,
         )
 
-        # Emit WebSocket alert
+        # Emit WebSocket alert with full matched item details
         await event_bus.emit("duplicates_detected", {
             "batch_id": report.batch_id,
             "session_id": report.session_id,
@@ -295,7 +321,14 @@ async def check_batch(
                     "item_id": e.item_id,
                     "file_name": e.file_name,
                     "source_path": e.source_path,
+                    "source_hash": e.source_hash,
+                    "file_size": e.file_size,
+                    "match_type": e.match_type,
                     "matched_path": e.matched_path,
+                    "matched_item_id": e.matched_item_id,
+                    "matched_file_size": e.matched_file_size,
+                    "matched_date_taken": e.matched_date_taken,
+                    "matched_thumbnail_url": e.matched_thumbnail_url,
                 }
                 for e in report.exact_duplicates
             ],
@@ -304,7 +337,14 @@ async def check_batch(
                     "item_id": e.item_id,
                     "file_name": e.file_name,
                     "source_path": e.source_path,
+                    "source_hash": e.source_hash,
+                    "file_size": e.file_size,
+                    "match_type": e.match_type,
                     "matched_path": e.matched_path,
+                    "matched_item_id": e.matched_item_id,
+                    "matched_file_size": e.matched_file_size,
+                    "matched_date_taken": e.matched_date_taken,
+                    "matched_thumbnail_url": e.matched_thumbnail_url,
                 }
                 for e in report.potential_duplicates
             ],

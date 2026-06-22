@@ -4,10 +4,12 @@
 // ---------------------------------------------------------------------------
 
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import type {
   WSEvent,
   WSEventType,
   SessionInfo,
+  SessionProgress,
   BatchInfo,
   DuplicateReport,
   MediaItemInfo,
@@ -31,6 +33,8 @@ export interface ActiveBatch {
   hop2Progress: number
   hop2Status: HopStatus
   startedAt: string | null
+  currentFileName: string
+  currentItemId: number | null
 }
 
 export interface TransferSnapshot {
@@ -48,6 +52,10 @@ export interface TransferSnapshot {
   speed: number          // files/sec (rolling average)
   elapsed: number        // ms since start
   eta: number | null     // estimated ms remaining
+  startedAt: number | null  // epoch ms when session_started received
+  completedAt: number | null  // epoch ms when session completed (null while running)
+  currentFileName: string
+  currentItemId: number | null  // stable DB id of current file for thumbnail fetching
 }
 
 export interface DuplicateState {
@@ -74,6 +82,15 @@ export interface LibraryState {
 export interface UIState {
   currentPage: 'dashboard' | 'setup' | 'transfer' | 'library'
   notification: { type: 'success' | 'error' | 'warning' | 'info'; message: string } | null
+  defaultTransferMode: TransferMode
+  serverDown: boolean
+  setupSourcePath: string
+  setupDestPath: string
+  setupSessionName: string
+  setupTransferMode: TransferMode
+  setupMoveConfirmed: boolean
+  setupOnlyNewMode: boolean
+  wsError: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +108,7 @@ export interface TransferStore {
   // --- Transfer actions ---------------------------------------------------
   initTransfer: (session: SessionInfo) => void
   resetTransfer: () => void
+  updateFromPolling: (progress: SessionProgress) => void
 
   // --- Duplicate actions ---------------------------------------------------
   openDuplicates: (report: DuplicateReport) => void
@@ -110,8 +128,18 @@ export interface TransferStore {
 
   // --- UI actions ----------------------------------------------------------
   setCurrentPage: (page: UIState['currentPage']) => void
+  setDefaultTransferMode: (mode: TransferMode) => void
   showNotification: (type: 'success' | 'error' | 'warning' | 'info', message: string) => void
   clearNotification: () => void
+  setServerDown: (down: boolean) => void
+  setSetupSourcePath: (path: string) => void
+  setSetupDestPath: (path: string) => void
+  setSetupSessionName: (name: string) => void
+  setSetupTransferMode: (mode: TransferMode) => void
+  setSetupMoveConfirmed: (confirmed: boolean) => void
+  setSetupOnlyNewMode: (onlyNew: boolean) => void
+  resetSetup: () => void
+  setWsError: (error: string | null) => void
 
   // --- WS actions ---------------------------------------------------------
   setWsConnected: (connected: boolean) => void
@@ -136,6 +164,10 @@ const initialTransfer: TransferSnapshot = {
   speed: 0,
   elapsed: 0,
   eta: null,
+  startedAt: null,
+  completedAt: null,
+  currentFileName: '',
+  currentItemId: null,
 }
 
 const initialDuplicates: DuplicateState = {
@@ -162,7 +194,20 @@ const initialLibrary: LibraryState = {
 const initialUI: UIState = {
   currentPage: 'dashboard',
   notification: null,
+  defaultTransferMode: 'copy',
+  serverDown: false,
+  setupSourcePath: '',
+  setupDestPath: '',
+  setupSessionName: '',
+  setupTransferMode: 'copy',
+  setupMoveConfirmed: false,
+  setupOnlyNewMode: false,
+  wsError: null,
 }
+
+// Track which sessions have already fired a completion notification to
+// prevent duplicate toasts if the WS event is dispatched more than once.
+const _notifiedSessions = new Set<number>()
 
 // ---------------------------------------------------------------------------
 // Reducer: handleWsEvent
@@ -180,8 +225,8 @@ function handleWsEventReducer(
     case 'scan_progress': {
       patch.scan = {
         ...state.scan,
-        scannedFiles: (d.scanned_files as number) ?? state.scan.scannedFiles,
-        totalFound: (d.total_found as number) ?? state.scan.totalFound,
+        scannedFiles: (d.processed as number) ?? state.scan.scannedFiles,
+        totalFound: (d.total as number) ?? state.scan.totalFound,
       }
       break
     }
@@ -189,12 +234,12 @@ function handleWsEventReducer(
     case 'scan_complete': {
       patch.scan = {
         isScanning: false,
-        scannedFiles: (d.total_items as number) ?? state.scan.scannedFiles,
-        totalFound: (d.total_items as number) ?? state.scan.totalFound,
+        scannedFiles: (d.item_count as number) ?? state.scan.scannedFiles,
+        totalFound: (d.item_count as number) ?? state.scan.totalFound,
       }
       patch.transfer = {
         ...state.transfer,
-        totalItems: (d.total_items as number) ?? state.transfer.totalItems,
+        totalItems: (d.item_count as number) ?? state.transfer.totalItems,
       }
       break
     }
@@ -206,7 +251,7 @@ function handleWsEventReducer(
         session_id: state.transfer.sessionId ?? 0,
         batch_number: (d.batch_number as number) ?? 0,
         status: 'pending',
-        total_items: (d.total_items as number) ?? 0,
+        total_items: (d.item_count as number) ?? 0,
         completed_items: 0,
         failed_items: 0,
         created_at: new Date().toISOString(),
@@ -224,7 +269,7 @@ function handleWsEventReducer(
       const active: ActiveBatch = {
         batchId,
         batchNumber: (d.batch_number as number) ?? 0,
-        totalItems: (d.total_items as number) ?? 0,
+        totalItems: (d.item_count as number) ?? 0,
         completedItems: 0,
         status: 'processing',
         hop1Progress: 0,
@@ -232,6 +277,8 @@ function handleWsEventReducer(
         hop2Progress: 0,
         hop2Status: 'pending',
         startedAt: new Date().toISOString(),
+        currentFileName: '',
+        currentItemId: null,
       }
       patch.transfer = { ...state.transfer, activeBatch: active }
       break
@@ -259,13 +306,20 @@ function handleWsEventReducer(
     case 'hop1_progress': {
       const active = state.transfer.activeBatch
       if (active) {
+        const processed = (d.processed as number) ?? 0
+        const total = (d.total as number) ?? active.totalItems
+        const itemId = (d.item_id as number) ?? null
         patch.transfer = {
           ...state.transfer,
+          currentFileName: (d.file_name as string) ?? state.transfer.currentFileName,
+          currentItemId: itemId ?? state.transfer.currentItemId,
           activeBatch: {
             ...active,
-            hop1Progress: (d.progress as number) ?? active.hop1Progress,
+            hop1Progress: total > 0 ? Math.round((processed / total) * 100) : 0,
             hop1Status: 'transferring',
-            completedItems: (d.completed as number) ?? active.completedItems,
+            completedItems: processed,
+            currentFileName: (d.file_name as string) ?? active.currentFileName,
+            currentItemId: itemId ?? active.currentItemId,
           },
         }
       }
@@ -281,7 +335,7 @@ function handleWsEventReducer(
             ...active,
             hop1Progress: 100,
             hop1Status: 'completed',
-            completedItems: (d.cached as number) ?? active.completedItems,
+            completedItems: (d.cached_count as number) ?? active.completedItems,
           },
         }
       }
@@ -292,12 +346,19 @@ function handleWsEventReducer(
     case 'hop2_progress': {
       const active = state.transfer.activeBatch
       if (active) {
+        const processed = (d.processed as number) ?? 0
+        const total = (d.total as number) ?? active.totalItems
+        const itemId = (d.item_id as number) ?? null
         patch.transfer = {
           ...state.transfer,
+          currentFileName: (d.file_name as string) ?? state.transfer.currentFileName,
+          currentItemId: itemId ?? state.transfer.currentItemId,
           activeBatch: {
             ...active,
-            hop2Progress: (d.progress as number) ?? active.hop2Progress,
+            hop2Progress: total > 0 ? Math.round((processed / total) * 100) : 0,
             hop2Status: 'transferring',
+            currentFileName: (d.file_name as string) ?? active.currentFileName,
+            currentItemId: itemId ?? active.currentItemId,
           },
         }
       }
@@ -315,7 +376,7 @@ function handleWsEventReducer(
             hop2Status: 'completed',
           },
           completedItems:
-            (d.imported as number) ?? state.transfer.completedItems,
+            (d.imported_count as number) ?? state.transfer.completedItems,
         }
       }
       break
@@ -342,6 +403,7 @@ function handleWsEventReducer(
       patch.transfer = {
         ...state.transfer,
         status: 'running',
+        startedAt: state.transfer.startedAt ?? Date.now(),
       }
       break
     }
@@ -356,9 +418,10 @@ function handleWsEventReducer(
 
     case 'session_complete': {
       const td = d as Record<string, unknown>
+      const rawStatus = (td.status as string) ?? 'completed'
       patch.transfer = {
         ...state.transfer,
-        status: 'completed',
+        status: rawStatus as SessionStatus,
         completedItems: (td.completed_items as number) ?? state.transfer.completedItems,
         failedItems: (td.failed_items as number) ?? state.transfer.failedItems,
         activeBatch: null,
@@ -390,7 +453,9 @@ function handleWsEventReducer(
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
-export const useTransferStore = create<TransferStore>((set) => ({
+export const useTransferStore = create<TransferStore>()(
+  persist(
+    (set) => ({
   // State
   transfer: { ...initialTransfer },
   duplicates: { ...initialDuplicates },
@@ -401,7 +466,7 @@ export const useTransferStore = create<TransferStore>((set) => ({
 
   // --- Transfer actions ---------------------------------------------------
   initTransfer: (session) =>
-    set({
+    set((state) => ({
       transfer: {
         ...initialTransfer,
         sessionId: session.id,
@@ -413,7 +478,59 @@ export const useTransferStore = create<TransferStore>((set) => ({
         totalItems: session.total_items,
         completedItems: session.completed_items,
         failedItems: session.failed_items,
+        startedAt: state.transfer.startedAt,
       },
+    })),
+
+  updateFromPolling: (progress) =>
+    set((state) => {
+      const startedAt = progress.started_at
+        ? new Date(progress.started_at).getTime()
+        : null
+      const completedAt = progress.completed_at
+        ? new Date(progress.completed_at).getTime()
+        : null
+
+      const activeBatch = progress.active_batch_id
+        ? {
+            batchId: progress.active_batch_id,
+            batchNumber: progress.active_batch_number,
+            totalItems: progress.active_batch_total,
+            completedItems: progress.active_batch_completed,
+            status: progress.active_batch_status as BatchStatus,
+            hop1Progress: progress.active_batch_hop1_progress,
+            hop1Status: (progress.active_batch_hop1_progress >= 100
+              ? 'completed'
+              : progress.active_batch_hop1_progress > 0
+                ? 'transferring'
+                : 'pending') as HopStatus,
+            hop2Progress: progress.active_batch_hop2_progress,
+            hop2Status: (progress.active_batch_hop2_progress >= 100
+              ? 'completed'
+              : progress.active_batch_hop2_progress > 0
+                ? 'transferring'
+                : 'pending') as HopStatus,
+            startedAt: startedAt ? new Date(startedAt).toISOString() : null,
+            currentFileName: progress.current_file_name,
+            currentItemId: progress.current_item_id,
+          }
+        : null
+
+      return {
+        transfer: {
+          ...state.transfer,
+          sessionId: progress.session_id,
+          status: progress.status as SessionStatus,
+          totalItems: progress.total_items,
+          completedItems: progress.completed_items,
+          failedItems: progress.failed_items,
+          activeBatch,
+          startedAt,
+          completedAt,
+          currentFileName: progress.current_file_name,
+          currentItemId: progress.current_item_id,
+        },
+      }
     }),
 
   resetTransfer: () => set({ transfer: { ...initialTransfer } }),
@@ -483,6 +600,9 @@ export const useTransferStore = create<TransferStore>((set) => ({
   setCurrentPage: (page) =>
     set((s) => ({ ui: { ...s.ui, currentPage: page } })),
 
+  setDefaultTransferMode: (mode) =>
+    set((s) => ({ ui: { ...s.ui, defaultTransferMode: mode } })),
+
   showNotification: (type, message) =>
     set((s) => ({
       ui: { ...s.ui, notification: { type, message } },
@@ -491,9 +611,121 @@ export const useTransferStore = create<TransferStore>((set) => ({
   clearNotification: () =>
     set((s) => ({ ui: { ...s.ui, notification: null } })),
 
+  setServerDown: (down) =>
+    set((s) => ({ ui: { ...s.ui, serverDown: down } })),
+
+  setSetupSourcePath: (path) =>
+    set((s) => ({ ui: { ...s.ui, setupSourcePath: path } })),
+
+  setSetupDestPath: (path) =>
+    set((s) => ({ ui: { ...s.ui, setupDestPath: path } })),
+
+  setSetupSessionName: (name) =>
+    set((s) => ({ ui: { ...s.ui, setupSessionName: name } })),
+
+  setSetupTransferMode: (mode) =>
+    set((s) => ({ ui: { ...s.ui, setupTransferMode: mode } })),
+
+  setSetupMoveConfirmed: (confirmed) =>
+    set((s) => ({ ui: { ...s.ui, setupMoveConfirmed: confirmed } })),
+
+  setSetupOnlyNewMode: (onlyNew) =>
+    set((s) => ({ ui: { ...s.ui, setupOnlyNewMode: onlyNew } })),
+
+  resetSetup: () =>
+    set((s) => ({
+      ui: {
+        ...s.ui,
+        setupSourcePath: '',
+        setupDestPath: '',
+        setupSessionName: '',
+        setupTransferMode: s.ui.defaultTransferMode,
+        setupMoveConfirmed: false,
+        setupOnlyNewMode: false,
+      },
+    })),
+
+  setWsError: (error) =>
+    set((s) => ({ ui: { ...s.ui, wsError: error } })),
+
   // --- WS actions ---------------------------------------------------------
   setWsConnected: (connected) => set({ wsConnected: connected }),
 
-  handleWsEvent: (event) =>
-    set((state) => handleWsEventReducer(state, event) as TransferStore),
-}))
+  handleWsEvent: (event) => {
+    // Apply the reducer to get the state patch
+    set((state) => handleWsEventReducer(state, event) as TransferStore)
+
+    // Side effect: fire a native notification on session completion if the
+    // window is not focused. Only fires once per session (guarded by
+    // _notifiedSessions set).
+    if (event.event === 'session_complete') {
+      const d = event.data
+      const sessionId = (d.session_id as number) ?? 0
+      const status = (d.status as string) ?? 'completed'
+      const totalItems = (d.total_items as number) ?? 0
+      const completedItems = (d.completed_items as number) ?? 0
+      const failedItems = (d.failed_items as number) ?? 0
+
+      // Skip if already notified for this session
+      if (_notifiedSessions.has(sessionId)) return
+      _notifiedSessions.add(sessionId)
+
+      // Only fire if running inside Electron
+      if (typeof window !== 'undefined' && window.electronAPI) {
+        window.electronAPI.isWindowFocused().then((focused) => {
+          if (focused) return // Don't bother the user if they're looking at the app
+
+          let title: string
+          let body: string
+
+          if (status === 'failed') {
+            title = 'Transfer failed'
+            body = `Transfer of ${totalItems} files failed. Open the app for details.`
+          } else if (failedItems > 0) {
+            title = 'Transfer completed with errors'
+            body = `${completedItems} of ${totalItems} files copied — ${failedItems} failed`
+          } else {
+            title = 'Transfer complete'
+            body = `${completedItems} of ${totalItems} files copied successfully`
+          }
+
+          window.electronAPI!.showNotification({ title, body, sessionId })
+        }).catch(() => {
+          // Ignore errors — notification is best-effort
+        })
+      }
+    }
+  },
+}),
+    {
+      name: 'transfera-preferences',
+      partialize: (state) => ({
+        ui: {
+          defaultTransferMode: state.ui.defaultTransferMode,
+          setupSourcePath: state.ui.setupSourcePath,
+          setupDestPath: state.ui.setupDestPath,
+          setupSessionName: state.ui.setupSessionName,
+          setupTransferMode: state.ui.setupTransferMode,
+          setupOnlyNewMode: state.ui.setupOnlyNewMode,
+        },
+      }),
+      // Zustand's default merge does a shallow top-level spread, which means
+      // the persisted `ui` object (containing only 5 fields) REPLACES the
+      // entire initial `ui` slice, wiping `currentPage`, `notification`,
+      // `serverDown`, `wsError`, and `setupMoveConfirmed` to undefined.
+      // A deep merge of the `ui` slice preserves all initial fields while
+      // restoring only the persisted ones.
+      merge: (persistedState: unknown, currentState: TransferStore) => {
+        const persisted = (persistedState ?? {}) as Record<string, unknown>
+        return {
+          ...currentState,
+          ...persisted,
+          ui: {
+            ...currentState.ui,
+            ...((persisted.ui ?? {}) as Record<string, unknown>),
+          },
+        }
+      },
+    },
+  ),
+)

@@ -1,9 +1,10 @@
 // ---------------------------------------------------------------------------
 // Transfera v2 — Transfer Page
 // Split layout: PreviewPanel (media thumbnails) + TransferMonitor (stats).
+// Polling-based: REST is the source of truth, WebSocket is a bonus.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Play,
@@ -17,53 +18,147 @@ import {
   Clock,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Loader2,
   Zap,
   HardDrive,
 } from 'lucide-react'
-import { useSession, useStartSession, usePauseSession, useCancelSession, useSessionBatches } from '@/lib/queries'
+import { useSession, useStartSession, usePauseSession, useCancelSession, useSessionProgress, useSessionBatches, useMediaList } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { useTransferWs } from '@/hooks/use-transfer-ws'
 import { cn } from '@/lib/utils'
+import type { SessionProgress, RecentItemProgress } from '@/types/api'
 
 // ---------------------------------------------------------------------------
-// PreviewPanel — Animated media thumbnail grid
+// Helpers
 // ---------------------------------------------------------------------------
-function PreviewPanel() {
-  const activeBatch = useTransferStore((s) => s.transfer.activeBatch)
-  const [previewItems, setPreviewItems] = useState<{ name: string; type: 'image' | 'video' | 'audio' | 'other' }[]>([])
+function fileIcon(name: string) {
+  const ext = name.split('.').pop()?.toLowerCase() ?? ''
+  if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'raw', 'tiff', 'webp', 'bmp', 'svg'].includes(ext))
+    return <Image className="w-5 h-5 text-blue-400" />
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', '3gp'].includes(ext))
+    return <Film className="w-5 h-5 text-purple-400" />
+  if (['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma'].includes(ext))
+    return <Music className="w-5 h-5 text-green-400" />
+  if (['pdf', 'doc', 'docx', 'txt', 'md', 'rtf'].includes(ext))
+    return <FileText className="w-5 h-5 text-orange-400" />
+  return <FileText className="w-5 h-5 text-muted-foreground" />
+}
 
-  // Simulate live preview items as batches process
+function formatEta(ms: number | null) {
+  if (ms === null || ms <= 0) return '--:--'
+  const sec = Math.floor(ms / 1000)
+  const min = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${min}:${String(s).padStart(2, '0')}`
+}
+
+function formatElapsed(ms: number) {
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const min = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}:${String(min).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${min}:${String(s).padStart(2, '0')}`
+}
+
+// ---------------------------------------------------------------------------
+// PreviewThumbnail — Reusable thumbnail component
+// ---------------------------------------------------------------------------
+function PreviewThumbnail({ itemId, name, thumbnailUrl: _ }: { itemId: number | null; name: string; thumbnailUrl?: string | null }) {
+  const MAX_RETRIES = 2
+  const [thumbState, setThumbState] = useState<'loading' | 'loaded' | 'failed'>('loading')
+  const [retryKey, setRetryKey] = useState(0)
+  const [retryCount, setRetryCount] = useState(0)
+
+  const thumbUrl = itemId != null ? `/api/media/${itemId}/thumbnail?r=${retryKey}` : null
+
   useEffect(() => {
-    if (!activeBatch) return
-    const fakeNames = [
-      'IMG_2024_001.jpg', 'IMG_2024_002.png', 'VID_2024_001.mp4',
-      'DSC_003.heic', 'sunset.jpg', 'IMG_2024_005.raw',
-      'birthday.mp4', 'photo_001.tiff', 'screencast.webm',
-      'podcast.mp3', 'notes.pdf', 'IMG_2024_008.jpg',
-    ]
-    const types: ('image' | 'video' | 'audio' | 'other')[] = [
-      'image', 'image', 'video', 'image', 'image', 'image',
-      'video', 'image', 'video', 'audio', 'other', 'image',
-    ]
-    const count = Math.min(
-      Math.floor((activeBatch.hop1Progress / 100) * fakeNames.length),
-      fakeNames.length,
-    )
-    setPreviewItems(
-      fakeNames.slice(0, count).map((name, i) => ({
-        name,
-        type: types[i] ?? 'other',
-      })),
-    )
-  }, [activeBatch?.hop1Progress, activeBatch])
+    setThumbState('loading')
+    setRetryCount(0)
+  }, [itemId])
 
-  const iconMap = {
-    image: <Image className="w-5 h-5 text-blue-400" />,
-    video: <Film className="w-5 h-5 text-purple-400" />,
-    audio: <Music className="w-5 h-5 text-green-400" />,
-    other: <FileText className="w-5 h-5 text-muted-foreground" />,
+  if (!itemId) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        {fileIcon(name)}
+      </div>
+    )
   }
+
+  return (
+    <>
+      {thumbState === 'loading' && (
+        <div className="w-full h-20 animate-pulse bg-muted" />
+      )}
+      {thumbState !== 'failed' && (
+        <img
+          src={thumbUrl!}
+          alt={name}
+          className={cn(
+            'w-full h-auto block',
+            thumbState === 'loading' && 'hidden',
+          )}
+          onLoad={() => setThumbState('loaded')}
+          onError={() => {
+            if (retryCount < MAX_RETRIES) {
+              setRetryCount(c => c + 1)
+              setTimeout(() => setRetryKey(k => k + 1), 500 * (retryCount + 1))
+              setThumbState('loading')
+            } else {
+              setThumbState('failed')
+            }
+          }}
+        />
+      )}
+      {thumbState === 'failed' && (
+        <div className="w-full h-full flex items-center justify-center opacity-50">
+          {fileIcon(name)}
+        </div>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// PreviewPanel — Live file transfer preview from polling data
+// Items are accumulated keyed by item_id so thumbnails never disappear
+// once they appear — polls only add new entries to the view.
+// ---------------------------------------------------------------------------
+function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
+  const status = useTransferStore((s) => s.transfer.status)
+  const completedItems = progress?.completed_items ?? 0
+  const totalItems = progress?.total_items ?? 0
+  const isRunning = status === 'running'
+
+  // Accumulate items so they stay visible once they appear.
+  // Polls return the N most-recently-updated items with thumbnails,
+  // which means earlier items silently fall out of the server response.
+  // By accumulating in a Map keyed on item_id we preserve every item
+  // that has ever been reported — new polls only ADD entries.
+  const [itemMap, setItemMap] = useState<Map<number, RecentItemProgress>>(new Map())
+
+  useEffect(() => {
+    if (!progress) {
+      setItemMap(new Map())
+      return
+    }
+    if (!progress.recent_items?.length) return
+    setItemMap(prev => {
+      const next = new Map(prev)
+      for (const item of progress.recent_items) {
+        next.set(item.item_id, item)
+      }
+      return next
+    })
+  }, [progress])
+
+  // Sort by most recently updated so the current/latest item is first
+  const recentFiles = useMemo(() => {
+    return [...itemMap.values()]
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      .slice(0, 60)
+  }, [itemMap])
 
   return (
     <div className="flex-1 bg-card border border-border rounded-lg overflow-hidden">
@@ -72,33 +167,50 @@ function PreviewPanel() {
           <HardDrive className="w-4 h-4 text-primary" />
           Media Preview
         </h3>
-        <span className="text-xs text-muted-foreground">{previewItems.length} files</span>
+        <span className="text-xs text-muted-foreground">
+          {completedItems} / {totalItems} files
+        </span>
       </div>
 
       <div className="p-4 h-[calc(100%-48px)] overflow-y-auto">
-        {previewItems.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-            <Image className="w-12 h-12 mb-3 opacity-30" />
-            <p className="text-sm">Waiting for transfer to begin...</p>
+        {recentFiles.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-3">
+            {isRunning ? (
+              <>
+                <Loader2 className="w-8 h-8 animate-spin opacity-40" />
+                <p className="text-xs">Processing files...</p>
+              </>
+            ) : (
+              <>
+                <Image className="w-10 h-10 opacity-20" />
+                <p className="text-xs">No preview available</p>
+              </>
+            )}
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-2">
+          <div className="columns-3 gap-2">
             <AnimatePresence>
-              {previewItems.map((item, i) => (
-                <motion.div
-                  key={item.name + i}
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  transition={{ duration: 0.2, delay: i * 0.03 }}
-                  className="aspect-square bg-muted rounded-md flex flex-col items-center justify-center gap-1 hover:bg-muted/80 transition-colors"
-                >
-                  {iconMap[item.type]}
-                  <span className="text-[10px] text-muted-foreground truncate w-full text-center px-1">
-                    {item.name}
-                  </span>
-                </motion.div>
-              ))}
+              {recentFiles.map((file, i) => {
+                const opacity = i === 0 ? 1.0 : i < 3 ? 0.90 : i < 9 ? 0.75 : 0.55
+                return (
+                  <motion.div
+                    key={file.item_id}
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    transition={{ duration: 0.2, delay: i * 0.03 }}
+                    className={cn(
+                      'break-inside-avoid mb-2 rounded-md overflow-hidden relative transition-colors',
+                      i === 0 ? 'bg-primary/10 ring-2 ring-primary' : 'bg-muted hover:bg-muted/80',
+                    )}
+                  >
+                    <PreviewThumbnail itemId={file.item_id} name={file.file_name} thumbnailUrl={file.thumbnail_url} />
+                    <span className="text-[10px] text-muted-foreground truncate w-full text-center px-1 py-0.5 block">
+                      {file.file_name}
+                    </span>
+                  </motion.div>
+                )
+              })}
             </AnimatePresence>
           </div>
         )}
@@ -108,32 +220,61 @@ function PreviewPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// TransferMonitor — Performance stats and progress
+// TransferMonitor — Performance stats and progress (polling-based)
 // ---------------------------------------------------------------------------
-function TransferMonitor() {
+function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   const transfer = useTransferStore((s) => s.transfer)
+  const wsConnected = useTransferStore((s) => s.wsConnected)
   const { sessionId } = transfer
   const { data: batches } = useSessionBatches(sessionId)
+  const [, setTick] = useState(0)
+
+  // Fetch failed items
+  const { data: failedItemsData } = useMediaList({
+    sessionId: sessionId ?? undefined,
+    finalStatus: 'failed',
+    pageSize: 100,
+  })
+
+  // Re-render every second while transfer is active to update elapsed/speed/ETA
+  useEffect(() => {
+    if (transfer.status !== 'running' && transfer.status !== 'paused') return
+    const id = setInterval(() => setTick((t) => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [transfer.status])
 
   const activeBatch = transfer.activeBatch
   const overallPct = transfer.totalItems > 0
     ? Math.round((transfer.completedItems / transfer.totalItems) * 100)
     : 0
 
-  const formatEta = (ms: number | null) => {
-    if (ms === null) return '--:--'
-    const sec = Math.floor(ms / 1000)
-    const min = Math.floor(sec / 60)
-    const s = sec % 60
-    return `${min}:${String(s).padStart(2, '0')}`
-  }
+  // Compute elapsed and speed — use fixed completion time for terminal states
+  const isTerminal = ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(transfer.status)
+  const now = Date.now()
+  const elapsedMs = transfer.startedAt
+    ? isTerminal && transfer.completedAt
+      ? transfer.completedAt - transfer.startedAt
+      : now - transfer.startedAt
+    : 0
+  const speed = elapsedMs > 0 ? transfer.completedItems / (elapsedMs / 1000) : 0
+  const remaining = transfer.totalItems - transfer.completedItems
+  const etaMs = isTerminal ? null : (speed > 0 ? (remaining / speed) * 1000 : null)
 
-  const formatElapsed = (ms: number) => {
-    const sec = Math.floor(ms / 1000)
-    const min = Math.floor(sec / 60)
-    const s = sec % 60
-    return `${min}:${String(s).padStart(2, '0')}`
+  // Determine phase text
+  let phaseText = ''
+  if (transfer.status === 'created') phaseText = 'Ready to start'
+  else if (transfer.status === 'running' && activeBatch) {
+    if (activeBatch.hop1Status === 'transferring') phaseText = `Caching file ${activeBatch.completedItems} of ${activeBatch.totalItems}`
+    else if (activeBatch.hop1Status === 'completed' && activeBatch.hop2Status !== 'completed') phaseText = `Importing file ${activeBatch.completedItems} of ${activeBatch.totalItems}`
+    else phaseText = `Processing batch ${activeBatch.batchNumber}...`
   }
+  else if (transfer.status === 'running') phaseText = 'Processing...'
+  else if (transfer.status === 'paused') phaseText = 'Paused'
+  else if (transfer.status === 'completed') phaseText = 'Transfer complete'
+  else if (transfer.status === 'completed_with_errors') phaseText = 'Transfer completed with errors'
+  else if (transfer.status === 'failed') phaseText = 'Transfer failed'
+  else if (transfer.status === 'cancelled') phaseText = 'Transfer cancelled'
+  else phaseText = transfer.status
 
   return (
     <div className="w-80 bg-card border border-border rounded-lg flex flex-col">
@@ -141,6 +282,9 @@ function TransferMonitor() {
         <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
           <Zap className="w-4 h-4 text-primary" />
           Transfer Monitor
+          {!wsConnected && transfer.status === 'running' && (
+            <span className="ml-auto text-[10px] text-muted-foreground">(polling)</span>
+          )}
         </h3>
       </div>
 
@@ -155,7 +299,10 @@ function TransferMonitor() {
             <motion.div
               className={cn(
                 'h-full rounded-full transition-colors',
-                transfer.status === 'completed' ? 'bg-green-500' : 'bg-primary',
+                transfer.status === 'completed' ? 'bg-green-500' :
+                transfer.status === 'completed_with_errors' ? 'bg-amber-500' :
+                transfer.status === 'failed' ? 'bg-red-500' :
+                'bg-primary',
               )}
               initial={{ width: 0 }}
               animate={{ width: `${overallPct}%` }}
@@ -166,6 +313,16 @@ function TransferMonitor() {
             <span>{transfer.completedItems} / {transfer.totalItems}</span>
             <span>{transfer.failedItems} failed</span>
           </div>
+        </div>
+
+        {/* Phase / Status */}
+        <div className="p-3 bg-muted/50 rounded-md">
+          <p className="text-xs font-medium text-foreground">{phaseText}</p>
+          {transfer.currentFileName && (
+            <p className="text-[11px] text-muted-foreground mt-1 truncate">
+              {transfer.currentFileName}
+            </p>
+          )}
         </div>
 
         {/* Hop Progress */}
@@ -204,19 +361,19 @@ function TransferMonitor() {
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Speed</p>
             <p className="text-sm font-semibold text-foreground mt-0.5">
-              {transfer.speed > 0 ? `${transfer.speed.toFixed(1)} f/s` : '--'}
+              {speed > 0 ? `${speed.toFixed(1)} f/s` : '--'}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">ETA</p>
             <p className="text-sm font-semibold text-foreground mt-0.5">
-              {formatEta(transfer.eta)}
+              {formatEta(etaMs)}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Elapsed</p>
             <p className="text-sm font-semibold text-foreground mt-0.5">
-              {formatElapsed(transfer.elapsed)}
+              {formatElapsed(elapsedMs)}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
@@ -252,6 +409,28 @@ function TransferMonitor() {
             </div>
           </div>
         )}
+
+        {/* Failed Items list */}
+        {failedItemsData && failedItemsData.items.length > 0 && (
+          <div className="space-y-2 mt-4 pt-3 border-t border-border">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5" />
+              Failed Items ({failedItemsData.items.length})
+            </p>
+            <div className="max-h-48 overflow-y-auto space-y-1.5 border border-red-200/20 dark:border-red-900/20 rounded-md p-2.5 bg-red-500/5 dark:bg-red-500/5">
+              {failedItemsData.items.map((item) => (
+                <div key={item.id} className="text-[11px] leading-relaxed">
+                  <div className="font-semibold text-foreground truncate" title={item.file_name}>
+                    {item.file_name}
+                  </div>
+                  <div className="text-red-600 dark:text-red-400 break-words font-mono text-[10px] mt-0.5">
+                    {item.error_message || 'Unknown error'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -264,22 +443,96 @@ export default function TransferPage() {
   const transfer = useTransferStore((s) => s.transfer)
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
   const initTransfer = useTransferStore((s) => s.initTransfer)
+  const updateFromPolling = useTransferStore((s) => s.updateFromPolling)
   const resetTransfer = useTransferStore((s) => s.resetTransfer)
+  const duplicates = useTransferStore((s) => s.duplicates)
 
   const { data: session } = useSession(transfer.sessionId)
+  const { data: progress } = useSessionProgress(transfer.sessionId)
   const startSession = useStartSession()
   const pauseSession = usePauseSession()
   const cancelSession = useCancelSession()
 
-  // Connect to WS for real-time events
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const cancelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const initialisedRef = useRef(false)
+  const autoStartedRef = useRef(false)
+  const navigateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Connect to WS for real-time events (bonus, not required)
   useTransferWs(transfer.sessionId)
 
-  // Sync session data into store
+  // Cleanup timers on unmount
   useEffect(() => {
-    if (session) {
+    return () => {
+      if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current)
+      if (navigateTimerRef.current) clearTimeout(navigateTimerRef.current)
+    }
+  }, [])
+
+  // Sync session data into store once on mount (initial values from REST)
+  useEffect(() => {
+    if (session && !initialisedRef.current) {
+      initialisedRef.current = true
       initTransfer(session)
     }
   }, [session, initTransfer])
+
+  // Auto-start: when a fresh session (status 'created') is loaded, immediately
+  // call the start endpoint so the user doesn't need to click "Start" manually.
+  useEffect(() => {
+    if (session && initialisedRef.current && session.status === 'created' && !autoStartedRef.current) {
+      autoStartedRef.current = true
+      if (transfer.sessionId) {
+        startSession.mutate(transfer.sessionId)
+      }
+    }
+  }, [session, transfer.sessionId, startSession])
+
+  // Auto-navigate to Library when a transfer reaches a terminal status.
+  // completed/completed_with_errors → navigate after 2s delay with success toast.
+  // failed → show error toast but stay on page so user can inspect.
+  useEffect(() => {
+    if (transfer.status === 'completed' || transfer.status === 'completed_with_errors') {
+      const message = 'Transfer complete — opening Library...'
+      useTransferStore.getState().showNotification('success', message)
+      navigateTimerRef.current = setTimeout(() => {
+        setCurrentPage('library')
+      }, 2000)
+      return () => {
+        if (navigateTimerRef.current) {
+          clearTimeout(navigateTimerRef.current)
+          navigateTimerRef.current = null
+        }
+      }
+    }
+    if (transfer.status === 'failed') {
+      useTransferStore.getState().showNotification('error', 'Transfer failed. Check the error log.')
+    }
+  }, [transfer.status, setCurrentPage])
+
+  // Sync polling data into store (authoritative source for all live fields).
+  // This runs at ~750ms and replaces WS events as the primary data source.
+  useEffect(() => {
+    if (progress) {
+      updateFromPolling(progress)
+    }
+  }, [progress, updateFromPolling])
+
+  // Esc key to go back (safe guard for mid-transfer)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        if (transfer.status === 'running') {
+          return
+        }
+        handleBack()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [transfer.status])
 
   const handleBack = () => {
     resetTransfer()
@@ -287,7 +540,12 @@ export default function TransferPage() {
   }
 
   const handleStart = () => {
-    if (transfer.sessionId) startSession.mutate(transfer.sessionId)
+    if (transfer.sessionId) {
+      // If auto-start already initiated for a fresh (created) session, don't
+      // double-start. Paused sessions (Resume) are unaffected by this guard.
+      if (transfer.status === 'created' && autoStartedRef.current) return
+      startSession.mutate(transfer.sessionId)
+    }
   }
 
   const handlePause = () => {
@@ -295,6 +553,13 @@ export default function TransferPage() {
   }
 
   const handleCancel = async () => {
+    if (!confirmCancel) {
+      setConfirmCancel(true)
+      cancelTimerRef.current = setTimeout(() => setConfirmCancel(false), 2000)
+      return
+    }
+    if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current)
+    setConfirmCancel(false)
     if (transfer.sessionId) {
       await cancelSession.mutateAsync(transfer.sessionId)
       resetTransfer()
@@ -304,8 +569,8 @@ export default function TransferPage() {
 
   const isRunning = transfer.status === 'running'
   const isPaused = transfer.status === 'paused'
-  const isCompleted = transfer.status === 'completed'
   const isIdle = transfer.status === 'created'
+  const isFinished = ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(transfer.status)
 
   return (
     <div className="h-full flex flex-col space-y-4">
@@ -341,8 +606,14 @@ export default function TransferPage() {
               disabled={startSession.isPending}
               className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
             >
-              <Play className="w-4 h-4" />
-              Start
+              {startSession.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <Play className="w-4 h-4" />
+                  Start
+                </>
+              )}
             </button>
           )}
           {isRunning && (
@@ -361,20 +632,32 @@ export default function TransferPage() {
               disabled={startSession.isPending}
               className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
             >
-              <Play className="w-4 h-4" />
-              Resume
+              {startSession.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <Play className="w-4 h-4" />
+                  Resume
+                </>
+              )}
             </button>
           )}
-          {!isCompleted && (
+          {!isFinished && (
             <button
               onClick={handleCancel}
               disabled={cancelSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-3 py-2 bg-destructive text-destructive-foreground rounded-md text-sm font-medium hover:bg-destructive/90 transition-colors"
+              className={cn(
+                'no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors',
+                confirmCancel
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : 'bg-destructive text-destructive-foreground hover:bg-destructive/90',
+              )}
             >
               <X className="w-4 h-4" />
+              {confirmCancel && <span>Confirm?</span>}
             </button>
           )}
-          {isCompleted && (
+          {isFinished && (
             <button
               onClick={() => setCurrentPage('library')}
               className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
@@ -385,10 +668,37 @@ export default function TransferPage() {
         </div>
       </div>
 
+      {/* Duplicates Paused Banner */}
+      <AnimatePresence>
+        {isPaused && duplicates.report && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span className="flex-1">
+                Duplicate files detected — {duplicates.report.summary}.
+              </span>
+              {!duplicates.isOpen && (
+                <button
+                  onClick={() => useTransferStore.getState().openDuplicates(duplicates.report!)}
+                  className="no-drag px-3 py-1 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 transition-colors"
+                >
+                  Review
+                </button>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Content */}
       <div className="flex-1 flex gap-4 min-h-0">
-        <PreviewPanel />
-        <TransferMonitor />
+        <PreviewPanel progress={progress} />
+        <TransferMonitor progress={progress} />
       </div>
     </div>
   )

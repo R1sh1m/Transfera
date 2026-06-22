@@ -17,8 +17,11 @@ import {
   XCircle,
   Loader2,
   HardDrive,
+  RefreshCw,
+  Trash2,
 } from 'lucide-react'
-import { useMediaList } from '@/lib/queries'
+import { useMediaList, useClearLibrary } from '@/lib/queries'
+import apiClient from '@/lib/api-client'
 import { useTransferStore } from '@/store/transfer'
 import { cn } from '@/lib/utils'
 import type { MediaItemInfo, HopStatus } from '@/types/api'
@@ -102,9 +105,9 @@ function useMasonryColumns(items: MediaItemInfo[], containerWidth: number, gap =
 // LibraryCard
 // ---------------------------------------------------------------------------
 function LibraryCard({ item }: { item: MediaItemInfo }) {
-  const isImage = item.extension && ['.jpg', '.jpeg', '.png', '.gif', '.heic', '.webp', '.raw'].includes(item.extension)
-  const isVideo = item.extension && ['.mp4', '.mov', '.mkv', '.avi', '.webm'].includes(item.extension)
-  const isAudio = item.extension && ['.mp3', '.flac', '.wav', '.aac', '.ogg'].includes(item.extension)
+  const isImage = item.extension && ['.jpg', '.jpeg', '.png', '.gif', '.heic', '.webp', '.raw', '.bmp', '.tiff', '.tif', '.avif', '.jxl'].includes(item.extension)
+  const isVideo = item.extension && ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.3gp'].includes(item.extension)
+  const isAudio = item.extension && ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma'].includes(item.extension)
 
   return (
     <motion.div
@@ -115,16 +118,28 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
     >
       {/* Preview Area */}
       <div className={cn(
-        'relative flex items-center justify-center',
-        isVideo ? 'aspect-[4/3]' : isImage ? 'aspect-square' : 'aspect-[4/3]',
-        isImage ? 'bg-blue-50 dark:bg-blue-950' : isVideo ? 'bg-purple-50 dark:bg-purple-950' : isAudio ? 'bg-green-50 dark:bg-green-950' : 'bg-muted',
+        'relative flex items-center justify-center overflow-hidden',
+        isVideo ? 'aspect-4/3' : isImage ? 'aspect-square' : 'aspect-4/3',
+        isImage && !item.thumbnail_url ? 'bg-blue-50 dark:bg-blue-950' : '',
+        isVideo && !item.thumbnail_url ? 'bg-purple-50 dark:bg-purple-950' : '',
+        isAudio ? 'bg-green-50 dark:bg-green-950' : '',
+        !isImage && !isVideo && !isAudio ? 'bg-muted' : '',
       )}>
-        <div className={cn(
-          'opacity-40 group-hover:opacity-60 transition-opacity',
-          isImage ? 'text-blue-400' : isVideo ? 'text-purple-400' : isAudio ? 'text-green-400' : 'text-muted-foreground',
-        )}>
-          {getIcon(item.extension)}
-        </div>
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt={item.file_name}
+            className="w-full h-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className={cn(
+            'opacity-40 group-hover:opacity-60 transition-opacity',
+            isImage ? 'text-blue-400' : isVideo ? 'text-purple-400' : isAudio ? 'text-green-400' : 'text-muted-foreground',
+          )}>
+            {getIcon(item.extension)}
+          </div>
+        )}
         {/* Status overlay */}
         <div className="absolute top-2 right-2">
           {getStatusIcon(item.final_status)}
@@ -151,6 +166,68 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
 }
 
 // ---------------------------------------------------------------------------
+// Confirm Dialog
+// ---------------------------------------------------------------------------
+function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  loading,
+}: {
+  open: boolean
+  title: string
+  description: string
+  confirmLabel: string
+  onConfirm: () => void
+  onCancel: () => void
+  loading: boolean
+}) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center"
+        >
+          <div className="fixed inset-0 bg-black/50" onClick={onCancel} />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="relative bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 shadow-lg"
+          >
+            <h3 className="text-lg font-semibold text-foreground mb-2">{title}</h3>
+            <p className="text-sm text-muted-foreground mb-6 whitespace-pre-line">{description}</p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={onCancel}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={onConfirm}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+              >
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {confirmLabel}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // LibraryPage
 // ---------------------------------------------------------------------------
 export default function LibraryPage() {
@@ -158,6 +235,9 @@ export default function LibraryPage() {
   const [extension, setExtension] = useState('')
   const [finalStatus, setFinalStatus] = useState('')
   const [viewMode, setViewMode] = useState<'masonry' | 'list'>('masonry')
+  const [regenStatus, setRegenStatus] = useState<'idle' | 'loading' | 'done'>('idle')
+  const [showClearDialog, setShowClearDialog] = useState(false)
+  const clearLibrary = useClearLibrary()
 
   const library = useTransferStore((s) => s.library)
   const appendLibraryItems = useTransferStore((s) => s.appendLibraryItems)
@@ -226,6 +306,31 @@ export default function LibraryPage() {
 
   const allExtensions = ['.jpg', '.png', '.mp4', '.mov', '.mp3', '.pdf', '.raw', '.heic']
 
+  const handleRegenThumbnails = async () => {
+    try {
+      setRegenStatus('loading')
+      const res = await apiClient.post('/media/regenerate-thumbnails')
+      const count = (res.data as { count: number }).count
+      if (count === 0) {
+        setRegenStatus('done')
+      } else {
+        // Poll: check periodically for thumbnail_url to appear
+        let attempts = 0
+        const poll = setInterval(async () => {
+          attempts++
+          // Refresh first page to pick up new thumbnails
+          resetLibrary()
+          if (attempts >= 20) {
+            clearInterval(poll)
+            setRegenStatus('done')
+          }
+        }, 3000)
+      }
+    } catch {
+      setRegenStatus('idle')
+    }
+  }
+
   return (
     <div className="h-full flex flex-col space-y-4">
       {/* Header */}
@@ -245,14 +350,14 @@ export default function LibraryPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search files..."
-            className="w-full pl-9 pr-3 py-2 bg-background border border-input rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            className="w-full pl-9 pr-3 py-2 bg-background border border-input rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
           />
         </div>
 
         <select
           value={extension}
           onChange={(e) => setExtension(e.target.value)}
-          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
         >
           <option value="">All types</option>
           {allExtensions.map((ext) => (
@@ -263,7 +368,7 @@ export default function LibraryPage() {
         <select
           value={finalStatus}
           onChange={(e) => setFinalStatus(e.target.value)}
-          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
         >
           <option value="">All statuses</option>
           <option value="completed">Completed</option>
@@ -291,7 +396,53 @@ export default function LibraryPage() {
             <LayoutList className="w-4 h-4" />
           </button>
         </div>
+
+        <button
+          onClick={handleRegenThumbnails}
+          disabled={regenStatus === 'loading'}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border transition-colors',
+            regenStatus === 'done'
+              ? 'border-green-500 text-green-600 bg-green-50 dark:bg-green-950'
+              : 'border-input text-muted-foreground hover:bg-muted hover:text-foreground',
+            regenStatus === 'loading' && 'opacity-60 cursor-not-allowed',
+          )}
+          title="Re-generate thumbnails for items missing preview images"
+        >
+          {regenStatus === 'loading' ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : regenStatus === 'done' ? (
+            <CheckCircle2 className="w-4 h-4" />
+          ) : (
+            <RefreshCw className="w-4 h-4" />
+          )}
+          {regenStatus === 'done' ? 'Done' : 'Regen Thumbnails'}
+        </button>
+
+        <button
+          onClick={() => setShowClearDialog(true)}
+          disabled={library.total === 0}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border border-input text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Clear all library entries"
+        >
+          <Trash2 className="w-4 h-4" />
+          Clear Library
+        </button>
       </div>
+
+      <ConfirmDialog
+        open={showClearDialog}
+        title="Clear Library"
+        description={`This will permanently remove all ${library.total} library item(s), their database records, and generated thumbnails from the app.\n\nThis only clears app-managed records and cached thumbnails — your actual photos and videos at the transfer destination are NOT affected and will not be deleted.\n\nThis action cannot be undone.`}
+        confirmLabel="Clear Library"
+        onConfirm={() => {
+          clearLibrary.mutate(undefined, {
+            onSettled: () => setShowClearDialog(false),
+          })
+        }}
+        onCancel={() => setShowClearDialog(false)}
+        loading={clearLibrary.isPending}
+      />
 
       {/* Content */}
       <div ref={containerRef} className="flex-1 overflow-y-auto">
@@ -331,14 +482,14 @@ export default function LibraryPage() {
                   key={item.id}
                   className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md hover:bg-muted/50 transition-colors"
                 >
-                  <div className="w-8 h-8 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                  <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
                     {getIcon(item.extension)}
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground truncate">{item.file_name}</p>
                     <p className="text-xs text-muted-foreground truncate">{item.source_path}</p>
                   </div>
-                  <span className="text-xs text-muted-foreground flex-shrink-0">{formatSize(item.file_size)}</span>
+                  <span className="text-xs text-muted-foreground shrink-0">{formatSize(item.file_size)}</span>
                   {getStatusIcon(item.final_status)}
                 </div>
               ))}

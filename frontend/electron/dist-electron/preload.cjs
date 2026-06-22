@@ -15,6 +15,8 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     showOpenDialog: (options) => electron_1.ipcRenderer.invoke('dialog:open', options),
     showSaveDialog: (options) => electron_1.ipcRenderer.invoke('dialog:save', options),
     showMessageBox: (options) => electron_1.ipcRenderer.invoke('dialog:message', options),
+    // Directory picker — returns selected folder path or null
+    openDirectory: (defaultPath) => electron_1.ipcRenderer.invoke('dialog:open-directory', defaultPath),
     // Window controls
     minimizeWindow: () => electron_1.ipcRenderer.invoke('window:minimize'),
     maximizeWindow: () => electron_1.ipcRenderer.invoke('window:maximize'),
@@ -24,5 +26,34 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     getBackendStatus: () => electron_1.ipcRenderer.invoke('backend:status'),
     // Shell
     showItemInFolder: (fullPath) => electron_1.ipcRenderer.invoke('shell:showItemInFolder', fullPath),
+    openPath: (fullPath) => electron_1.ipcRenderer.invoke('shell:openPath', fullPath),
+    // Backend lifecycle events
+    onBackendDown: (callback) => {
+        electron_1.ipcRenderer.on('backend:down', callback);
+        return () => electron_1.ipcRenderer.removeListener('backend:down', callback);
+    },
+    // Native OS notification — returns true if shown, false if unsupported
+    showNotification: (opts) => electron_1.ipcRenderer.invoke('notification:show', opts),
+    // Notification click handler — fires when user clicks a notification toast
+    onNotificationClick: (callback) => {
+        const handler = (_event, sessionId) => callback(sessionId);
+        electron_1.ipcRenderer.on('notification:click', handler);
+        return () => electron_1.ipcRenderer.removeListener('notification:click', handler);
+    },
+    // Window focus state
+    isWindowFocused: () => electron_1.ipcRenderer.invoke('window:isFocused'),
+    // Elevated driver installation — runs winget with UAC elevation
+    installDriverElevated: (opts) => electron_1.ipcRenderer.invoke('driver:installElevated', opts),
+    // Open Microsoft Store page for Apple Mobile Device Support (winget fallback)
+    openDriverStorePage: () => electron_1.ipcRenderer.invoke('driver:openStorePage'),
+    // --- Tier 2 (WSL2 + usbipd-win) -----------------------------------------
+    // Run an elevated command via UAC prompt
+    runElevated: (opts) => electron_1.ipcRenderer.invoke('tier2:runElevated', opts),
+    // Run an arbitrary command (usbipd, wsl.exe, etc.)
+    runCommand: (opts) => electron_1.ipcRenderer.invoke('tier2:runCommand', opts),
+    // Check hardware virtualization status
+    checkVirtualization: () => electron_1.ipcRenderer.invoke('tier2:checkVirtualization'),
+    // Restart the app (relaunch + exit)
+    restartApp: () => electron_1.ipcRenderer.invoke('tier2:restart'),
 });
 //# sourceMappingURL=preload.js.map

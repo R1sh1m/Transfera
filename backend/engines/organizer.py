@@ -21,6 +21,50 @@ logger = logging.getLogger(__name__)
 # Maximum suffix index before giving up (stem_001 .. stem_999)
 _MAX_SUFFIX = 999
 
+# Fixed English month names — locale-independent
+MONTH_NAMES = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def format_month_folder(dt: datetime) -> str:
+    """Format a month folder name as ``MM-MonthName`` (e.g. ``04-April``)."""
+    return f"{dt.month:02d}-{MONTH_NAMES[dt.month]}"
+
+
+def parse_month_folder(name: str) -> int | None:
+    """
+    Parse a month folder name and return the month number (1-12), or None.
+
+    Recognizes three formats used across Transfera versions:
+    - ``MM-MonthName`` (current): ``04-April``
+    - ``MonthName(MM)`` (prior):  ``April(04)``
+    - ``MM`` (original):          ``04``
+    """
+    # Current format: MM-MonthName
+    if len(name) >= 3 and name[2] == "-" and name[:2].isdigit():
+        month = int(name[:2])
+        if 1 <= month <= 12:
+            return month
+
+    # Prior format: MonthName(MM) — e.g. "April(04)"
+    paren = name.rfind("(")
+    if paren != -1 and name.endswith(")"):
+        inside = name[paren + 1 : -1]
+        if inside.isdigit():
+            month = int(inside)
+            if 1 <= month <= 12:
+                return month
+
+    # Original format: plain MM
+    if name.isdigit() and len(name) <= 2:
+        month = int(name)
+        if 1 <= month <= 12:
+            return month
+
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -96,7 +140,7 @@ def _build_folder(
         if part == "year":
             segments.append(f"{dt.year}")
         elif part == "month":
-            segments.append(f"{dt.month:02d}")
+            segments.append(format_month_folder(dt))
         elif part == "day":
             segments.append(f"{dt.day:02d}")
 

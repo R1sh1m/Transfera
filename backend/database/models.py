@@ -1,7 +1,7 @@
 """
 Transfera v2 — SQLAlchemy ORM Models
 Mapped-column API (SQLAlchemy 2.0 style).
-Tables: media_items, transfer_sessions, transfer_batches.
+Tables: media_items, transfer_sessions, transfer_batches, device_import_states.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ class SessionStatus(str, enum.Enum):
     RUNNING = "running"
     PAUSED = "paused"
     COMPLETED = "completed"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -109,6 +110,19 @@ class MediaItem(Base):
     # --- Error tracking ---
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # --- Thumbnail ---
+    thumbnail_path: Mapped[Optional[str]] = mapped_column(
+        String(4096), nullable=True
+    )
+
+    # --- Date resolution ---
+    date_taken: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    date_source: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )  # "exif", "file_modified", or None (unsorted)
 
     # --- Live Photo grouping ---
     live_photo_group: Mapped[Optional[str]] = mapped_column(
@@ -194,6 +208,17 @@ class TransferSession(Base):
 
     # --- Error tracking ---
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # --- Incremental import ---
+    only_new_mode: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+    # --- Duplicate resolution persistence ---
+    resolved_batch_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=None
+    )
+    duplicate_resolutions_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
 
     # --- Timestamps ---
     created_at: Mapped[datetime] = mapped_column(
@@ -303,3 +328,48 @@ class TransferBatch(Base):
 
     def __repr__(self) -> str:
         return f"<TransferBatch id={self.id} batch={self.batch_number}>"
+
+
+# ---------------------------------------------------------------------------
+# device_import_states
+# ---------------------------------------------------------------------------
+class DeviceImportState(Base):
+    """
+    Persistent per-device record tracking the last successful import cutoff.
+
+    Keyed by a stable device identifier (e.g. UDID/serial), not the display
+    name. The cutoff is the modified-time of the oldest item that was NOT
+    successfully handled in the last session — or, if all items succeeded,
+    the newest item's mtime. Files at or below this timestamp can be safely
+    skipped on subsequent "only new" imports.
+    """
+
+    __tablename__ = "device_import_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    device_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    last_successful_cutoff: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_import_session_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("transfer_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_device_import_states_device_id", "device_id"),
+    )
+
+    def __init__(self, **kwargs: object) -> None:
+        now = _utcnow()
+        kwargs.setdefault("updated_at", now)
+        super().__init__(**kwargs)
+
+    def touch(self) -> None:
+        self.updated_at = _utcnow()
+
+    def __repr__(self) -> str:
+        return f"<DeviceImportState device_id={self.device_id!r} cutoff={self.last_successful_cutoff}>"

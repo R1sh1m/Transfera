@@ -19,6 +19,7 @@ dist/
 node_modules/
 frontend/dist/
 frontend/dist-electron/
+frontend/electron/dist-electron/
 frontend/release/
 
 # --- Environment ---
@@ -31,6 +32,8 @@ venv/
 
 # --- IDE / Editor ---
 .vscode/
+pyproject.toml
+pyrightconfig.json
 .idea/
 *.swp
 *.swo
@@ -65,6 +68,12 @@ backend/data/db/test_*.db*
 # --- ExifTool downloaded binaries ---
 backend/bin/exiftool/
 
+# --- Native build artifacts ---
+backend/bin_debug/
+native/wpd_helper/build/
+native/wpd_helper/.cache/
+*.obj
+
 # --- Misc ---
 *.bak
 *.backup
@@ -80,3 +89,6 @@ Transfera_Architecture_Spec_v2.pdf
 
 # Exclude internal backend testing scripts
 backend/tests/
+test_dest/
+test_source/
+opencode.json

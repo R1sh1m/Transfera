@@ -44,4 +44,56 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Backend status
   getBackendStatus: () => ipcRenderer.invoke('backend:status'),
+
+  // Shell
+  showItemInFolder: (fullPath: string) =>
+    ipcRenderer.invoke('shell:showItemInFolder', fullPath),
+  openPath: (fullPath: string) =>
+    ipcRenderer.invoke('shell:openPath', fullPath),
+
+  // Backend lifecycle events
+  onBackendDown: (callback: () => void) => {
+    ipcRenderer.on('backend:down', callback)
+    return () => ipcRenderer.removeListener('backend:down', callback)
+  },
+
+  // Native OS notification — returns true if shown, false if unsupported
+  showNotification: (opts: { title: string; body: string; sessionId: number }) =>
+    ipcRenderer.invoke('notification:show', opts),
+
+  // Notification click handler — fires when user clicks a notification toast
+  onNotificationClick: (callback: (sessionId: number) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, sessionId: number) => callback(sessionId)
+    ipcRenderer.on('notification:click', handler)
+    return () => ipcRenderer.removeListener('notification:click', handler)
+  },
+
+  // Window focus state
+  isWindowFocused: () => ipcRenderer.invoke('window:isFocused'),
+
+  // Elevated driver installation — runs winget with UAC elevation
+  installDriverElevated: (opts: { executable: string; args: string[] }) =>
+    ipcRenderer.invoke('driver:installElevated', opts),
+
+  // Open Microsoft Store page for Apple Mobile Device Support (winget fallback)
+  openDriverStorePage: () => ipcRenderer.invoke('driver:openStorePage'),
+
+  // --- Tier 2 (WSL2 + usbipd-win) -----------------------------------------
+  // Run an elevated command via UAC prompt
+  runElevated: (opts: { executable: string; args: string[]; description: string }) =>
+    ipcRenderer.invoke('tier2:runElevated', opts),
+
+  // Run an arbitrary command (usbipd, wsl.exe, etc.)
+  runCommand: (opts: {
+    executable: string
+    args: string[]
+    elevated?: boolean
+    timeoutMs?: number
+  }) => ipcRenderer.invoke('tier2:runCommand', opts),
+
+  // Check hardware virtualization status
+  checkVirtualization: () => ipcRenderer.invoke('tier2:checkVirtualization'),
+
+  // Restart the app (relaunch + exit)
+  restartApp: () => ipcRenderer.invoke('tier2:restart'),
 })

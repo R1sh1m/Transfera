@@ -103,12 +103,46 @@ get_session = session_scope
 
 
 async def create_all_tables() -> None:
-    """Create all tables defined in the models module."""
+    """Create all tables defined in the models module, then apply migrations."""
     from backend.database import models  # noqa: F811
 
     engine = await get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
+
+        # SQLite migrations: add columns if they don't exist yet.
+        migrations = [
+            (
+                "SELECT name FROM pragma_table_info('media_items') WHERE name='thumbnail_path'",
+                "ALTER TABLE media_items ADD COLUMN thumbnail_path VARCHAR(4096) DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('media_items') WHERE name='date_taken'",
+                "ALTER TABLE media_items ADD COLUMN date_taken DATETIME DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('media_items') WHERE name='date_source'",
+                "ALTER TABLE media_items ADD COLUMN date_source VARCHAR(32) DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='only_new_mode'",
+                "ALTER TABLE transfer_sessions ADD COLUMN only_new_mode BOOLEAN NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='resolved_batch_id'",
+                "ALTER TABLE transfer_sessions ADD COLUMN resolved_batch_id INTEGER DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='duplicate_resolutions_json'",
+                "ALTER TABLE transfer_sessions ADD COLUMN duplicate_resolutions_json TEXT DEFAULT NULL",
+            ),
+        ]
+        for check_sql, alter_sql in migrations:
+            result = await conn.execute(text(check_sql))
+            if result.fetchone() is None:
+                await conn.execute(text(alter_sql))
+                logger.info("Migration applied: %s", alter_sql[:60])
+
     logger.info("All tables created.")
 
 

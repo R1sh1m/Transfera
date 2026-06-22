@@ -3,7 +3,8 @@
 // Live system metrics, directory analysis, session management.
 // ---------------------------------------------------------------------------
 
-import { motion } from 'framer-motion'
+import { useState, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
   HardDrive,
   Play,
@@ -19,11 +20,13 @@ import {
   ArrowRightLeft,
   Activity,
   Database,
-  Shield,
-  Zap,
   FileText,
+  ChevronDown,
+  ChevronRight,
+  Trash2,
+  X,
 } from 'lucide-react'
-import { useSessionList, useRecovery, useFolderMetadata } from '@/lib/queries'
+import { useSessionList, useRecovery, useFolderMetadata, useHealth, useDiskSpace, useClearSessions } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { cn, isElectron } from '@/lib/utils'
 import type { SessionInfo, SessionStatus } from '@/types/api'
@@ -38,6 +41,21 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${units[i]}`
 }
 
+function timeAgo(dateStr: string): string {
+  const now = Date.now()
+  const then = new Date(dateStr).getTime()
+  const diffMs = now - then
+  const seconds = Math.floor(diffMs / 1000)
+  if (seconds < 60) return 'just now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d ago`
+  return new Date(dateStr).toLocaleDateString()
+}
+
 // ---------------------------------------------------------------------------
 // Status Badge
 // ---------------------------------------------------------------------------
@@ -48,6 +66,7 @@ const statusConfig: Record<SessionStatus, { color: string; bg: string; icon: Rea
   running:   { color: 'text-blue-600 dark:text-blue-400',   bg: 'bg-blue-50 dark:bg-blue-950',   icon: <Play className="w-3.5 h-3.5" /> },
   paused:    { color: 'text-amber-600 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-950', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
   completed: { color: 'text-green-600 dark:text-green-400', bg: 'bg-green-50 dark:bg-green-950', icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
+  completed_with_errors: { color: 'text-amber-600 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-950', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
   failed:    { color: 'text-red-600 dark:text-red-400',     bg: 'bg-red-50 dark:bg-red-950',     icon: <AlertTriangle className="w-3.5 h-3.5" /> },
   cancelled: { color: 'text-muted-foreground', bg: 'bg-muted',               icon: <Clock className="w-3.5 h-3.5" /> },
 }
@@ -143,20 +162,36 @@ function DirMetricsCard({ label, sublabel, icon, iconBg, path, sessionName, tran
 function ResumeAlert() {
   const { data: sessionList } = useSessionList(1, 100)
   const recovery = useRecovery()
+  const [expanded, setExpanded] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
   const pausedSessions = sessionList?.sessions.filter(
     (s) => s.status === 'paused' || s.status === 'created',
   ) ?? []
 
-  if (pausedSessions.length === 0) return null
+  // Reset dismiss when the underlying list changes (new sessions appear on
+  // a fresh page load after a prior dismiss).
+  useEffect(() => {
+    setDismissed(false)
+  }, [pausedSessions.length])
+
+  if (pausedSessions.length === 0 || dismissed) return null
 
   return (
     <motion.div
       initial={{ opacity: 0, y: -8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mb-6"
+      className="relative bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mb-6"
     >
+      <button
+        onClick={() => setDismissed(true)}
+        className="no-drag absolute top-3 right-3 text-amber-400 hover:text-amber-600 dark:hover:text-amber-200 transition-colors"
+        title="Dismiss"
+      >
+        <X className="w-4 h-4" />
+      </button>
+
       <div className="flex items-start gap-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-900 flex items-center justify-center">
+        <div className="shrink-0 w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-900 flex items-center justify-center">
           <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
         </div>
         <div className="flex-1 min-w-0">
@@ -166,9 +201,55 @@ function ResumeAlert() {
           <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
             {pausedSessions.length} session{pausedSessions.length > 1 ? 's' : ''} can be resumed.
           </p>
+
+          {/* Expandable session list */}
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="no-drag flex items-center gap-1 mt-2 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-800 dark:hover:text-amber-200 transition-colors"
+          >
+            {expanded ? (
+              <ChevronDown className="w-3 h-3" />
+            ) : (
+              <ChevronRight className="w-3 h-3" />
+            )}
+            {expanded ? 'Hide details' : 'Show details'}
+          </button>
+
+          {expanded && (
+            <div className="mt-2 space-y-1.5">
+              {pausedSessions.map((s) => (
+                <div
+                  key={s.id}
+                  className="flex items-center justify-between text-xs px-2.5 py-1.5 bg-amber-100/50 dark:bg-amber-900/30 rounded"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-medium text-amber-800 dark:text-amber-200 truncate">
+                      {s.session_name}
+                    </span>
+                    <span className={cn(
+                      'text-[10px] font-mono px-1.5 py-0.5 rounded',
+                      s.transfer_mode === 'copy'
+                        ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300'
+                        : 'bg-amber-100 dark:bg-amber-800 text-amber-700 dark:text-amber-300',
+                    )}>
+                      {s.transfer_mode === 'copy' ? 'COPY' : 'MOVE'}
+                    </span>
+                  </div>
+                  <span className="text-amber-600 dark:text-amber-400 ml-2 shrink-0">
+                    {s.total_items} items
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex gap-2 mt-2">
             <button
-              onClick={() => recovery.mutate()}
+              onClick={() => {
+                recovery.mutate(undefined, {
+                  onSuccess: () => setDismissed(true),
+                })
+              }}
               disabled={recovery.isPending}
               className="no-drag inline-flex items-center gap-1 px-3 py-1.5 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors disabled:opacity-50"
             >
@@ -183,14 +264,277 @@ function ResumeAlert() {
 }
 
 // ---------------------------------------------------------------------------
-// System Stats (static info badges)
+// Confirm Dialog
 // ---------------------------------------------------------------------------
-const sysStats = [
-  { icon: Database, label: 'Storage', value: 'SQLite WAL' },
-  { icon: Shield, label: 'Hashing', value: 'BLAKE3' },
-  { icon: Zap, label: 'Pipeline', value: 'Two-Hop' },
-  { icon: Activity, label: 'Status', value: 'Online' },
-]
+function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  loading,
+}: {
+  open: boolean
+  title: string
+  description: string
+  confirmLabel: string
+  onConfirm: () => void
+  onCancel: () => void
+  loading: boolean
+}) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center"
+        >
+          <div className="fixed inset-0 bg-black/50" onClick={onCancel} />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="relative bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 shadow-lg"
+          >
+            <h3 className="text-lg font-semibold text-foreground mb-2">{title}</h3>
+            <p className="text-sm text-muted-foreground mb-6 whitespace-pre-line">{description}</p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={onCancel}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={onConfirm}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+              >
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {confirmLabel}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Clear Sessions Button
+// ---------------------------------------------------------------------------
+function ClearSessionsButton({ sessionCount }: { sessionCount: number }) {
+  const [showDialog, setShowDialog] = useState(false)
+  const clearSessions = useClearSessions()
+
+  const handleConfirm = () => {
+    clearSessions.mutate(undefined, {
+      onSettled: () => setShowDialog(false),
+    })
+  }
+
+  if (sessionCount === 0) return null
+
+  return (
+    <>
+      <button
+        onClick={() => setShowDialog(true)}
+        className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 border border-input rounded-md transition-colors"
+        title="Clear session history"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+        Clear Sessions
+      </button>
+      <ConfirmDialog
+        open={showDialog}
+        title="Clear Session History"
+        description={`This will permanently remove all ${sessionCount} session(s), their batches, library items, and generated thumbnails from the app.\n\nThis only clears app records — your actual files at the transfer destination are not affected.\n\nThis action cannot be undone.`}
+        confirmLabel="Clear All Sessions"
+        onConfirm={handleConfirm}
+        onCancel={() => setShowDialog(false)}
+        loading={clearSessions.isPending}
+      />
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Backend Status Card
+// ---------------------------------------------------------------------------
+function BackendStatusCard() {
+  const { data: health, isLoading: healthLoading, isError: healthError } = useHealth()
+  const wsConnected = useTransferStore((s) => s.wsConnected)
+  const sessionId = useTransferStore((s) => s.transfer.sessionId)
+
+  const restOnline = !healthLoading && !healthError && health?.status === 'ok'
+  const restColor = healthLoading
+    ? 'bg-muted'
+    : restOnline
+      ? 'bg-green-500'
+      : 'bg-red-500'
+  const wsColor = wsConnected
+    ? 'bg-green-500'
+    : sessionId !== null
+      ? 'bg-red-500'
+      : 'bg-muted-foreground/40'
+  const wsTooltip = wsConnected
+    ? 'WebSocket connected'
+    : sessionId !== null
+      ? 'WebSocket disconnected'
+      : 'No active transfer'
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
+      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+        <Activity className="w-4.5 h-4.5 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-muted-foreground">Backend Status</p>
+        <div className="flex items-center gap-3 mt-1">
+          <div className="flex items-center gap-1.5">
+            <span className={cn('w-2 h-2 rounded-full', restColor)} />
+            <span className="text-[11px] text-muted-foreground">REST</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className={cn('w-2 h-2 rounded-full', wsColor)} title={wsTooltip} />
+            <span className="text-[11px] text-muted-foreground">WS</span>
+          </div>
+        </div>
+      </div>
+      {health?.version && (
+        <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+          v{health.version}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate Stats Card
+// ---------------------------------------------------------------------------
+function AggregateStatsCard({ sessions }: { sessions: SessionInfo[] }) {
+  const totalSessions = sessions.length
+  const totalFiles = sessions.reduce((sum, s) => sum + s.completed_items, 0)
+  const totalVolume = sessions.reduce((sum, s) => sum + (s.total_bytes_volume ?? 0), 0)
+  const activeCount = sessions.filter(
+    (s) => s.status === 'running' || s.status === 'paused',
+  ).length
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
+      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+        <Database className="w-4.5 h-4.5 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-muted-foreground">Aggregate Stats</p>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1">
+          <span className="text-[11px] text-muted-foreground">{totalSessions} sessions</span>
+          <span className="text-[11px] text-muted-foreground">{totalFiles.toLocaleString()} files</span>
+          <span className="text-[11px] text-muted-foreground">{formatBytes(totalVolume)} vol.</span>
+          <span className="text-[11px] text-muted-foreground">
+            {activeCount > 0 ? (
+              <span className="text-blue-600 dark:text-blue-400">{activeCount} active</span>
+            ) : (
+              'No active'
+            )}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Storage Health Card
+// ---------------------------------------------------------------------------
+function StorageHealthCard({ destPath }: { destPath: string | null }) {
+  const { data: diskSpace, isLoading } = useDiskSpace(destPath)
+
+  const freePct = diskSpace
+    ? Math.round((diskSpace.free_bytes / diskSpace.total_bytes) * 100)
+    : null
+
+  const healthColor = !diskSpace
+    ? 'text-muted-foreground'
+    : freePct !== null && freePct < 10
+      ? 'text-red-600 dark:text-red-400'
+      : freePct !== null && freePct < 25
+        ? 'text-amber-600 dark:text-amber-400'
+        : 'text-green-600 dark:text-green-400'
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
+      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+        <HardDrive className="w-4.5 h-4.5 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-muted-foreground">Storage Health</p>
+        {isLoading && destPath ? (
+          <div className="flex items-center gap-1.5 mt-1">
+            <Loader2 className="w-3 h-3 text-muted-foreground animate-spin" />
+            <span className="text-[11px] text-muted-foreground">Checking...</span>
+          </div>
+        ) : diskSpace ? (
+          <div className="mt-1">
+            <p className={cn('text-sm font-semibold', healthColor)}>
+              {formatBytes(diskSpace.free_bytes)} free
+            </p>
+            <p className="text-[10px] text-muted-foreground">
+              of {formatBytes(diskSpace.total_bytes)} total ({freePct}% free)
+            </p>
+          </div>
+        ) : (
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {destPath ? 'Unable to read disk' : 'No destination set'}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Last Backup Card
+// ---------------------------------------------------------------------------
+function LastBackupCard({ sessions }: { sessions: SessionInfo[] }) {
+  const lastCompleted = sessions.find((s) => s.status === 'completed')
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
+      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+        <CheckCircle2 className="w-4.5 h-4.5 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-muted-foreground">Last Backup</p>
+        {lastCompleted ? (
+          <div className="mt-1">
+            <p className="text-sm font-semibold text-foreground truncate" title={lastCompleted.session_name}>
+              {lastCompleted.session_name}
+            </p>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground">
+                {lastCompleted.completed_at ? timeAgo(lastCompleted.completed_at) : 'unknown'}
+              </span>
+              {lastCompleted.failed_items > 0 && (
+                <span className="text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                  {lastCompleted.failed_items} failed
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="text-[11px] text-muted-foreground mt-1">No backups yet</p>
+        )}
+      </div>
+    </div>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Session Table Row
@@ -205,8 +549,11 @@ function SessionRow({ session }: { session: SessionInfo }) {
   }
 
   const handleViewReport = () => {
-    if (session.session_report_path) {
-      window.electronAPI?.showItemInFolder(session.session_report_path)
+    if (!session.session_report_path) return
+    if (isElectron && window.electronAPI?.openPath) {
+      window.electronAPI.openPath(session.session_report_path)
+    } else {
+      window.open(`/api/sessions/${session.id}/report?fmt=html`, '_blank')
     }
   }
 
@@ -258,16 +605,22 @@ function SessionRow({ session }: { session: SessionInfo }) {
               Resume
             </button>
           )}
-          {session.status === 'completed' && session.session_report_path && isElectron && (
+          {['completed', 'completed_with_errors', 'failed'].includes(session.status) && session.session_report_path && (
             <button
               onClick={handleViewReport}
               className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
+              title="Open HTML report"
             >
               <FileText className="w-3 h-3" />
               Report
             </button>
           )}
-          {session.status === 'completed' && (
+          {['failed', 'cancelled', 'completed_with_errors'].includes(session.status) && !session.session_report_path && (
+            <span className="text-[10px] text-muted-foreground italic" title="Report not generated — session did not complete">
+              No report
+            </span>
+          )}
+          {['completed', 'completed_with_errors', 'failed'].includes(session.status) && (
             <button
               onClick={handleResume}
               className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
@@ -332,17 +685,10 @@ export default function DashboardPage() {
 
       {/* System Stats */}
       <div className="grid grid-cols-4 gap-3">
-        {sysStats.map((s) => (
-          <div key={s.label} className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
-              <s.icon className="w-4.5 h-4.5 text-primary" />
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">{s.label}</p>
-              <p className="text-sm font-semibold text-foreground">{s.value}</p>
-            </div>
-          </div>
-        ))}
+        <BackendStatusCard />
+        <AggregateStatsCard sessions={sessionList?.sessions ?? []} />
+        <StorageHealthCard destPath={activeDest} />
+        <LastBackupCard sessions={sessionList?.sessions ?? []} />
       </div>
 
       {/* Quick Start */}
@@ -366,9 +712,12 @@ export default function DashboardPage() {
       <div>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold text-foreground">Recent Sessions</h2>
-          {sessionList && sessionList.total > 20 && (
-            <button className="text-xs text-primary hover:underline">View All</button>
-          )}
+          <div className="flex items-center gap-2">
+            {sessionList && sessionList.total > 20 && (
+              <button className="text-xs text-primary hover:underline">View All</button>
+            )}
+            {sessionList && <ClearSessionsButton sessionCount={sessionList.total} />}
+          </div>
         </div>
 
         {isLoading ? (

@@ -11,9 +11,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "build:native": "cmd /c \"..\\native\\wpd_helper\\build.bat\"",
+    "preelectron:dev": "npm run build:native && tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\"",
     "electron:dev": "concurrently \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
-    "electron:build": "tsc -b && vite build && electron-builder --win",
-    "electron:build:dir": "tsc -b && vite build && electron-builder --win --dir",
+    "electron:build": "npm run build:native && tsc -b && vite build && tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\" && electron-builder --win",
+    "electron:build:dir": "npm run build:native && tsc -b && vite build && tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\" && electron-builder --win --dir",
     "electron:compile": "tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\" && electron-builder --win",
     "typecheck": "tsc --noEmit"
   },
@@ -30,15 +32,14 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.2",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.3.1",
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
     "wait-on": "^8.0.3"
@@ -63,6 +64,7 @@
           "**/*.py",
           "requirements.txt",
           "config.py",
+          "bin/wpd_helper.exe",
           "!__pycache__/**",
           "!*.pyc",
           "!data/**"
@@ -70,7 +72,7 @@
       }
     ],
     "win": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -89,8 +91,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Transfera",
-      "installerIcon": "build/icon.png",
-      "uninstallerIcon": "build/icon.png",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "warningsAsErrors": false
     },
     "linux": {

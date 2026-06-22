@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -33,6 +34,8 @@ FRONTEND_DIST = FRONTEND_DIR / "dist"
 VENV_DIR = ROOT_DIR / ".venv"
 NODE_MODULES = FRONTEND_DIR / "node_modules"
 REQ_FILE = BACKEND_DIR / "requirements.txt"
+NATIVE_WPD_DIR = ROOT_DIR / "native" / "wpd_helper"
+WPD_HELPER_EXE = BACKEND_DIR / "bin" / "wpd_helper.exe"
 
 BACKEND_PORT = 47821
 VITE_PORT = 5173
@@ -187,10 +190,52 @@ def _stream_output(proc: subprocess.Popen, tag: str, color: str) -> None:
 # ---------------------------------------------------------------------------
 # STEP 1: Backend virtual environment (Python 3.12 enforced)
 # ---------------------------------------------------------------------------
+_REQ_HASH_FILE = VENV_DIR / ".requirements-hash"
+
+
+def _req_file_hash() -> str:
+    """Return SHA-256 hash of requirements.txt content (or empty string if missing)."""
+    if not REQ_FILE.is_file():
+        return ""
+    import hashlib
+    return hashlib.sha256(REQ_FILE.read_bytes()).hexdigest()
+
+
+def _install_backend_deps(venv_python: Path) -> bool:
+    """Install/upgrade backend dependencies from requirements.txt into the venv."""
+    if not REQ_FILE.is_file():
+        _info("No requirements.txt found -- skipping dependency install")
+        return True
+
+    _info("Upgrading pip...")
+    try:
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        _ok("pip upgraded")
+    except subprocess.CalledProcessError:
+        _warn("pip upgrade failed -- continuing with existing version")
+
+    _info("Installing backend dependencies from requirements.txt")
+    try:
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "-r", str(REQ_FILE)],
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        _ok("Backend dependencies installed")
+        _REQ_HASH_FILE.write_text(_req_file_hash(), encoding="utf-8")
+        return True
+    except subprocess.CalledProcessError as exc:
+        _err(f"Failed to install dependencies: {exc}")
+        return False
+
+
 def _ensure_backend_venv(python312: Path) -> bool:
     _phase("STEP 1: Backend Environment")
 
-    # If venv already exists, verify it uses Python 3.12
     venv_python = VENV_DIR / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
     if venv_python.is_file():
         try:
@@ -203,13 +248,24 @@ def _ensure_backend_venv(python312: Path) -> bool:
                 creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
             )
             version = result.stdout.strip()
-            if version == "3.12":
-                _ok(f"Virtual environment found at .venv (Python {version})")
-                return True
-            else:
+            if version != "3.12":
                 _warn(f"Existing venv uses Python {version} -- recreating with Python 3.12")
                 import shutil
                 shutil.rmtree(str(VENV_DIR))
+            else:
+                _ok(f"Virtual environment found at .venv (Python {version})")
+                # Check whether requirements.txt has changed since last install
+                if REQ_FILE.is_file() and _REQ_HASH_FILE.is_file():
+                    old_hash = _REQ_HASH_FILE.read_text(encoding="utf-8").strip()
+                    if old_hash == _req_file_hash():
+                        _ok("Dependencies up to date")
+                        return True
+                    _info("requirements.txt changed -- reinstalling dependencies")
+                elif REQ_FILE.is_file():
+                    _info("requirements.txt present but never installed -- installing")
+                else:
+                    return True  # No requirements file, nothing to do
+                return _install_backend_deps(venv_python)
         except Exception:
             _warn("Could not verify existing venv -- recreating")
             import shutil
@@ -229,37 +285,7 @@ def _ensure_backend_venv(python312: Path) -> bool:
         _err(f"Failed to create virtual environment: {exc}")
         return False
 
-    # Install dependencies using the venv's pip
-    if REQ_FILE.is_file():
-        pip = VENV_DIR / ("Scripts/pip.exe" if IS_WINDOWS else "bin/pip")
-        _info("Upgrading pip...")
-        try:
-            subprocess.run(
-                [str(pip), "install", "--upgrade", "pip"],
-                check=True,
-                cwd=str(BACKEND_DIR),
-                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
-            )
-            _ok("pip upgraded")
-        except subprocess.CalledProcessError:
-            _warn("pip upgrade failed -- continuing with existing version")
-
-        _info("Installing backend dependencies from requirements.txt")
-        try:
-            subprocess.run(
-                [str(pip), "install", "-r", str(REQ_FILE)],
-                check=True,
-                cwd=str(BACKEND_DIR),
-                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
-            )
-            _ok("Backend dependencies installed")
-        except subprocess.CalledProcessError as exc:
-            _err(f"Failed to install dependencies: {exc}")
-            return False
-    else:
-        _warn("No requirements.txt found -- skipping dependency install")
-
-    return True
+    return _install_backend_deps(venv_python)
 
 # ---------------------------------------------------------------------------
 # STEP 2: Frontend dependencies
@@ -322,6 +348,105 @@ def _build_frontend() -> bool:
         return False
 
 # ---------------------------------------------------------------------------
+# STEP 2.6: Build native wpd_helper.exe
+# ---------------------------------------------------------------------------
+def _native_src_files() -> list[Path]:
+    """Return all source files that wpd_helper.exe depends on."""
+    files: list[Path] = []
+    cpp = NATIVE_WPD_DIR / "wpd_helper.cpp"
+    if cpp.is_file():
+        files.append(cpp)
+    bat = NATIVE_WPD_DIR / "build.bat"
+    if bat.is_file():
+        files.append(bat)
+    return files
+
+
+def _native_is_stale() -> bool:
+    """Return True when the existing exe is missing or older than any source file."""
+    if not WPD_HELPER_EXE.is_file():
+        return True
+    exe_mtime = WPD_HELPER_EXE.stat().st_mtime
+    for src in _native_src_files():
+        if src.stat().st_mtime > exe_mtime:
+            return True
+    return False
+
+
+def _build_native() -> bool:
+    """Build wpd_helper.exe from native/wpd_helper/ source.
+
+    Always attempts the build (the underlying build.bat also has its own
+    staleness check).  This must run BEFORE the backend is started to
+    avoid a race where the backend's device-probe subprocess locks the
+    exe while the linker tries to overwrite it.
+    """
+    if not IS_WINDOWS:
+        _ok("Skipping native build (not Windows)")
+        return True
+
+    if not NATIVE_WPD_DIR.is_dir():
+        _warn(f"Native source directory not found: {NATIVE_WPD_DIR}")
+        return False
+
+    if not _native_is_stale():
+        _ok(f"wpd_helper.exe up to date ({WPD_HELPER_EXE.relative_to(ROOT_DIR)})")
+        return True
+
+    _phase("STEP 2.6: Building native wpd_helper")
+    build_bat = NATIVE_WPD_DIR / "build.bat"
+    if not build_bat.is_file():
+        _err(f"Build script not found: {build_bat}")
+        return False
+
+    try:
+        result = subprocess.run(
+            [str(build_bat)],
+            cwd=str(NATIVE_WPD_DIR),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            shell=IS_WINDOWS,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        # Always show build output so incremental-skip messages are visible.
+        if result.stdout:
+            for line in result.stdout.strip().splitlines():
+                _info(f"  {line}")
+        if result.returncode != 0:
+            combined = (result.stdout or "") + "\n" + (result.stderr or "")
+            _err(f"wpd_helper build failed (exit {result.returncode})")
+            if "LNK1104" in combined:
+                _err(
+                    f"  ↳ Cannot overwrite {WPD_HELPER_EXE.name} -- "
+                    "another process may still have it locked."
+                )
+                _err(
+                    "    Close any running Transfera backend or device-probe "
+                    "process and retry.  If the problem persists, check for "
+                    "antivirus or file-sync tools (OneDrive, Dropbox) that "
+                    "may briefly lock freshly-written executables."
+                )
+            else:
+                if result.stdout:
+                    _err(result.stdout.strip())
+                if result.stderr:
+                    _err(result.stderr.strip())
+            return False
+        if not WPD_HELPER_EXE.is_file():
+            _err("Build completed but wpd_helper.exe not found")
+            return False
+        _ok("wpd_helper.exe built successfully")
+        return True
+    except subprocess.TimeoutExpired:
+        _err("wpd_helper build timed out")
+        return False
+    except OSError as exc:
+        _err(f"Failed to run build.bat: {exc}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # STEP 3: Concurrent process launch
 # ---------------------------------------------------------------------------
 def _python_bin() -> str:
@@ -361,12 +486,14 @@ def _launch_backend() -> subprocess.Popen | None:
 def _launch_frontend_dev() -> subprocess.Popen | None:
     _info(f"Starting Electron dev shell (Vite + Electron on port {VITE_PORT})...")
     cmd = ["npm", "run", "electron:dev"]
+    env = {**os.environ, "TRANSFERA_EXTERNAL_BACKEND": "1"}
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=str(FRONTEND_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
             shell=IS_WINDOWS,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
         )
@@ -378,32 +505,118 @@ def _launch_frontend_dev() -> subprocess.Popen | None:
 
 
 # ---------------------------------------------------------------------------
-# Graceful teardown
+# Process termination -- verified, tree-aware, with Windows WMI sweep
 # ---------------------------------------------------------------------------
-def _kill_tree(proc: subprocess.Popen, label: str) -> None:
-    """Terminate a process and its children gracefully, then force-kill if needed."""
+def _get_transfera_processes(exclude_pid: int | None = None) -> list[dict]:
+    """Query WMI for Transfera-related processes on Windows.
+
+    Returns a list of {ProcessId, Name, CommandLine} dicts, or [] on
+    non-Windows or query failure.
+    """
+    if not IS_WINDOWS:
+        return []
+
+    root = str(ROOT_DIR)
+    exclude = exclude_pid or 0
+
+    ps = (
+        'Get-CimInstance Win32_Process -Property ProcessId,Name,CommandLine | '
+        'Where-Object { '
+        f'$_.ProcessId -ne {exclude} -and $_.CommandLine -and '
+        '$_.Name -ne "powershell.exe" -and '
+        f'( $_.CommandLine -like "*{root}*" -or '
+        f'$_.CommandLine -like "*uvicorn*backend.main*" ) '
+        '} | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json'
+    )
+
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout.strip())
+            if isinstance(data, dict):
+                data = [data]
+            return data
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _sweep_remaining(label: str) -> bool:
+    """Find and forcefully kill any remaining Transfera-related processes.
+
+    Returns True if all processes are gone after the sweep,
+    False if some could not be terminated.
+    """
+    own_pid = os.getpid()
+
+    for attempt in range(3):
+        remaining = _get_transfera_processes(exclude_pid=own_pid)
+        if not remaining:
+            return True
+
+        if attempt == 0:
+            _warn(f"Found {len(remaining)} remaining {label} process(es)")
+            for r in remaining:
+                cmd = (r.get("CommandLine") or "")[:100]
+                _info(f"  PID {r['ProcessId']} ({r.get('Name', '?')}): {cmd}")
+
+        for r in remaining:
+            pid = r.get("ProcessId")
+            if pid and pid != own_pid:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+                )
+
+        time.sleep(1)
+
+    remaining = _get_transfera_processes(exclude_pid=own_pid)
+    if remaining:
+        # Fallback: kill by image name for known stubborn processes
+        for img in ("electron.exe", "node.exe"):
+            subprocess.run(
+                ["taskkill", "/F", "/IM", img],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+            )
+        time.sleep(1)
+        remaining = _get_transfera_processes(exclude_pid=own_pid)
+
+    if remaining:
+        _err(f"{len(remaining)} {label} process(es) could not be terminated:")
+        for r in remaining:
+            _err(f"  PID {r['ProcessId']} ({r.get('Name', '?')})")
+        return False
+    return True
+
+
+def _terminate_process_tree(proc: subprocess.Popen | None, label: str) -> None:
+    """Kill a tracked process tree and confirm exit before returning."""
     if proc is None or proc.poll() is not None:
         return
 
-    _info(f"Stopping {label} (PID {proc.pid})...")
+    pid = proc.pid
+    _info(f"Stopping {label} (PID {pid})...")
 
-    try:
-        if IS_WINDOWS:
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, OSError):
-        pass  # already dead
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+    else:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
 
     try:
         proc.wait(timeout=5)
-        _ok(f"{label} stopped")
+        _info(f"{label} main process exited")
     except subprocess.TimeoutExpired:
-        _warn(f"{label} did not exit in time -- force killed")
+        _warn(f"{label} (PID {pid}) did not exit -- terminating individually")
         try:
             proc.kill()
             proc.wait(timeout=3)
@@ -412,19 +625,38 @@ def _kill_tree(proc: subprocess.Popen, label: str) -> None:
 
 
 def _shutdown(sig=None, _frame=None) -> None:
-    """Handle SIGINT / Ctrl+C -- tear down both processes cleanly."""
+    """Handle SIGINT / Ctrl+C -- comprehensive process cleanup with WMI sweep."""
     if _shutdown_event.is_set():
-        return  # already shutting down
+        return
     _shutdown_event.set()
 
-    print()  # newline after ^C
+    print()
     _phase("TEARDOWN: Shutting down Transfera stack")
 
-    _kill_tree(_backend_proc, "Backend")
-    _kill_tree(_frontend_proc, "Frontend")
+    _terminate_process_tree(_backend_proc, "Backend")
+    _terminate_process_tree(_frontend_proc, "Frontend")
+
+    if IS_WINDOWS:
+        _sweep_remaining("Transfera")
 
     _ok("All processes stopped -- goodbye!")
     sys.exit(0)
+
+
+def _check_stray_processes() -> None:
+    """Warn about and auto-terminate leftover Transfera processes from prior sessions."""
+    if not IS_WINDOWS:
+        return
+
+    strays = _get_transfera_processes(exclude_pid=os.getpid())
+    if strays:
+        _warn(f"Found {len(strays)} leftover process(es) from a previous session:")
+        for s in strays:
+            cmd = (s.get("CommandLine") or "")[:120]
+            _warn(f"  PID {s['ProcessId']} ({s.get('Name', '?')}): {cmd}")
+        _info("Auto-terminating before starting new processes...")
+        if not _sweep_remaining("stray"):
+            _err("Could not clear all stray processes -- continuing anyway")
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +671,9 @@ def main() -> None:
 
     start_backend = not args.frontend
     start_frontend = not args.backend
+
+    # Check for leftover processes from previous sessions before launching
+    _check_stray_processes()
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, _shutdown)
@@ -500,6 +735,10 @@ def main() -> None:
         if not _build_frontend():
             _warn("Frontend build failed -- backend will run in API-only mode")
 
+    # STEP 2.6: Build native wpd_helper
+    if start_backend:
+        _build_native()
+
     # STEP 3: Launch processes
     _phase("STEP 3: Launching Services")
 
@@ -516,7 +755,9 @@ def main() -> None:
         _frontend_proc = _launch_frontend_dev()
         if _frontend_proc is None:
             _err("Cannot continue without frontend -- exiting")
-            _kill_tree(_backend_proc, "Backend")
+            _terminate_process_tree(_backend_proc, "Backend")
+            if IS_WINDOWS:
+                _sweep_remaining("Transfera")
             sys.exit(1)
         _stream_output(_frontend_proc, "FRONTEND", _C.GREEN)
 
@@ -530,13 +771,17 @@ def main() -> None:
             if _backend_proc and _backend_proc.poll() is not None:
                 code = _backend_proc.returncode
                 _err(f"Backend exited unexpectedly (code {code})")
-                _kill_tree(_frontend_proc, "Frontend")
+                _terminate_process_tree(_frontend_proc, "Frontend")
+                if IS_WINDOWS:
+                    _sweep_remaining("Transfera")
                 sys.exit(code or 1)
 
             if _frontend_proc and _frontend_proc.poll() is not None:
                 code = _frontend_proc.returncode
                 _err(f"Frontend exited unexpectedly (code {code})")
-                _kill_tree(_backend_proc, "Backend")
+                _terminate_process_tree(_backend_proc, "Backend")
+                if IS_WINDOWS:
+                    _sweep_remaining("Transfera")
                 sys.exit(code or 1)
 
             time.sleep(1)

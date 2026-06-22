@@ -14,14 +14,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi import WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import BATCH_SIZE, CACHE_DIR, HOST, PORT
-from backend.database.manager import create_all_tables, dispose_engine
+from backend.database.manager import create_all_tables, dispose_engine, session_scope
 from backend.engines.recovery import recover_interrupted_batches
-from backend.api.routes import router, ws_transfer
+from backend.api.routes import router, ws_transfer, _run_transfer_background
+from backend.api.tier2_routes import router as tier2_router
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -45,7 +47,17 @@ FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 # SPA StaticFiles — serves index.html for any path not matching a real asset
 # ---------------------------------------------------------------------------
 class SPAStaticFiles(StaticFiles):
-    """StaticFiles subclass that falls back to index.html for client-side routes."""
+    """StaticFiles subclass that falls back to index.html for client-side routes.
+    Passes through non-HTTP scopes (WebSocket, lifespan) and API/WS paths
+    so they reach explicitly registered endpoints instead of being swallowed."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return
+        path = scope.get("path", "")
+        if path.startswith("/api/") or path.startswith("/ws/"):
+            return
+        await super().__call__(scope, receive, send)
 
     async def get_response(self, path: str, scope):
         try:
@@ -73,13 +85,66 @@ async def lifespan(app: FastAPI):
     await create_all_tables()
     logger.info("Database tables ready")
 
+    # Reset stale in-memory thumbnail sentinels — after a restart the LRU
+    # cache is empty, so "memory" entries from a prior process no longer
+    # have actual bytes available.  Setting them to NULL means the frontend
+    # will get a clean 404 instead of endlessly retrying.
+    from sqlalchemy import text
+    async with session_scope() as session:
+        result = await session.execute(
+            text("UPDATE media_items SET thumbnail_path = NULL WHERE thumbnail_path = 'memory'")
+        )
+        if result.rowcount > 0:
+            logger.info("Reset %d stale 'memory' thumbnail entries after restart", result.rowcount)
+    logger.info("Stale thumbnail sentinels cleared")
+
     # Run crash recovery
     stats = await recover_interrupted_batches(cache_dir=CACHE_DIR)
     logger.info(
-        "Recovery complete: %d LOADING, %d ARCHIVED batches handled",
+        "Recovery complete: %d LOADING, %d ARCHIVED batches handled "
+        "(%d orphaned partials removed)",
         stats.get("loading_recovered", 0),
         stats.get("archived_recovered", 0),
+        stats.get("orphaned_partials_removed", 0),
     )
+
+    # Auto-resume sessions that had interrupted batches
+    resumable = stats.get("resumable_session_ids", [])
+    if resumable:
+        logger.info("Auto-resuming %d interrupted session(s): %s", len(resumable), resumable)
+        for sid in resumable:
+            asyncio.create_task(_run_transfer_background(sid))
+
+    # Check if Tier 2 setup needs to resume after restart
+    try:
+        from backend.wsl_orchestrator import Tier2PersistedState
+        tier2_state = Tier2PersistedState.load()
+        if tier2_state and tier2_state.pending_step:
+            logger.info(
+                "Tier 2 setup was interrupted (step: %s) — will resume automatically",
+                tier2_state.pending_step,
+            )
+    except Exception:
+        pass
+
+    # Initialize the unified device manager (Tier 1 + Tier 2)
+    manager = None
+    try:
+        from backend.tier2_manager import get_device_manager
+        manager = get_device_manager()
+        await manager.initialize()
+        logger.info("Device manager initialized — active tier: %s", (await manager.get_active_tier()).value)
+    except Exception as exc:
+        logger.warning("Device manager init failed (Tier 2 unavailable): %s", exc)
+
+    # Clean up any leftover bridge process from an improperly-ended prior session
+    if manager is not None:
+        try:
+            orchestrator = manager.get_orchestrator()
+            if orchestrator is not None:
+                await orchestrator.cleanup_orphaned_bridge()
+        except Exception as exc:
+            logger.debug("Bridge orphan cleanup skipped: %s", exc)
 
     yield
 
@@ -108,12 +173,13 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Register API routes FIRST — these take priority over the SPA catch-all
+    # Register API routes FIRST -- these take priority over the SPA catch-all
     app.include_router(router)
+    app.include_router(tier2_router)
 
     # WebSocket endpoint
     @app.websocket("/ws/transfer/{session_id}")
-    async def websocket_endpoint(websocket, session_id: int):
+    async def websocket_endpoint(websocket: WebSocket, session_id: int):
         await ws_transfer(websocket, session_id)
 
     # Mount compiled React frontend (SPA catch-all)

@@ -3,7 +3,8 @@
 // Zustand-driven page routing, providers, notification toast, duplicate modal.
 // ---------------------------------------------------------------------------
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   LayoutDashboard,
@@ -16,9 +17,12 @@ import {
   AlertCircle,
   AlertTriangle,
   Info,
+  ServerCrash,
+  RefreshCw,
 } from 'lucide-react'
 import { useTransferStore } from '@/store/transfer'
 import { cn, isElectron } from '@/lib/utils'
+import { useHealth } from '@/lib/queries'
 import type { UIState } from '@/store/transfer'
 
 import DashboardPage from '@/pages/DashboardPage'
@@ -27,6 +31,7 @@ import TransferPage from '@/pages/TransferPage'
 import LibraryPage from '@/pages/LibraryPage'
 import DuplicateModal from '@/components/DuplicateModal'
 import ThemeToggle from '@/components/ThemeToggle'
+import PageErrorBoundary from '@/components/PageErrorBoundary'
 
 // ---------------------------------------------------------------------------
 // React Query client
@@ -54,15 +59,21 @@ const navItems: { id: UIState['currentPage']; label: string; icon: React.ReactNo
 function Sidebar() {
   const currentPage = useTransferStore((s) => s.ui.currentPage)
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
-  const wsConnected = useTransferStore((s) => s.wsConnected)
+  const { data: health, isLoading, isError } = useHealth()
+
+  const backendColor = isLoading
+    ? 'bg-muted-foreground/30 animate-pulse'
+    : isError || !health
+      ? 'bg-red-500'
+      : 'bg-green-500'
+  const backendTitle = isLoading
+    ? 'Backend: Connecting...'
+    : isError || !health
+      ? 'Backend: Disconnected'
+      : 'Backend: Connected'
 
   return (
     <div className="w-14 flex flex-col items-center py-3 gap-1 border-r border-border bg-card/50">
-      {/* Logo */}
-      <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center mb-3">
-        <HardDrive className="w-4 h-4 text-primary-foreground" />
-      </div>
-
       {/* Nav items */}
       {navItems.map((item) => (
         <button
@@ -88,11 +99,8 @@ function Sidebar() {
 
       {/* Connection indicator */}
       <div
-        className={cn(
-          'w-2.5 h-2.5 rounded-full',
-          wsConnected ? 'bg-green-500' : 'bg-muted-foreground/30',
-        )}
-        title={wsConnected ? 'Connected' : 'Disconnected'}
+        className={cn('w-2.5 h-2.5 rounded-full', backendColor)}
+        title={backendTitle}
       />
     </div>
   )
@@ -140,9 +148,11 @@ function NotificationToast() {
 // ---------------------------------------------------------------------------
 function TitleBar() {
   return (
-    <div className="drag-region h-10 flex items-center justify-between px-4 border-b border-border bg-card/80 backdrop-blur-sm flex-shrink-0">
+    <div className="drag-region h-10 flex items-center justify-between px-4 border-b border-border bg-card/80 backdrop-blur-xs shrink-0">
       <div className="flex items-center gap-2">
-        <HardDrive className="w-4 h-4 text-primary" />
+        <div className="w-6 h-6 rounded-md bg-primary flex items-center justify-center">
+          <HardDrive className="w-3.5 h-3.5 text-primary-foreground" />
+        </div>
         <span className="text-sm font-semibold text-foreground">Transfera</span>
       </div>
       {isElectron && (
@@ -178,10 +188,10 @@ function PageRouter() {
   const currentPage = useTransferStore((s) => s.ui.currentPage)
 
   const pageMap: Record<UIState['currentPage'], React.ReactNode> = {
-    dashboard: <DashboardPage />,
-    setup: <DeviceSetupPage />,
-    transfer: <TransferPage />,
-    library: <LibraryPage />,
+    dashboard: <PageErrorBoundary pageName="Dashboard"><DashboardPage /></PageErrorBoundary>,
+    setup: <PageErrorBoundary pageName="Setup"><DeviceSetupPage /></PageErrorBoundary>,
+    transfer: <PageErrorBoundary pageName="Transfer"><TransferPage /></PageErrorBoundary>,
+    library: <PageErrorBoundary pageName="Library"><LibraryPage /></PageErrorBoundary>,
   }
 
   return (
@@ -194,16 +204,152 @@ function PageRouter() {
         transition={{ duration: 0.15 }}
         className="flex-1 overflow-y-auto px-6 py-5"
       >
-        {pageMap[currentPage]}
+        {pageMap[currentPage] ?? <PageErrorBoundary pageName="Dashboard"><DashboardPage /></PageErrorBoundary>}
       </motion.div>
     </AnimatePresence>
   )
 }
 
 // ---------------------------------------------------------------------------
+// Backend Down Screen
+// ---------------------------------------------------------------------------
+function BackendDownScreen() {
+  const serverDown = useTransferStore((s) => s.ui.serverDown)
+  const [retrying, setRetrying] = useState(false)
+
+  if (!serverDown) return null
+
+  const handleRetry = async () => {
+    setRetrying(true)
+    if (isElectron && window.electronAPI?.getBackendStatus) {
+      try {
+        const status = await window.electronAPI.getBackendStatus()
+        if (status.running) {
+          useTransferStore.getState().setServerDown(false)
+          setRetrying(false)
+          return
+        }
+      } catch {
+        // ignore
+      }
+    }
+    // In browser mode or if Electron check fails, try health endpoint directly
+    try {
+      const res = await fetch('/api/health')
+      if (res.ok) {
+        useTransferStore.getState().setServerDown(false)
+        setRetrying(false)
+        return
+      }
+    } catch {
+      // ignore
+    }
+    setTimeout(() => setRetrying(false), 2000)
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="fixed inset-0 z-100 bg-background flex items-center justify-center"
+    >
+      <div className="text-center space-y-4 max-w-sm mx-auto px-6">
+        <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mx-auto">
+          <ServerCrash className="w-8 h-8 text-red-500" />
+        </div>
+        <h1 className="text-xl font-bold text-foreground">Backend Unavailable</h1>
+        <p className="text-sm text-muted-foreground">
+          The Transfera backend could not be reached. Please ensure the backend
+          process is running and try again.
+        </p>
+        <button
+          onClick={handleRetry}
+          disabled={retrying}
+          className="no-drag inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={cn('w-4 h-4', retrying && 'animate-spin')} />
+          {retrying ? 'Retrying...' : 'Retry Connection'}
+        </button>
+      </div>
+    </motion.div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Backend Recovery Watcher
+// Monitors backend health. When the backend comes back after being down,
+// invalidates all stale queries so pages auto-recover without a reload.
+// ---------------------------------------------------------------------------
+function BackendRecoveryWatcher() {
+  const qc = useQueryClient()
+  const { data: health, isError } = useHealth()
+  const [wasDown, setWasDown] = useState(false)
+
+  useEffect(() => {
+    if (isError) {
+      setWasDown(true)
+    } else if (wasDown && health?.status === 'ok') {
+      // Backend just came back — refetch everything
+      qc.invalidateQueries()
+      useTransferStore.getState().setServerDown(false)
+      setWasDown(false)
+    }
+  }, [isError, health, wasDown, qc])
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 export default function App() {
+  // Listen for backend:down IPC from Electron main process
+  useEffect(() => {
+    if (isElectron && window.electronAPI?.onBackendDown) {
+      const unsub = window.electronAPI.onBackendDown(() => {
+        useTransferStore.getState().setServerDown(true)
+      })
+      return unsub
+    }
+  }, [])
+
+  // Listen for notification:click IPC — when user clicks a native notification,
+  // navigate to that completed session's report (the artifact that represents
+  // its outcome), with a Dashboard fallback if no report exists.
+  useEffect(() => {
+    if (isElectron && window.electronAPI?.onNotificationClick) {
+      const unsub = window.electronAPI.onNotificationClick(async (sessionId: number) => {
+        const store = useTransferStore.getState()
+
+        // Fetch session info to determine the right destination
+        try {
+          const BASE_URL = window.location.origin || 'http://127.0.0.1:47821'
+          const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`)
+          if (!res.ok) throw new Error('Failed to fetch session')
+          const session = await res.json()
+
+          if (session.session_report_path) {
+            // Open the HTML report directly — this is the artifact that
+            // represents the completed session's actual outcome.
+            if (window.electronAPI?.openPath) {
+              window.electronAPI.openPath(session.session_report_path)
+            } else {
+              window.open(`/api/sessions/${sessionId}/report?fmt=html`, '_blank')
+            }
+            return
+          }
+        } catch {
+          // Fetch failed or no report — fall through to Dashboard
+        }
+
+        // Fallback: navigate to Dashboard, where the session appears
+        // in the Recent Sessions list with View/Report actions.
+        store.setCurrentPage('dashboard')
+      })
+      return unsub
+    }
+  }, [])
+
   return (
     <QueryClientProvider client={queryClient}>
       <div className="h-screen flex flex-col bg-background">
@@ -215,6 +361,8 @@ export default function App() {
       </div>
       <DuplicateModal />
       <NotificationToast />
+      <BackendDownScreen />
+      <BackendRecoveryWatcher />
     </QueryClientProvider>
   )
 }

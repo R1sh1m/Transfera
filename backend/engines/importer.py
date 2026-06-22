@@ -12,7 +12,8 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from asyncio import Event
+from typing import Awaitable, Callable, Optional
 
 import aiofiles
 
@@ -26,6 +27,10 @@ from backend.database.models import (
     TransferSession,
 )
 from backend.engines.batch_manager import get_batch_items, mark_batch_status
+from backend.engines.organizer import format_month_folder
+from backend.engines.thumbnailer import generate_thumbnail_bytes
+from backend.engines.thumbnail_cache import thumbnail_cache
+from backend.utils.hashing import hash_file
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,7 @@ except ImportError:
     pass
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
+FileProgressCallback = Optional[Callable[[int, int, str, int], Awaitable[None]]]
 
 
 # ---------------------------------------------------------------------------
@@ -61,15 +67,13 @@ def compute_archive_path(
     # Attempt to derive date from created_at or source_path
     dt = _derive_date(item)
     if dt is not None:
-        return dest_root / str(dt.year) / f"{dt.month:02d}" / name
+        return dest_root / str(dt.year) / format_month_folder(dt) / name
     return dest_root / "_unsorted" / name
 
 
 def _derive_date(item: MediaItem) -> datetime | None:
-    """Extract a date from the item's timestamps."""
-    if item.created_at is not None:
-        return item.created_at
-    return None
+    """Return the resolved date for the item, falling back to None (unsorted)."""
+    return item.date_taken
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +150,17 @@ async def _import_single_item(
         if _verify_file_hash(dst, item.source_hash):
             logger.debug("Destination already verified: %s", dst.name)
             await _mark_item_hop2(item, HopStatus.COMPLETED)
+            await _cleanup_cache_file(cache_dir, item)
             if move_mode:
                 await _unlink_source(item)
+            # Generate thumbnail for verified items too
+            try:
+                data = generate_thumbnail_bytes(dst)
+                if data:
+                    thumbnail_cache.put(item.id, data)
+                    await _mark_thumbnail_ready(item.id)
+            except Exception as exc:
+                logger.warning("Thumbnail generation skipped (verified dest) for item %d: %s", item.id, exc)
             return True
         else:
             logger.info("Destination hash mismatch for %s — re-importing", dst.name)
@@ -172,10 +185,46 @@ async def _import_single_item(
         await _mark_item_hop2(item, HopStatus.FAILED, "Import hash mismatch")
         return False
 
-    # 4. Success — mark completed and optionally unlink source
+    # 4. Post-copy verification: re-read destination from disk and compare
+    if item.source_hash:
+        try:
+            dest_hash = hash_file(dst)
+        except Exception as exc:
+            logger.error("Post-copy verification read failed for %s: %s", dst.name, exc)
+            dst.unlink(missing_ok=True)
+            await _mark_item_hop2(item, HopStatus.FAILED, f"Post-copy verification read error: {exc}")
+            return False
+
+        if dest_hash != item.source_hash.lower():
+            logger.error(
+                "POST-COPY VERIFICATION FAILED for %s: "
+                "destination hash %s does not match expected %s "
+                "(copy hash was %s)",
+                dst.name, dest_hash, item.source_hash, computed_hash,
+            )
+            dst.unlink(missing_ok=True)
+            # In move mode, do NOT delete the source — it's the only intact copy
+            await _mark_item_hop2(
+                item, HopStatus.FAILED,
+                f"Post-copy verification failed: destination hash {dest_hash[:16]}… "
+                f"does not match expected {item.source_hash[:16]}…",
+            )
+            return False
+
+    # 5. Success — mark completed, clean up cache, optionally unlink source
     await _mark_item_hop2(item, HopStatus.COMPLETED)
+    await _cleanup_cache_file(cache_dir, item)
     if move_mode:
         await _unlink_source(item)
+
+    # Generate thumbnail asynchronously (best-effort, non-blocking)
+    try:
+        data = generate_thumbnail_bytes(dst)
+        if data:
+            thumbnail_cache.put(item.id, data)
+            await _mark_thumbnail_ready(item.id)
+    except Exception as exc:
+        logger.warning("Thumbnail generation skipped for item %d: %s", item.id, exc)
 
     if on_progress is not None:
         on_progress(file_index + 1, file_total, str(src))
@@ -192,9 +241,14 @@ async def import_batch(
     cache_dir: Path,
     move_mode: bool = False,
     on_progress: ProgressCallback = None,
+    on_file_progress: FileProgressCallback = None,
+    cancel_event: Event | None = None,
 ) -> int:
     """
     Process one batch through Hop 2 (cache -> organised destination).
+
+    ``on_file_progress(processed, total, file_name)`` is called after each
+    file completes so the caller can emit real-time WS progress events.
 
     Returns the number of successfully imported items.
     """
@@ -209,6 +263,10 @@ async def import_batch(
     total = len(items)
 
     for idx, item in enumerate(items):
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("Batch %d cancelled at item %d/%d", batch_id, idx + 1, total)
+            break
+
         try:
             success = await _import_single_item(
                 item,
@@ -225,9 +283,25 @@ async def import_batch(
             logger.error("Import failed for item %d (%s): %s", item.id, item.source_path, exc)
             await _mark_item_hop2(item, HopStatus.FAILED, str(exc))
 
-    await mark_batch_status(batch_id, BatchStatus.COMPLETED)
+        if on_file_progress is not None:
+            await on_file_progress(idx + 1, total, item.file_name, item.id)
+
+    async with session_scope() as session:
+        db_batch = await session.get(TransferBatch, batch_id)
+        if db_batch is not None:
+            db_batch.completed_items = imported
+            db_batch.failed_items = total - imported
+            if imported == 0:
+                db_batch.status = BatchStatus.FAILED.value
+            elif imported < total:
+                db_batch.status = BatchStatus.PARTIAL.value
+            else:
+                db_batch.status = BatchStatus.COMPLETED.value
+            db_batch.touch()
+
     logger.info("Batch %d imported: %d/%d succeeded", batch_id, imported, total)
     return imported
+
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +318,37 @@ async def _unlink_source(item: MediaItem) -> None:
         logger.debug("Source unlinked (move mode): %s", src)
     except OSError as exc:
         logger.warning("Failed to unlink source %s: %s", src, exc)
+
+
+async def _cleanup_cache_file(
+    cache_dir: Path,
+    item: MediaItem,
+) -> None:
+    """
+    Remove the Hop 1 cache file after Hop 2 has confirmed the destination
+    copy.  This prevents an unbounded disk-space leak from accumulated cache
+    files (every transferred file leaves a permanent copy in the cache
+    directory unless explicitly cleaned up here).
+
+    The cache path is computed using the same deterministic scheme as
+    ``cache_manager._cache_path_for`` / ``_find_cached_file`` so it always
+    matches the file created during Hop 1.
+
+    Safety contract:
+    - Call ONLY after the DB commit in ``_mark_item_hop2(COMPLETED)`` has
+      succeeded — never before, and never in a failure path.
+    - It is safe to call even if the cache file has already been removed
+      (e.g. by a concurrent purge or a prior recovery run).
+    """
+    src = Path(item.source_path).resolve()
+    prefix = hashlib.md5(str(src).encode()).hexdigest()[:2]
+    cache_file = cache_dir / prefix / item.file_name
+    try:
+        cache_file.unlink(missing_ok=True)
+        if not cache_file.exists():
+            logger.debug("Cache file removed (Hop 2 confirmed): %s", cache_file)
+    except OSError as exc:
+        logger.warning("Failed to remove cache file %s: %s", cache_file, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -292,3 +397,80 @@ async def _mark_item_hop2(
             if error is not None:
                 db_item.error_message = error
             db_item.touch()
+
+
+async def _set_item_thumbnail(item_id: int, thumbnail_path: str) -> None:
+    """Update a single item's thumbnail_path in the database."""
+    async with session_scope() as session:
+        db_item = await session.get(MediaItem, item_id)
+        if db_item is not None:
+            db_item.thumbnail_path = thumbnail_path
+            db_item.touch()
+
+
+async def _mark_thumbnail_ready(item_id: int) -> None:
+    """Set thumbnail_path sentinel so frontend knows the thumbnail is in cache."""
+    async with session_scope() as session:
+        db_item = await session.get(MediaItem, item_id)
+        if db_item is not None:
+            db_item.thumbnail_path = "memory"
+            db_item.touch()
+
+
+# ---------------------------------------------------------------------------
+# One-time remediation: purge all Hop 1 cache files for confirmed items
+# ---------------------------------------------------------------------------
+async def purge_hop1_cache_for_completed_items(
+    cache_dir: Path,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """
+    One-time remediation pass: scan all MediaItem records whose
+    ``final_status`` is COMPLETED and remove their corresponding Hop 1
+    cache file.  This cleans up accumulated cache files from prior
+    transfers that were never cleaned up (the disk-space leak this module's
+    ``_cleanup_cache_file`` now prevents going forward).
+
+    When *dry_run* is ``True``, only count and log what *would* be removed
+    without actually deleting anything.
+
+    Returns the number of cache files removed (or that would be removed).
+    """
+    from sqlalchemy import select
+
+    removed = 0
+    async with session_scope() as session:
+        result = await session.execute(
+            select(MediaItem).where(MediaItem.final_status == HopStatus.COMPLETED.value)
+        )
+        items = list(result.scalars().all())
+
+    logger.info(
+        "Purge scan: %d completed items found in database",
+        len(items),
+    )
+
+    for item in items:
+        src = Path(item.source_path).resolve()
+        prefix = hashlib.md5(str(src).encode()).hexdigest()[:2]
+        cache_file = cache_dir / prefix / item.file_name
+
+        if not cache_file.is_file():
+            continue
+
+        if dry_run:
+            logger.debug("Would remove cache file: %s", cache_file)
+            removed += 1
+            continue
+
+        try:
+            cache_file.unlink()
+            removed += 1
+            logger.debug("Purged cache file: %s", cache_file)
+        except OSError as exc:
+            logger.warning("Failed to purge cache file %s: %s", cache_file, exc)
+
+    action = "Would remove" if dry_run else "Removed"
+    logger.info("%s %d cache files for completed items", action, removed)
+    return removed

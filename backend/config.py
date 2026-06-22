@@ -5,7 +5,9 @@ Single source of truth for all backend constants.
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -32,7 +34,7 @@ CACHE_DIR: Path = DATA_DIR / "cache"
 LOG_DIR: Path = DATA_DIR / "logs"
 EXPORT_DIR: Path = DATA_DIR / "exports"
 EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
-THUMBNAIL_DEFAULT_LOGO: Path = BACKEND_ROOT.parent / "frontend" / "src" / "assets" / "logo.png"
+WPD_HELPER: Path = BACKEND_ROOT / "bin" / "wpd_helper.exe"
 
 # Ensure runtime directories exist at import time.
 for _d in (DATA_DIR, DB_DIR, CACHE_DIR, LOG_DIR, EXPORT_DIR, EXIFTOOL_DIR):
@@ -79,6 +81,25 @@ ALL_MEDIA_EXTENSIONS: frozenset[str] = (
     | AUDIO_EXTENSIONS
     | DOCUMENT_EXTENSIONS
 )
+
+# ---------------------------------------------------------------------------
+# Local secret token (destructive endpoint protection)
+# ---------------------------------------------------------------------------
+_TOKEN_FILE: Path = DATA_DIR / "local_secret.json"
+
+
+def _load_or_create_token() -> str:
+    if _TOKEN_FILE.exists():
+        try:
+            return json.loads(_TOKEN_FILE.read_text())["token"]
+        except Exception:
+            pass
+    token = secrets.token_hex(32)
+    _TOKEN_FILE.write_text(json.dumps({"token": token}))
+    return token
+
+
+LOCAL_SECRET_TOKEN: str = _load_or_create_token()
 
 # ---------------------------------------------------------------------------
 # Supported Host Platforms
