@@ -10,7 +10,11 @@ dist/
 *.egg
 .eggs/
 
-# --- SQLite databases ---
+# --- Runtime data ---
+backend/data/db/
+backend/data/exports/
+backend/data/thumbnails/
+backend/data/local_secret.json
 *.db
 *.db-wal
 *.db-shm
@@ -21,6 +25,9 @@ frontend/dist/
 frontend/dist-electron/
 frontend/electron/dist-electron/
 frontend/release/
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
 
 # --- Environment ---
 .env
@@ -32,8 +39,6 @@ venv/
 
 # --- IDE / Editor ---
 .vscode/
-pyproject.toml
-pyrightconfig.json
 .idea/
 *.swp
 *.swo
@@ -48,6 +53,7 @@ desktop.ini
 # --- Logs ---
 *.log
 backend/data/logs/
+backend.err
 
 # --- Cache ---
 .cache/
@@ -69,10 +75,15 @@ backend/data/db/test_*.db*
 backend/bin/exiftool/
 
 # --- Native build artifacts ---
+backend/bin/wpd_helper.exe
+backend/bin/wpd_helper/
 backend/bin_debug/
 native/wpd_helper/build/
 native/wpd_helper/.cache/
 *.obj
+*.pdb
+*.ilk
+*.exp
 
 # --- Misc ---
 *.bak
@@ -87,8 +98,7 @@ AGENTS.md
 skills-lock.json
 Transfera_Architecture_Spec_v2.pdf
 
-# Exclude internal backend testing scripts
-backend/tests/
+# Scratch test data (not the test suite — that's in backend/tests/ and IS tracked)
 test_dest/
 test_source/
 opencode.json

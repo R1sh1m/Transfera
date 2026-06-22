@@ -8,8 +8,8 @@ These tests caught BUG A: the inner closures were defined with an extra
 parameter that _run_operation never supplied, causing a TypeError on every
 call.
 
-Run: python -m pytest backend/test_device_backend_closures.py -v
-  or: python -m backend.test_device_backend_closures
+Run: python -m pytest backend/tests/test_device_backend_closures.py -v
+  or: python -m backend.tests.test_device_backend_closures
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure backend package is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.device_backend import (
     DeviceAccessTier,

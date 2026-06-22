@@ -1,0 +1,9 @@
+[project]
+name = "transfera"
+version = "2.0.0"
+description = "Desktop application for transferring and organizing photos and videos"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

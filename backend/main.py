@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import sys
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -26,8 +27,13 @@ from backend.api.routes import router, ws_transfer, _run_transfer_background
 from backend.api.tier2_routes import router as tier2_router
 
 # ---------------------------------------------------------------------------
-# Logging setup
+# Logging setup — ensure stdout uses UTF-8 so Unicode log characters
+# (→, —, and any other standard Unicode) render correctly on Windows
+# consoles that support it (Windows 10 1903+).  Purely cosmetic.
 # ---------------------------------------------------------------------------
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -64,6 +70,30 @@ class SPAStaticFiles(StaticFiles):
             return await super().get_response(path, scope)
         except Exception:
             return FileResponse(str(FRONTEND_DIST / "index.html"))
+
+
+# ---------------------------------------------------------------------------
+# Background initializer for device manager — must not block server startup
+# ---------------------------------------------------------------------------
+async def _init_device_manager_background(manager) -> None:
+    """Runs after the app is already serving HTTP traffic. Probes
+    device tiers and may auto-start the WSL bridge, which can take
+    up to ~60s on a cold start — this MUST NOT block Uvicorn's
+    startup, so it is scheduled as a background task instead of
+    being awaited inside lifespan()."""
+    try:
+        await manager.initialize()
+        active_tier = await manager.get_active_tier()
+        logger.info("Device manager initialized — active tier: %s", active_tier.value)
+    except Exception as exc:
+        logger.warning("Device manager init failed (Tier 2 unavailable): %s", exc)
+
+    try:
+        orchestrator = manager.get_orchestrator()
+        if orchestrator is not None:
+            await orchestrator.cleanup_orphaned_bridge()
+    except Exception as exc:
+        logger.debug("Bridge orphan cleanup skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -127,28 +157,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # Initialize the unified device manager (Tier 1 + Tier 2)
-    manager = None
-    try:
-        from backend.tier2_manager import get_device_manager
-        manager = get_device_manager()
-        await manager.initialize()
-        logger.info("Device manager initialized — active tier: %s", (await manager.get_active_tier()).value)
-    except Exception as exc:
-        logger.warning("Device manager init failed (Tier 2 unavailable): %s", exc)
-
-    # Clean up any leftover bridge process from an improperly-ended prior session
-    if manager is not None:
-        try:
-            orchestrator = manager.get_orchestrator()
-            if orchestrator is not None:
-                await orchestrator.cleanup_orphaned_bridge()
-        except Exception as exc:
-            logger.debug("Bridge orphan cleanup skipped: %s", exc)
-
+    # Fire up device manager in background — don't block server startup
+    from backend.tier2_manager import get_device_manager
+    manager = get_device_manager()
+    app.state.device_manager_init_task = asyncio.create_task(
+        _init_device_manager_background(manager)
+    )
     yield
 
     # Shutdown
+    task = getattr(app.state, "device_manager_init_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     await dispose_engine()
     logger.info("Transfera v2 shutdown complete")
 

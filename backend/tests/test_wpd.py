@@ -1,6 +1,6 @@
 """
 Quick smoke test for WpdBackend.
-Run: python -m backend.test_wpd
+Run: python -m backend.tests.test_wpd
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import tracemalloc
 from pathlib import Path
 
 # Ensure backend package is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 async def main():

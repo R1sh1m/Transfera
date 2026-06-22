@@ -22,6 +22,7 @@ entirely (off by default).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -156,7 +157,7 @@ class Tier1Backend(DeviceBackend):
                 error="pymobiledevice3 not installed",
                 details={"import_error": "pymobiledevice3 import failed"},
             )
-        status = check_driver_status()
+        status = await asyncio.to_thread(check_driver_status)
         if status == "ready":
             return TierProbeResult(tier=self.tier, available=True)
         return TierProbeResult(
@@ -464,6 +465,13 @@ class DeviceBackendManager:
         # Load persisted per-device preferences (serial -> tier value)
         self._device_tier_prefs = _load_device_tier_prefs()
 
+        # Auto-activation state — set after initialize() probes each tier
+        self._apple_driver_installable: bool = False
+        self._apple_driver_package_name: str | None = None
+        self._apple_driver_package_version: str | None = None
+        self._bridge_auto_started: bool = False
+        self._wsl_setup_suggested: bool = False
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -479,6 +487,25 @@ class DeviceBackendManager:
             logger.info("DeviceBackend: Tier 1 (Apple driver) available")
         else:
             logger.info("DeviceBackend: Tier 1 (Apple driver) not available: %s", t1_probe.error)
+            # Auto-activation: if the driver is missing and winget can install it,
+            # set a flag so the frontend can offer a one-click install prompt.
+            if t1_probe.error and "no_driver" in t1_probe.error:
+                try:
+                    from backend.ios_driver_installer import check_winget_available_async, verify_package_async
+                    winget_ok, _ = await check_winget_available_async()
+                    if winget_ok:
+                        pkg = await verify_package_async()
+                        if pkg.success:
+                            self._apple_driver_installable = True
+                            self._apple_driver_package_name = pkg.package_name
+                            self._apple_driver_package_version = pkg.version
+                            logger.info(
+                                "DeviceBackend: Apple driver installable via winget (%s %s)",
+                                pkg.package_name or "Apple.AppleMobileDeviceSupport",
+                                pkg.version or "latest",
+                            )
+                except Exception as exc:
+                    logger.debug("DeviceBackend: Apple driver install check failed: %s", exc)
 
         # Check Tier 2
         try:
@@ -489,7 +516,33 @@ class DeviceBackendManager:
                 self._tier2.set_bridge_url(f"http://127.0.0.1:{BRIDGE_PORT}")
                 logger.info("DeviceBackend: Tier 2 (WSL bridge) available")
             else:
-                logger.info("DeviceBackend: Tier 2 bridge not reachable")
+                logger.info("DeviceBackend: Tier 2 bridge not reachable — checking auto-start")
+                # Auto-activation: if WSL distro is ready but bridge isn't running,
+                # try to auto-start the bridge.
+                try:
+                    feasibility = await self._wsl_orchestrator.check_feasibility()
+                    if feasibility.distro_ready:
+                        logger.info("DeviceBackend: WSL distro ready — auto-starting bridge")
+                        await self._wsl_orchestrator.start_bridge()
+                        retry_status = await self._wsl_orchestrator.get_bridge_status()
+                        if retry_status.reachable:
+                            self._tier2.set_bridge_url(f"http://127.0.0.1:{BRIDGE_PORT}")
+                            self._bridge_auto_started = True
+                            logger.info("DeviceBackend: Bridge auto-started successfully")
+                    elif feasibility.wsl_installed or not feasibility.error:
+                        # WSL exists but no distro ready — suggest setup wizard
+                        self._wsl_setup_suggested = True
+                        logger.info(
+                            "DeviceBackend: WSL available but not ready — surfacing setup card"
+                        )
+                    else:
+                        # WSL not installed at all — suggest setup wizard
+                        self._wsl_setup_suggested = True
+                        logger.info(
+                            "DeviceBackend: WSL not installed — surfacing setup card"
+                        )
+                except Exception as exc:
+                    logger.debug("DeviceBackend: WSL auto-activation check failed: %s", exc)
         except Exception as exc:
             logger.debug("DeviceBackend: Tier 2 initialization failed: %s", exc)
 
@@ -549,6 +602,32 @@ class DeviceBackendManager:
     def get_orchestrator(self):
         """Return the WSL orchestrator (for Tier 2 setup routes)."""
         return self._wsl_orchestrator
+
+    # ------------------------------------------------------------------
+    # Auto-activation status (probed during initialize)
+    # ------------------------------------------------------------------
+    @property
+    def apple_driver_installable(self) -> bool:
+        """True when the Apple driver is missing but winget can install it."""
+        return self._apple_driver_installable
+
+    @property
+    def apple_driver_package_name(self) -> str | None:
+        return self._apple_driver_package_name
+
+    @property
+    def apple_driver_package_version(self) -> str | None:
+        return self._apple_driver_package_version
+
+    @property
+    def bridge_auto_started(self) -> bool:
+        """True when the WSL bridge was auto-started during initialize()."""
+        return self._bridge_auto_started
+
+    @property
+    def wsl_setup_suggested(self) -> bool:
+        """True when WSL is not available and the setup wizard should be shown."""
+        return self._wsl_setup_suggested
 
     # ------------------------------------------------------------------
     # Waterfall ordering

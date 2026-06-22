@@ -515,6 +515,15 @@ export interface DevicePreferenceResponse {
   prefer_tier2: boolean
 }
 
+// --- Auto-Activation Status -------------------------------------------------
+export interface DeviceBackendStatusResponse {
+  apple_driver_installable: boolean
+  apple_driver_package_name: string | null
+  apple_driver_package_version: string | null
+  bridge_auto_started: boolean
+  wsl_setup_suggested: boolean
+}
+
 export interface DevicePreferenceRequest {
   prefer_tier2: boolean
 }

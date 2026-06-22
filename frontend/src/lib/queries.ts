@@ -11,6 +11,7 @@ import type {
   ClearResponse,
   ClearSessionsRequest,
   ConfigResponse,
+  DeviceBackendStatusResponse,
   DeviceImportStateListResponse,
   DevicePreferenceRequest,
   DevicePreferenceResponse,
@@ -41,8 +42,8 @@ import type {
   Tier2Status,
   Tier2SetupPreview,
   Tier2StepResponse,
-  Tier2BindPreview,
   Tier2BindExecuteResponse,
+  Tier2BindPreview,
   Tier2USBDeviceList,
   Tier2ElevatedCommand,
   Tier2ResetResponse,
@@ -581,6 +582,21 @@ export function useClearDeviceImportState() {
     onError: (error) => {
       useTransferStore.getState().showNotification('error', extractErrorMessage(error))
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Device Backend Auto-Activation Status
+// ---------------------------------------------------------------------------
+export function useDeviceBackendStatus() {
+  return useQuery({
+    queryKey: ['device-backend-status'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<DeviceBackendStatusResponse>('/device-backend/status')
+      return data
+    },
+    staleTime: 30_000,
+    refetchInterval: 60_000,
   })
 }
 

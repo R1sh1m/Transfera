@@ -25,8 +25,10 @@ import {
   ChevronRight,
   Trash2,
   X,
+  Smartphone,
+  Wifi,
 } from 'lucide-react'
-import { useSessionList, useRecovery, useFolderMetadata, useHealth, useDiskSpace, useClearSessions } from '@/lib/queries'
+import { useSessionList, useRecovery, useFolderMetadata, useHealth, useDiskSpace, useClearSessions, useDeviceBackendStatus, useInstallDriver } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { cn, isElectron } from '@/lib/utils'
 import type { SessionInfo, SessionStatus } from '@/types/api'
@@ -636,6 +638,107 @@ function SessionRow({ session }: { session: SessionInfo }) {
 }
 
 // ---------------------------------------------------------------------------
+// Setup Cards (auto-activation prompts)
+// ---------------------------------------------------------------------------
+function DriverSetupCard({ name, version, onDismiss }: { name: string | null; version: string | null; onDismiss: () => void }) {
+  const installDriver = useInstallDriver()
+  const handleInstall = async () => {
+    try {
+      const result = await installDriver.mutateAsync()
+      if (isElectron && window.electronAPI?.runElevated) {
+        window.electronAPI.runElevated({
+          executable: result.executable,
+          args: result.args,
+          description: 'Install Apple Mobile Device Support',
+        })
+      } else {
+        useTransferStore.getState().showNotification('info', 'Open Settings > Device Setup to install the Apple driver')
+      }
+      onDismiss()
+    } catch {
+      useTransferStore.getState().showNotification('error', 'Failed to prepare Apple driver installation')
+    }
+  }
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
+      <div className="shrink-0 w-8 h-8 rounded-lg bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center">
+        <Smartphone className="w-4 h-4 text-purple-700 dark:text-purple-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-foreground">Enable iPhone support</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          {name ?? 'Apple Mobile Device Support'} {version ? `(${version}) ` : ''}
+          is available via winget. Install it now for faster iPhone access.
+        </p>
+        <div className="flex items-center gap-2 mt-2">
+          <button
+            onClick={handleInstall}
+            disabled={installDriver.isPending}
+            className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {installDriver.isPending ? 'Preparing...' : 'Install Driver'}
+          </button>
+          <button
+            onClick={onDismiss}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function WslSetupCard({ onDismiss }: { onDismiss: () => void }) {
+  const goToSetup = useTransferStore((s) => s.setCurrentPage)
+  return (
+    <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
+      <div className="shrink-0 w-8 h-8 rounded-lg bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center">
+        <Wifi className="w-4 h-4 text-teal-700 dark:text-teal-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-foreground">Set up WSL bridge for iPhone</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          WSL2 + usbipd-win gives you an open-source path to access iPhones when the Apple driver is not available.
+        </p>
+        <div className="flex items-center gap-2 mt-2">
+          <button
+            onClick={() => { goToSetup('setup') }}
+            className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors"
+          >
+            Open Setup Wizard
+          </button>
+          <button
+            onClick={onDismiss}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BridgeAutoStartedNotice() {
+  return (
+    <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
+      <div className="shrink-0 w-8 h-8 rounded-lg bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+        <CheckCircle2 className="w-4 h-4 text-green-700 dark:text-green-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-foreground">WSL bridge started</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          The WSL bridge was auto-started. iPhone devices connected via the open-source bridge are now accessible.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 export default function DashboardPage() {
@@ -643,6 +746,18 @@ export default function DashboardPage() {
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
   const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot)
   const destRoot = useTransferStore((s) => s.transfer.destRoot)
+
+  const { data: backendStatus } = useDeviceBackendStatus()
+  const [dismissedCards, setDismissedCards] = useState<string[]>([])
+
+  const dismissCard = (id: string) => {
+    setDismissedCards((prev) => [...prev, id])
+  }
+
+  const showAppleCard = backendStatus?.apple_driver_installable && !dismissedCards.includes('apple-driver')
+  const showWslCard = backendStatus?.wsl_setup_suggested && !dismissedCards.includes('wsl-setup')
+  const showBridgeCard = backendStatus?.bridge_auto_started && !dismissedCards.includes('bridge-started')
+  const showAnySetupCard = showAppleCard || showWslCard || showBridgeCard
 
   const latestSession = sessionList?.sessions[0]
   const activeSource = sourceRoot || latestSession?.source_root || null
@@ -660,6 +775,25 @@ export default function DashboardPage() {
 
       {/* Resume Alert */}
       <ResumeAlert />
+
+      {/* Setup Cards (auto-activation prompts) */}
+      {showAnySetupCard && (
+        <div className="space-y-2">
+          {showAppleCard && (
+            <DriverSetupCard
+              name={backendStatus?.apple_driver_package_name ?? null}
+              version={backendStatus?.apple_driver_package_version ?? null}
+              onDismiss={() => dismissCard('apple-driver')}
+            />
+          )}
+          {showWslCard && (
+            <WslSetupCard onDismiss={() => dismissCard('wsl-setup')} />
+          )}
+          {showBridgeCard && (
+            <BridgeAutoStartedNotice />
+          )}
+        </div>
+      )}
 
       {/* Directory Metrics */}
       <div className="grid grid-cols-2 gap-3">

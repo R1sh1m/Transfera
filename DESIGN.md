@@ -603,6 +603,19 @@ Generated thumbnail for any media item in the library or transfer preview.
 2. Pillow decode + resize (handles HEIC via pillow-heif)
 3. ffmpeg frame extraction (video, 2.0s offset)
 
+### `component.setup-card`
+ 
+Contextual action card shown on the Dashboard when the app detects optional setup is available (Apple driver installable via winget, WSL bridge not yet configured).
+ 
+**Structure:**
+- Outer container: `bg-card border border-border rounded-lg p-4 flex items-start gap-3`
+- Leading icon: `shrink-0 w-8 h-8 rounded-lg` with a semitransparent tinted background (purple for Apple driver, teal for WSL, green for success)
+- Body: `flex-1 min-w-0` with:
+  - Title: `text-sm font-semibold text-foreground`
+  - Description: `text-xs text-muted-foreground mt-0.5`
+  - Actions row: `flex items-center gap-2 mt-2` — primary button `text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md` + dismiss link `text-xs text-muted-foreground hover:text-foreground`
+- Appears as a `space-y-2` stack when multiple cards are active
+- Each card is independently dismissible via a dismiss button that adds its id to a local `dismissedCards` set
 ## Known Gaps
 
 - Form validation and error states were not surfaced on the analyzed pages; only the neutral search input is documented.

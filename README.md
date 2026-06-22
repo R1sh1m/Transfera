@@ -76,6 +76,17 @@ npm --version
 git --version
 ```
 
+### MSVC Build Tools (for native WPD helper)
+
+Transfera's iPhone/iPad device support is powered by a native C++ helper (`native/wpd_helper/wpd_helper.cpp`) that must be compiled with the Microsoft Visual C++ compiler. You need one of:
+
+- **Visual Studio 2022** (any edition) with the **Desktop development with C++** workload, **or**
+- **Visual Studio 2022 Build Tools** (smaller, no IDE) from <https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022>
+
+The build script (`npm run build:native` or `native/wpd_helper/build.bat`) locates the compiler via `vswhere.exe` automatically — no manual PATH setup needed.
+
+> This step is **optional** if you only plan to back up from local folders. The app runs fine without it; iPhone/WPD device detection simply won't be available.
+
 ### ExifTool (isolated environment)
 
 Transfera bundles an **automated ExifTool manager** that bootstraps the binary on first launch into `backend/bin/exiftool/`. No manual installation is required.
@@ -124,6 +135,13 @@ That is the only command you need to remember. On first run the orchestrator aut
 7. **Launches the Electron dev shell** (Vite HMR on `:5173` + Electron wrapper).
 
 Press **Ctrl+C** at any time to gracefully tear down all processes.
+
+> **iPhone / WPD device support** requires the native C++ helper to be compiled first. The orchestrator does NOT build this automatically. Run:
+> ```bash
+> cd frontend
+> npm run build:native
+> ```
+> See the [MSVC Build Tools](#msvc-build-tools-for-native-wpd-helper) prerequisite above.
 
 ### Runner Flags
 
@@ -218,14 +236,17 @@ Transfera/
 │   │   ├── exports/                  # Generated reports
 │   │   └── logs/                     # Application logs
 │   │
-│   └── tests/                        # pytest test suite
-│       ├── test_db_core.py
-│       ├── test_scanner.py
-│       ├── test_pipeline.py
-│       ├── test_organizer.py
-│       ├── test_crash_recovery.py
-│       ├── test_integration.py
-│       └── test_smoke.py
+    │   └── tests/                        # Test suite (pytest + smoke tests)
+    │       ├── test_crash_recovery.py
+    │       ├── test_db_core.py
+    │       ├── test_device_backend_closures.py
+    │       ├── test_exiftool_bootstrapper.py
+    │       ├── test_integration.py
+    │       ├── test_organizer.py
+    │       ├── test_pipeline.py
+    │       ├── test_scanner.py
+    │       ├── test_smoke.py
+    │       └── test_wpd.py
 │
 ├── frontend/                         # Electron + React + Vite
 │   ├── package.json                  # npm scripts & electron-builder config

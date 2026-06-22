@@ -46,8 +46,10 @@ IS_WINDOWS = sys.platform == "win32"
 # Python 3.12 discovery -- stable wheel availability is critical
 # ---------------------------------------------------------------------------
 # Ordered list of paths to probe for a Python 3.12 installation on Windows.
+# The user-local path is resolved at runtime to avoid baking a real username into source.
 _PYTHON312_CANDIDATES: list[Path] = [
-    Path(r"C:\Users\Rishi Misra\AppData\Local\Programs\Python\Python312\python.exe"),
+    *([Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Python" / "Python312" / "python.exe"]
+      if IS_WINDOWS and "LOCALAPPDATA" in os.environ else []),
     Path(r"C:\Program Files\Python312\python.exe"),
     Path(r"C:\Python312\python.exe"),
 ]

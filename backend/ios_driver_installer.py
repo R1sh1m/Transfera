@@ -12,6 +12,7 @@ non-privileged checks and returns the command to run.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -74,6 +75,27 @@ def check_winget_available() -> tuple[bool, str | None]:
         return False, None
 
 
+async def check_winget_available_async() -> tuple[bool, str | None]:
+    """Async variant that does not block the event loop. See check_winget_available()."""
+    try:
+        result = await asyncio.to_thread(_run_command, ["winget", "--version"], 10)
+        if result.returncode == 0:
+            version = result.stdout.strip()
+            logger.info("winget available: %s", version)
+            return True, version
+        logger.warning("winget --version returned exit code %d", result.returncode)
+        return False, None
+    except FileNotFoundError:
+        logger.info("winget not found on PATH")
+        return False, None
+    except subprocess.TimeoutExpired:
+        logger.warning("winget --version timed out")
+        return False, None
+    except Exception as exc:
+        logger.warning("Failed to check winget: %s", exc)
+        return False, None
+
+
 def get_installer_status() -> InstallerStatus:
     """Get the full installer status (winget + driver)."""
     from backend.ios_device import check_driver_status
@@ -112,6 +134,76 @@ def verify_package() -> PackageVerification:
             )
 
         # Parse the output to extract package details
+        output = result.stdout
+        package_name = None
+        version = None
+
+        for line in output.splitlines():
+            lower = line.lower().strip()
+            if lower.startswith("name:"):
+                package_name = line.split(":", 1)[1].strip()
+            elif lower.startswith("version:"):
+                version = line.split(":", 1)[1].strip()
+
+        logger.info(
+            "Package verified: %s (version: %s)",
+            package_name or APPLE_DRIVER_PACKAGE_ID,
+            version or "unknown",
+        )
+        return PackageVerification(
+            success=True,
+            package_id=APPLE_DRIVER_PACKAGE_ID,
+            package_name=package_name,
+            version=version,
+            error=None,
+        )
+
+    except FileNotFoundError:
+        return PackageVerification(
+            success=False,
+            package_id=None,
+            package_name=None,
+            version=None,
+            error="winget is not available",
+        )
+    except subprocess.TimeoutExpired:
+        return PackageVerification(
+            success=False,
+            package_id=None,
+            package_name=None,
+            version=None,
+            error="Package lookup timed out",
+        )
+    except Exception as exc:
+        logger.warning("Package verification error: %s", exc)
+        return PackageVerification(
+            success=False,
+            package_id=None,
+            package_name=None,
+            version=None,
+            error=str(exc),
+        )
+
+
+async def verify_package_async() -> PackageVerification:
+    """Async variant that does not block the event loop. See verify_package()."""
+    try:
+        result = await asyncio.to_thread(
+            _run_command,
+            ["winget", "show", "--id", APPLE_DRIVER_PACKAGE_ID, "-e"],
+            30,
+        )
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() or result.stdout.strip() or f"winget show exited with code {result.returncode}"
+            logger.warning("Package verification failed: %s", error_msg)
+            return PackageVerification(
+                success=False,
+                package_id=None,
+                package_name=None,
+                version=None,
+                error=error_msg,
+            )
+
         output = result.stdout
         package_name = None
         version = None

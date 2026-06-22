@@ -140,6 +140,26 @@ async def health_check() -> dict:
     return {"status": "ok", "version": "2.0"}
 
 
+# ---------------------------------------------------------------------------
+# Device Backend Status (auto-activation hints for the frontend)
+# ---------------------------------------------------------------------------
+@router.get("/device-backend/status")
+async def device_backend_status() -> dict:
+    """Return auto-activation status for Apple driver and WSL bridge.
+
+    The frontend uses these fields to show contextual setup cards or
+    one-click install prompts on the Dashboard.
+    """
+    mgr = get_device_backend_manager()
+    return {
+        "apple_driver_installable": mgr.apple_driver_installable,
+        "apple_driver_package_name": mgr.apple_driver_package_name,
+        "apple_driver_package_version": mgr.apple_driver_package_version,
+        "bridge_auto_started": mgr.bridge_auto_started,
+        "wsl_setup_suggested": mgr.wsl_setup_suggested,
+    }
+
+
 @router.post("/shutdown")
 async def api_shutdown() -> dict:
     """
@@ -231,13 +251,6 @@ async def list_ios_devices() -> IOSDeviceListResponse:
 @router.post("/ios-devices/browse", response_model=IOSBrowseResponse)
 async def browse_ios_device(req: IOSBrowseRequest) -> IOSBrowseResponse:
     """Browse a directory on a connected iOS device."""
-    # Guard: reject WPD device paths that slipped in place of a real UDID
-    if is_wpd_device_id(req.serial):
-        raise HTTPException(
-            status_code=400,
-            detail="Device serial appears to be a Windows device path, not an iOS UDID. "
-                   "Please re-select your iPhone from the iOS device panel.",
-        )
     manager = get_device_manager()
 
     # Verify device is connected and ready via unified manager
