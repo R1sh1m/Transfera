@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +102,7 @@ def _build_json_payload(session: TransferSession, items: list[MediaItem]) -> dic
         file_records.append(record)
 
     return {
-        "report_generated_at": datetime.now(timezone.utc).isoformat(),
+        "report_generated_at": datetime.now(UTC).isoformat(),
         "session": {
             "id": session.id,
             "session_name": session.session_name,

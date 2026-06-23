@@ -17,8 +17,9 @@ import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, AsyncGenerator
+from typing import Any
 
 from backend.api.source_types import (
     SourceRef,
@@ -141,7 +142,13 @@ class SourceReader(ABC):
         Check if the underlying device is still connected.
 
         Returns False for local sources (always available).
-        Returns True if the device was disconnected since the last operation.
+        Returns True if the device was disconnected since the last operation,
+        as detected by an exception in open_file(), stat_file(), or list_directory().
+
+        NOTE: cache_manager.py does not go through SourceReader and instead uses
+        _looks_like_disconnect() directly on raw exceptions for disconnect detection.
+        This method is intended for callers that use SourceReader (e.g. scanner.py)
+        to detect mid-walk disconnections.
         """
         ...
 
@@ -314,8 +321,8 @@ class DeviceSourceReader(SourceReader):
         try:
             if tier is not None and tier.value == "wpd":
                 # WPD backend -- streaming subprocess reader.
-                from backend.wpd_backend import _WpdFileReader
                 from backend.config import WPD_HELPER
+                from backend.wpd_backend import _WpdFileReader
                 # Get file size from file_info if available.
                 size = 0
                 try:
@@ -332,7 +339,7 @@ class DeviceSourceReader(SourceReader):
                 from backend.ios_device import AFCFileReader
                 reader = AFCFileReader(self._device_id, path)
                 await reader.open()
-        except Exception as exc:
+        except Exception:
             self._disconnected = True
             raise
         return DeviceFileHandle(reader)
@@ -350,7 +357,7 @@ class DeviceSourceReader(SourceReader):
                 "size": info.size,
                 "mtime": info.mtime,
             }
-        except Exception as exc:
+        except Exception:
             self._disconnected = True
             raise
 
@@ -394,7 +401,7 @@ class DeviceSourceReader(SourceReader):
                 }
                 for e in entries
             ]
-        except Exception as exc:
+        except Exception:
             self._disconnected = True
             raise
 

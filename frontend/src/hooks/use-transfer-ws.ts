@@ -68,6 +68,12 @@ export function useTransferWs(sessionId: number | null) {
           data: Record<string, unknown>
           timestamp: string
         }
+
+        if (event.event === 'ping') {
+          ws.send(JSON.stringify({ event: 'pong', data: {}, timestamp: new Date().toISOString() }))
+          return
+        }
+
         handleWsEvent(event as WSEvent)
       } catch {
         // malformed message — ignore

@@ -7,7 +7,6 @@ Run: python -m backend.tests.test_integration
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import tempfile
 import time
@@ -24,7 +23,6 @@ if _REPO_ROOT not in sys.path:
 
 from backend.config import HOST, PORT  # noqa: E402
 from backend.main import app  # noqa: E402
-from backend.database.manager import create_all_tables, dispose_engine  # noqa: E402
 
 # ======================================================================
 # Helpers
@@ -158,6 +156,23 @@ def test_session_get_not_found(client: httpx.Client) -> None:
     _check(r.status_code == 404, f"Expected 404, got {r.status_code}")
 
 
+def test_session_create_with_folder_layout(client: httpx.Client) -> None:
+    """folder_layout can be set at session creation and returned in SessionInfo."""
+    for layout in ("year/month/day", "year/month", "flat"):
+        r = client.post(
+            "/api/sessions",
+            json={
+                "session_name": f"layout-{layout}",
+                "source_root": "/tmp/src",
+                "dest_root": "/tmp/dst",
+                "folder_layout": layout,
+            },
+        )
+        _assert_ok(r, 200)
+        data = _json(r)
+        _check(data["folder_layout"] == layout, f"Expected folder_layout='{layout}', got '{data.get('folder_layout')}'")
+
+
 def test_session_cancel(client: httpx.Client) -> None:
     r = client.post(
         "/api/sessions",
@@ -245,7 +260,7 @@ def test_scan_missing_source(client: httpx.Client) -> None:
 
 def test_full_pipeline(client: httpx.Client) -> None:
     """Test scan -> batch -> hop1 -> hop2 pipeline with temp files."""
-    with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dest_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as src_dir, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as dest_dir:
         src = Path(src_dir)
         dest = Path(dest_dir)
 
@@ -274,7 +289,7 @@ def test_full_pipeline(client: httpx.Client) -> None:
         r2 = client.get(f"/api/sessions/{sid}")
         if r2.status_code == 200:
             session_data = _json(r2)
-            _check(session_data["status"] in ("created", "running", "completed"), 
+            _check(session_data["status"] in ("created", "running", "completed"),
                    f"Unexpected status: {session_data['status']}")
 
 

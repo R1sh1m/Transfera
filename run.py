@@ -22,6 +22,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -485,6 +487,41 @@ def _launch_backend() -> subprocess.Popen | None:
         return None
 
 
+def _wait_for_backend_readiness(proc: subprocess.Popen, port: int) -> None:
+    """Poll /api/health every 0.5s until the backend responds or 30s elapses.
+
+    If the backend process dies during the wait, report the crash and return
+    immediately.  On timeout the app continues running (the backend may still
+    become ready later).
+    """
+    _info(f"Waiting for http://127.0.0.1:{port}/api/health ...")
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            code = proc.returncode
+            _err(f"Backend process exited (code {code}) while waiting for readiness")
+            return
+        try:
+            resp = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=1.0,
+            )
+            if resp.status == 200:
+                _ok(f"Backend is responding on http://127.0.0.1:{port}")
+                return
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(0.5)
+
+    _err(
+        f"Backend process (PID {proc.pid}) is alive but not responding on "
+        f"http://127.0.0.1:{port}/api/health after 30s"
+    )
+    _err(
+        "Check the [BACKEND] log lines above for what it may be stuck on. "
+        "The application will continue running in case startup completes slowly."
+    )
+
+
 def _launch_frontend_dev() -> subprocess.Popen | None:
     _info(f"Starting Electron dev shell (Vite + Electron on port {VITE_PORT})...")
     cmd = ["npm", "run", "electron:dev"]
@@ -752,6 +789,7 @@ def main() -> None:
             _err("Cannot continue without backend -- exiting")
             sys.exit(1)
         _stream_output(_backend_proc, "BACKEND ", _C.BLUE)
+        _wait_for_backend_readiness(_backend_proc, BACKEND_PORT)
 
     if start_frontend:
         _frontend_proc = _launch_frontend_dev()

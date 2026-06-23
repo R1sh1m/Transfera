@@ -5,18 +5,14 @@ Request / Response validation for all API endpoints.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 from backend.api.source_types import (
     SourceRef,
-    SourceRefDevice,
-    SourceRefLocal,
-    legacy_string_to_source_ref,
-    source_ref_to_legacy_string,
 )
 
 
@@ -78,7 +74,6 @@ class ConfigResponse(BaseModel):
     video_extensions: list[str]
     audio_extensions: list[str]
     document_extensions: list[str]
-    local_secret_token: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +81,9 @@ class ConfigResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class ScanRequest(BaseModel):
     source_path: str = Field("", description="Directory or file to scan (legacy string path)")
-    source_ref: Optional[SourceRef] = Field(None, description="Typed source reference (preferred)")
-    session_name: Optional[str] = Field(None, max_length=255)
-    dest_path: Optional[str] = Field(None, description="Destination root for archive")
+    source_ref: SourceRef | None = Field(None, description="Typed source reference (preferred)")
+    session_name: str | None = Field(None, max_length=255)
+    dest_path: str | None = Field(None, description="Destination root for archive")
 
     @field_validator("source_path")
     @classmethod
@@ -110,7 +105,7 @@ class ScanResponse(BaseModel):
 class SessionCreate(BaseModel):
     session_name: str = Field(..., min_length=1, max_length=255)
     source_root: str = Field("", description="Legacy source path string (for backward compat)")
-    source_ref: Optional[SourceRef] = Field(None, description="Typed source reference (preferred)")
+    source_ref: SourceRef | None = Field(None, description="Typed source reference (preferred)")
     dest_root: str = Field(..., min_length=1)
     transfer_mode: str = Field(
         "copy",
@@ -120,6 +115,14 @@ class SessionCreate(BaseModel):
     only_new_since_last_import: bool = Field(
         False,
         description="If True and source is a device, skip files at or before the last import cutoff",
+    )
+    selected_files: list[str] | None = Field(
+        None,
+        description="If provided, only these source file paths are transferred (subset of source dir)",
+    )
+    folder_layout: Literal["year/month/day", "year/month", "flat"] = Field(
+        "year/month",
+        description="Destination folder structure: year/month/day, year/month, or flat (all files in root)",
     )
 
 
@@ -134,12 +137,13 @@ class SessionInfo(BaseModel):
     completed_items: int
     failed_items: int
     only_new_mode: bool = False
-    total_bytes_volume: Optional[int] = None
-    session_report_path: Optional[str] = None
+    folder_layout: str = "year/month"
+    total_bytes_volume: int | None = None
+    session_report_path: str | None = None
     created_at: datetime
     updated_at: datetime
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class SessionList(BaseModel):
@@ -181,16 +185,17 @@ class MediaItemInfo(BaseModel):
     source_path: str
     file_name: str
     file_size: int
-    extension: Optional[str] = None
-    mime_type: Optional[str] = None
+    extension: str | None = None
+    mime_type: str | None = None
     hop1_status: str
     hop2_status: str
     final_status: str
-    live_photo_group: Optional[str] = None
-    thumbnail_url: Optional[str] = None
-    date_taken: Optional[datetime] = None
-    date_source: Optional[str] = None
-    error_message: Optional[str] = None
+    live_photo_group: str | None = None
+    thumbnail_url: str | None = None
+    thumbnail_status: str = "pending"
+    date_taken: datetime | None = None
+    date_source: str | None = None
+    error_message: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -211,14 +216,14 @@ class DuplicateEntrySchema(BaseModel):
     item_id: int
     file_name: str
     source_path: str
-    source_hash: Optional[str] = None
+    source_hash: str | None = None
     file_size: int
     match_type: str
-    matched_path: Optional[str] = None
-    matched_item_id: Optional[int] = None
-    matched_file_size: Optional[int] = None
-    matched_date_taken: Optional[str] = None
-    matched_thumbnail_url: Optional[str] = None
+    matched_path: str | None = None
+    matched_item_id: int | None = None
+    matched_file_size: int | None = None
+    matched_date_taken: str | None = None
+    matched_thumbnail_url: str | None = None
 
 
 class DuplicateReportResponse(BaseModel):
@@ -230,6 +235,22 @@ class DuplicateReportResponse(BaseModel):
     total_items_checked: int
     processing_paused: bool
     summary: str
+
+
+class PrescanCandidate(BaseModel):
+    abs_path: str
+    filename: str
+    size_bytes: int
+
+
+class PrescanRequest(BaseModel):
+    candidates: list[PrescanCandidate]
+
+
+class PrescanResponse(BaseModel):
+    checked: int = 0
+    likely_duplicate_count: int = 0
+    likely_duplicate_paths: list[str] = []
 
 
 class DuplicateCheckRequest(BaseModel):
@@ -278,7 +299,7 @@ class WSEventType(str, Enum):
 class WSEvent(BaseModel):
     event: str
     data: dict[str, Any]
-    timestamp: datetime = Field(default_factory=lambda: datetime.utcnow())
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +349,7 @@ class FolderMetadataResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class PreflightValidateRequest(BaseModel):
     source_path: str = Field("", description="Source directory to measure (legacy)")
-    source_ref: Optional[SourceRef] = Field(None, description="Typed source reference (preferred)")
+    source_ref: SourceRef | None = Field(None, description="Typed source reference (preferred)")
     dest_path: str = Field(..., min_length=1, description="Destination drive/directory to check free space")
 
     @field_validator("source_path", "dest_path")
@@ -377,11 +398,11 @@ class IOSDeviceInfo(BaseModel):
     ios_version: str
     connection_type: str
     status: str
-    error_detail: Optional[str] = Field(
+    error_detail: str | None = Field(
         None,
         description="Human-readable detail when status is 'error'",
     )
-    active_tier: Optional[str] = Field(
+    active_tier: str | None = Field(
         None,
         description="Which tier is serving this device: 'tier1' (Apple driver) or 'tier2' (WSL bridge)",
     )
@@ -426,9 +447,9 @@ class IOSBrowseResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class DeviceImportStateResponse(BaseModel):
     device_id: str
-    device_name: Optional[str] = None
-    last_successful_cutoff: Optional[datetime] = None
-    last_import_session_id: Optional[int] = None
+    device_name: str | None = None
+    last_successful_cutoff: datetime | None = None
+    last_import_session_id: int | None = None
     updated_at: datetime
 
 
@@ -441,26 +462,23 @@ class DeviceImportStateListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class InstallerStatusResponse(BaseModel):
     winget_available: bool
-    winget_version: Optional[str] = None
+    winget_version: str | None = None
     driver_status: str
 
 
 class PackageVerificationResponse(BaseModel):
     success: bool
-    package_id: Optional[str] = None
-    package_name: Optional[str] = None
-    version: Optional[str] = None
-    error: Optional[str] = None
-
-
-class InstallDriverRequest(BaseModel):
-    pass  # No parameters needed — the command is always the same
+    package_id: str | None = None
+    package_name: str | None = None
+    version: str | None = None
+    error: str | None = None
 
 
 class InstallDriverResponse(BaseModel):
-    executable: str
-    args: list[str]
-    message: str
+    success: bool
+    exit_code: int | None = None
+    error: str | None = None
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +515,15 @@ class SessionProgressResponse(BaseModel):
     completed_items: int
     failed_items: int
 
+    # Cumulative progress counters (never reset between batches)
+    total_files: int = 0
+    cached_files: int = 0
+    imported_files: int = 0
+    failed_files: int = 0
+    current_batch: int = 0
+    total_batches: int = 0
+    progress_percent: float = 0.0
+
     current_item_id: int | None = None
     current_file_name: str = ""
     current_hop: str = ""
@@ -514,12 +541,17 @@ class SessionProgressResponse(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
+    # --- Timing & speed (server-computed) ---
+    elapsed_seconds: int = 0
+    eta_seconds: int | None = None
+    speed_files_per_sec: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Clear / Purge
 # ---------------------------------------------------------------------------
 class ClearSessionsRequest(BaseModel):
-    older_than_days: Optional[int] = Field(
+    older_than_days: int | None = Field(
         None,
         ge=1,
         description="If set, only clear sessions created more than N days ago. "

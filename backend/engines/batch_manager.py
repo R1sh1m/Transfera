@@ -6,11 +6,10 @@ Chunks sorted media_items into strict 100-file TransferBatch rows.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from math import ceil
-from typing import Sequence
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import BATCH_SIZE
 from backend.database.manager import session_scope

@@ -14,8 +14,9 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -25,12 +26,122 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 BRIDGE_PORT = 18920
-DISTRO_NAME = "Ubuntu"
+DISTRO_NAME = "Ubuntu"  # fallback if dynamic lookup fails
 APPLE_VID = "05ac"
 STATE_DIR = Path.home() / ".transfera"
 STATE_FILE = STATE_DIR / "tier2_state.json"
 BRIDGE_SCRIPT_NAME = "wsl_bridge.py"
 BRIDGE_INSTALL_PATH = "/opt/transfera-bridge"
+DISTRO_SAVE_PATH = Path(__file__).resolve().parent.parent / "data" / "wsl_distro.txt"
+
+# ---------------------------------------------------------------------------
+# Distro name resolution
+# ---------------------------------------------------------------------------
+def get_transfera_wsl_distro() -> str | None:
+    """Return the name of the WSL distro Transfera should use.
+
+    Checks in order:
+    1. A saved distro name in ``backend/data/wsl_distro.txt``
+       (written during ``tier2/setup``).
+    2. The default WSL distro (``wsl --list --quiet``, first line).
+    3. Any distro whose name contains **Ubuntu** (case-insensitive).
+    4. Any registered distro.
+    Returns ``None`` if no WSL distro is installed at all.
+    """
+    # 1. Saved name from a previous setup run
+    if DISTRO_SAVE_PATH.exists():
+        try:
+            # wsl --list outputs UTF-16LE on Windows; the save file is also
+            # written as UTF-16LE so one reader works for both sources.
+            name = DISTRO_SAVE_PATH.read_text(encoding="utf-16-le").strip().strip("\x00")
+            if name:
+                logger.debug("Distro from saved file: %s", name)
+                return name
+        except Exception:
+            pass
+
+    # 2. List all distros
+    try:
+        result = subprocess.run(
+            ["wsl", "--list", "--quiet"],
+            capture_output=True,
+            timeout=10,
+        )
+        # wsl --list --quiet outputs plain distro names in UTF-16LE
+        output = result.stdout.decode("utf-16-le", errors="replace")
+        distros = [
+            d.strip().strip("\x00")
+            for d in output.splitlines()
+            if d.strip().strip("\x00")
+        ]
+    except Exception:
+        distros = []
+
+    if not distros:
+        # Fallback: try --verbose which shows more info
+        try:
+            result = subprocess.run(
+                ["wsl", "--list", "--verbose"],
+                capture_output=True,
+                timeout=10,
+            )
+            output = result.stdout.decode("utf-16-le", errors="replace")
+            distros = []
+            for line in output.splitlines():
+                clean = line.strip().strip("\x00").lstrip("*").strip()
+                if not clean:
+                    continue
+                if clean.startswith("NAME") or "VERSION" in clean.upper():
+                    continue
+                parts = clean.split()
+                if len(parts) >= 3:
+                    distros.append(parts[0])
+        except Exception:
+            return None
+
+    if not distros:
+        return None
+
+    # 3. Ubuntu variant preferred
+    for d in distros:
+        if "ubuntu" in d.lower():
+            logger.debug("Distro from Ubuntu match: %s", d)
+            return d
+
+    # 4. First available
+    logger.debug("Distro from first available: %s", distros[0])
+    return distros[0]
+
+
+def save_transfera_wsl_distro(name: str) -> None:
+    """Persist the distro name so ``get_transfera_wsl_distro()`` finds it."""
+    DISTRO_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Write as UTF-16LE so the same reader handles saved file and wsl output
+    DISTRO_SAVE_PATH.write_text(name + "\n", encoding="utf-16-le")
+    logger.info("Saved WSL distro name: %s", name)
+
+
+# Portable shell lock-polling preamble for apt/dpkg locks
+# Compatible with apt 1.x, 2.x, and WSL distros without systemd (no --lock-timeout).
+APT_LOCK_POLL_SCRIPT = """\
+wait_for_lock() {
+  local lockfile=$1 sentinel=$2 i=0
+  if flock --nonblock "$lockfile" -c true 2>/dev/null; then
+    return 0
+  fi
+  echo "Waiting for apt lock..."
+  while ! flock --nonblock "$lockfile" -c true 2>/dev/null; do
+    if [ $i -ge 24 ]; then
+      echo "$sentinel" >&2
+      return 1
+    fi
+    sleep 5
+    i=$((i+1))
+  done
+}
+wait_for_lock /var/lib/apt/lists/lock APT_LOCK_TIMEOUT || exit 1
+wait_for_lock /var/lib/dpkg/lock-frontend DPKG_LOCK_TIMEOUT || exit 1
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +188,9 @@ class BridgeStatus:
     reachable: bool = False
     devices: list[dict] = field(default_factory=list)
     error: str | None = None
+    error_code: str | None = None
+    last_error: str | None = None
+    restart_count: int = 0
 
 
 @dataclass
@@ -114,6 +228,7 @@ class Tier2StepResult:
     completed: bool
     restart_required: bool = False
     error: str | None = None
+    error_code: str | None = None
     next_step: str | None = None
     details: dict = field(default_factory=dict)
 
@@ -149,7 +264,7 @@ class Tier2PersistedState:
 
     def save(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        self.saved_at = datetime.now(timezone.utc).isoformat()
+        self.saved_at = datetime.now(UTC).isoformat()
         STATE_FILE.write_text(json.dumps(asdict(self), indent=2))
 
     @classmethod
@@ -242,6 +357,15 @@ def _decode_wsl_output(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _apt_lock_contended(err: str) -> bool:
+    err_lower = err.lower()
+    return (
+        "could not get lock" in err_lower
+        or "apt_lock_timeout" in err_lower
+        or "dpkg_lock_timeout" in err_lower
+    )
+
+
 async def _run_cmd(
     *args: str,
     timeout: float = 60.0,
@@ -253,7 +377,7 @@ async def _run_cmd(
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         raise
     return proc.returncode or 0, _decode_wsl_output(stdout), _decode_wsl_output(stderr)
@@ -303,34 +427,21 @@ class WSLOrchestrator:
     def __init__(self) -> None:
         self._cached_distro_name: str | None = None
         self._distro_cache_time: float = 0.0
+        self._bridge_restart_count: int = 0
+        self._bridge_last_stderr: str | None = None
+        self._bridge_watchdog_task: asyncio.Task | None = None
+        self._bridge_intentional_stop: bool = False
 
     async def _find_distro(self) -> str | None:
         """Return installed WSL distro name, or None if none found. Cached 30s."""
         now = asyncio.get_event_loop().time()
         if self._cached_distro_name is not None and now - self._distro_cache_time < 30:
             return self._cached_distro_name
-        try:
-            rc, out, _ = await _run_cmd("wsl", "--list", "--verbose", timeout=10)
-            if rc == 0 and out.strip():
-                # First pass: look for the preferred distro (Ubuntu) by name
-                for line in out.splitlines():
-                    name = _is_valid_distro_line(line)
-                    if name and name.lower() == DISTRO_NAME.lower():
-                        self._cached_distro_name = DISTRO_NAME
-                        self._distro_cache_time = now
-                        return self._cached_distro_name
-                # Second pass: take any registered distro
-                for line in out.splitlines():
-                    name = _is_valid_distro_line(line)
-                    if name:
-                        self._cached_distro_name = name
-                        self._distro_cache_time = now
-                        return self._cached_distro_name
-        except Exception:
-            pass
-        self._cached_distro_name = None
+        # Delegate to the standalone resolver (saved file → wsl --list → Ubuntu)
+        name = get_transfera_wsl_distro()
+        self._cached_distro_name = name
         self._distro_cache_time = now
-        return None
+        return name
 
     async def check_feasibility(self) -> WSLStatus:
         status = WSLStatus()
@@ -351,19 +462,18 @@ class WSLOrchestrator:
             rc, out, _ = await _run_cmd("wsl", "--list", "--verbose", timeout=10)
             if rc == 0 and out.strip():
                 status.wsl_installed = True
-                for line in out.splitlines():
-                    name = _is_valid_distro_line(line)
-                    if name and name.lower() == DISTRO_NAME.lower():
-                        status.distro_name = DISTRO_NAME
-                        if "2" in line:
-                            status.distro_ready = True
-                        break
-                if not status.distro_name:
+                # First: use the dynamic resolver (saved → default → Ubuntu → first)
+                resolved = get_transfera_wsl_distro()
+                if resolved:
+                    status.distro_name = resolved
+                    status.distro_ready = ("2" in out) or True
+                else:
+                    # Fallback: scan --verbose output for any distro
                     for line in out.splitlines():
                         name = _is_valid_distro_line(line)
                         if name:
                             status.distro_name = name
-                            status.distro_ready = True
+                            status.distro_ready = ("2" in line) or True
                             break
         except FileNotFoundError:
             status.wsl_installed = False
@@ -380,9 +490,10 @@ class WSLOrchestrator:
                 pass
 
         if status.distro_ready:
+            distro_for_uname = status.distro_name or get_transfera_wsl_distro() or DISTRO_NAME
             try:
                 rc, out, _ = await _run_cmd(
-                    "wsl", "-d", status.distro_name or DISTRO_NAME,
+                    "wsl", "-d", distro_for_uname,
                     "--", "uname", "-r", timeout=10,
                 )
                 if rc == 0:
@@ -439,7 +550,7 @@ class WSLOrchestrator:
                 error=f"WSL install returned: {combined.strip()}",
                 details={"output": combined},
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return Tier2StepResult(
                 step_id=StepID.ENABLE_WSL, completed=False,
                 error="WSL installation timed out after 5 minutes",
@@ -501,7 +612,18 @@ class WSLOrchestrator:
         return status
 
     async def provision_linux(self, distro: str | None = None) -> Tier2StepResult:
-        d = distro or DISTRO_NAME
+        d = get_transfera_wsl_distro() if distro is None else distro
+        if d is None:
+            return Tier2StepResult(
+                step_id=StepID.PROVISION_LINUX,
+                completed=False,
+                error=(
+                    "No WSL distribution found. "
+                    "Please install Ubuntu from the Microsoft Store."
+                ),
+                error_code="NO_WSL_DISTRO",
+                details={"steps_completed": []},
+            )
         installed = await self._find_distro()
         if installed is None:
             attempt = await self.install_distro()
@@ -530,29 +652,79 @@ class WSLOrchestrator:
         if distro is None:
             d = installed
         steps_completed: list[str] = []
-        apt_commands = [
-            ("apt-get", "update", "-y", "Update package lists"),
-            ("apt-get", "install", "-y", "linux-tools-common", "hwdata", "usbutils", "python3", "python3-pip", "python3-venv", "usbmuxd", "curl", "Install USB/IP tools, Python, usbmuxd"),
+        # -------------------------------------------------------------------
+        # apt-get update with lock-wait strategy
+        # -------------------------------------------------------------------
+        update_desc = "Update package lists"
+        update_ok = False
+        update_lock_contended = False
+
+        # Portable lock-polling loop (no --lock-timeout, works on apt 1.x/2.x)
+        rc, out, err = await _run_cmd(
+            "wsl", "-d", d, "-u", "root", "--",
+            "bash", "-c",
+            APT_LOCK_POLL_SCRIPT + "apt-get update -y",
+            timeout=200,
+        )
+        if rc == 0:
+            update_ok = True
+        elif _apt_lock_contended(err or ""):
+            update_lock_contended = True
+
+        if not update_ok:
+            raw = err.strip() or out.strip()
+            if "no distribution with the supplied name" in raw.lower() or "wsl_e_distro_not_found" in raw.lower():
+                hint = (
+                    f"The Linux distribution '{d}' is no longer registered. "
+                    f"Open a PowerShell terminal and run:\n"
+                    f"  wsl --install -d Ubuntu\n"
+                    f"then retry this setup step."
+                )
+                return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=False, error=hint, details={"steps_completed": steps_completed})
+            return Tier2StepResult(
+                step_id=StepID.PROVISION_LINUX,
+                completed=False,
+                error=f"Failed to {update_desc}: {raw}",
+                error_code="APT_LOCK_TIMEOUT" if update_lock_contended else None,
+                details={"steps_completed": steps_completed},
+            )
+        steps_completed.append(update_desc)
+
+        # -------------------------------------------------------------------
+        # apt-get install with lock-wait strategy
+        # -------------------------------------------------------------------
+        install_desc = "Install USB/IP tools, Python, usbmuxd"
+        install_pkgs = [
+            "linux-tools-common", "hwdata", "usbutils",
+            "python3", "python3-pip", "python3-venv",
+            "usbmuxd", "curl",
         ]
-        for cmd_tuple in apt_commands:
-            cmd_args = cmd_tuple[:-1]
-            desc = cmd_tuple[-1]
-            try:
-                rc, out, err = await _run_cmd("wsl", "-d", d, "-u", "root", "--", *cmd_args, timeout=120)
-                if rc != 0 and "already" not in out.lower():
-                    raw = err.strip() or out.strip()
-                    if "no distribution with the supplied name" in raw.lower() or "wsl_e_distro_not_found" in raw.lower():
-                        hint = (
-                            f"The Linux distribution '{d}' is no longer registered. "
-                            f"Open a PowerShell terminal and run:\n"
-                            f"  wsl --install -d Ubuntu\n"
-                            f"then retry this setup step."
-                        )
-                        return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=False, error=hint, details={"steps_completed": steps_completed})
-                    return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=False, error=f"Failed to {desc}: {raw}", details={"steps_completed": steps_completed})
-                steps_completed.append(desc)
-            except Exception as exc:
-                return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=False, error=f"Failed to {desc}: {exc}", details={"steps_completed": steps_completed})
+        try:
+            pkgs_str = " ".join(install_pkgs)
+            rc, out, err = await _run_cmd(
+                "wsl", "-d", d, "-u", "root", "--",
+                "bash", "-c",
+                APT_LOCK_POLL_SCRIPT + f"apt-get install -y {pkgs_str}",
+                timeout=180,
+            )
+            if rc != 0 and "already" not in out.lower():
+                raw = err.strip() or out.strip()
+                error_code = "DPKG_LOCK_TIMEOUT" if _apt_lock_contended(err or "") else None
+                return Tier2StepResult(
+                    step_id=StepID.PROVISION_LINUX,
+                    completed=False,
+                    error=f"Failed to {install_desc}: {raw}",
+                    error_code=error_code,
+                    details={"steps_completed": steps_completed},
+                )
+            steps_completed.append(install_desc)
+        except Exception as exc:
+            return Tier2StepResult(
+                step_id=StepID.PROVISION_LINUX,
+                completed=False,
+                error=f"Failed to {install_desc}: {exc}",
+                details={"steps_completed": steps_completed},
+            )
 
         try:
             rc, out, _ = await _run_cmd("wsl", "-d", d, "-u", "root", "--", "pip3", "install", "--break-system-packages", "pymobiledevice3", timeout=120)
@@ -581,11 +753,31 @@ class WSLOrchestrator:
         except Exception as exc:
             logger.warning("Bridge script deployment failed: %s", exc)
 
+        # Persist the distro name so future lookups find it immediately
+        save_transfera_wsl_distro(d)
         return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=True, details={"steps_completed": steps_completed})
 
     async def start_bridge(self, distro: str | None = None) -> BridgeStatus:
-        d = distro or DISTRO_NAME
         status = BridgeStatus()
+        status.restart_count = self._bridge_restart_count
+
+        # Resolve distro before doing anything else
+        d = get_transfera_wsl_distro() if distro is None else distro
+        if d is None:
+            status.error = (
+                "No WSL distribution found. "
+                "Please install Ubuntu from the Microsoft Store."
+            )
+            status.error_code = "NO_WSL_DISTRO"
+            return status
+
+        if self._bridge_restart_count >= 3:
+            status.error = (
+                "Bridge failed to start after 3 attempts. "
+                "Check the bridge error log in Advanced settings."
+            )
+            status.last_error = self._bridge_last_stderr
+            return status
 
         # Retry hygiene: kill any bridge from a previous attempt before starting fresh
         existing_reachable = False
@@ -597,33 +789,117 @@ class WSLOrchestrator:
             pass
 
         if existing_reachable and check is not None:
+            self._bridge_restart_count = 0
+            self._bridge_last_stderr = None
+            self._bridge_intentional_stop = False
+            # Start watchdog if not already running
+            if (self._bridge_watchdog_task is None
+                    or self._bridge_watchdog_task.done()):
+                self._bridge_watchdog_task = asyncio.create_task(
+                    self._bridge_watchdog_loop(d),
+                    name="bridge-watchdog",
+                )
+                logger.info("Bridge watchdog task started")
             return check
 
         # Clean up any leftover bridge process from an earlier (failed) attempt
         await self.stop_bridge(d)
+
+        # Wait for WSL networking to be ready before spawning the bridge
+        # so it doesn't try to bind before the interface is up.
+        network_ok = False
+        for _ in range(20):
+            rc, out, _ = await _run_cmd("wsl", "-d", d, "--", "bash", "-c",
+                "hostname -I 2>/dev/null | grep -q . && echo OK || echo WAIT",
+                timeout=10)
+            if rc == 0 and "OK" in out:
+                network_ok = True
+                break
+            await asyncio.sleep(1.0)
+        if not network_ok:
+            logger.warning("WSL network not ready after 20s — starting bridge anyway")
 
         bridge_path = f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}"
         try:
             proc = await asyncio.create_subprocess_exec(
                 "wsl", "-d", d, "-u", "root", "--",
                 "python3", bridge_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             logger.info("Bridge process started (pid=%s)", proc.pid)
             # Poll generously — first-time cold start inside WSL can be slow
             for _ in range(120):
                 await asyncio.sleep(0.5)
+                if proc.returncode is not None:
+                    # Process exited — capture output before continuing
+                    captured_stdout, captured_stderr = await proc.communicate()
+                    raw_stderr = captured_stderr if captured_stderr else b""
+                    for enc in ('utf-16-le', 'utf-8', 'cp1252'):
+                        try:
+                            stderr_text = raw_stderr.decode(enc).replace('\x00', '').strip()
+                            break
+                        except (UnicodeDecodeError, ValueError):
+                            continue
+                    else:
+                        stderr_text = raw_stderr.decode('utf-8', errors='replace').strip()
+                    stderr_text = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', stderr_text)
+                    stdout_text = captured_stdout.decode("utf-8", errors="replace").strip() if captured_stdout else ""
+                    body = stderr_text or stdout_text
+                    msg = body or f"Bridge exited with code {proc.returncode}"
+                    logger.error(
+                        "Bridge process exited unexpectedly (rc=%s):\n%s",
+                        proc.returncode, msg[:500],
+                    )
+                    self._bridge_restart_count += 1
+                    status.restart_count = self._bridge_restart_count
+                    status.last_error = msg
+                    # Log first 50 lines for diagnostics
+                    if body:
+                        lines = body.splitlines()
+                        for i, line in enumerate(lines[:50]):
+                            logger.error("bridge[stderr:%d] %s", i, line)
+                    break
                 check = await self.get_bridge_status(d)
                 if check.reachable:
+                    self._bridge_restart_count = 0
+                    self._bridge_last_stderr = None
+                    self._bridge_intentional_stop = False
+                    # Start watchdog if not already running
+                    if (self._bridge_watchdog_task is None
+                            or self._bridge_watchdog_task.done()):
+                        self._bridge_watchdog_task = asyncio.create_task(
+                            self._bridge_watchdog_loop(d),
+                            name="bridge-watchdog",
+                        )
+                        logger.info("Bridge watchdog task started")
                     return check
-            status.error = "Bridge started but not reachable after 60 seconds"
+            if not status.error and not status.reachable:
+                status.error = "Bridge started but not reachable after 60 seconds"
+                self._bridge_restart_count += 1
+                status.restart_count = self._bridge_restart_count
         except Exception as exc:
             status.error = str(exc)
+            self._bridge_restart_count += 1
+            status.restart_count = self._bridge_restart_count
+        self._bridge_last_stderr = status.last_error
         return status
 
     async def stop_bridge(self, distro: str | None = None) -> None:
-        d = distro or DISTRO_NAME
+        # Signal the watchdog not to restart, then cancel it
+        self._bridge_intentional_stop = True
+        if self._bridge_watchdog_task is not None and not self._bridge_watchdog_task.done():
+            self._bridge_watchdog_task.cancel()
+            try:
+                await self._bridge_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._bridge_watchdog_task = None
+            logger.info("Bridge watchdog cancelled (stop_bridge called)")
+
+        d = get_transfera_wsl_distro() if distro is None else distro
+        if d is None:
+            return
         try:
             await _run_cmd("wsl", "-d", d, "-u", "root", "--", "bash", "-c",
                 "PID=$(cat /tmp/transfera-bridge.pid 2>/dev/null) && kill $PID 2>/dev/null; "
@@ -635,9 +911,85 @@ class WSLOrchestrator:
         # Small cooldown so the old process actually exits before we proceed
         await asyncio.sleep(1)
 
+    async def _bridge_watchdog_loop(self, distro: str) -> None:
+        """
+        Background watchdog: probe the bridge every 8 seconds while it's running.
+
+        If two consecutive probes both fail (16s combined), attempt a restart via
+        the existing start_bridge() which has its own 3-attempt retry logic.
+        This restores mid-transfer resilience without duplicating restart logic.
+        """
+        PROBE_INTERVAL = 8.0      # seconds between health checks
+        FAIL_THRESHOLD = 2         # consecutive failures before restart attempt
+
+        logger.info("Bridge watchdog started for distro=%s", distro)
+        consecutive_failures = 0
+
+        try:
+            while True:
+                await asyncio.sleep(PROBE_INTERVAL)
+
+                if self._bridge_intentional_stop:
+                    logger.info("Bridge watchdog: intentional stop detected — exiting")
+                    return
+
+                try:
+                    status = await self.get_bridge_status(distro)
+                    if status.reachable:
+                        consecutive_failures = 0
+                        continue
+                    else:
+                        consecutive_failures += 1
+                        logger.warning(
+                            "Bridge watchdog: probe failed (%d/%d consecutive)",
+                            consecutive_failures, FAIL_THRESHOLD,
+                        )
+                except Exception as exc:
+                    consecutive_failures += 1
+                    logger.warning(
+                        "Bridge watchdog: probe raised exception (%d/%d): %s",
+                        consecutive_failures, FAIL_THRESHOLD, exc,
+                    )
+
+                if consecutive_failures < FAIL_THRESHOLD:
+                    continue
+
+                # Two consecutive failures — attempt restart
+                logger.warning(
+                    "Bridge watchdog: bridge appears dead (2 consecutive failed probes) "
+                    "— attempting restart via start_bridge()"
+                )
+                consecutive_failures = 0
+
+                # Reset the restart counter so start_bridge()'s own 3-attempt
+                # limit applies fresh (we are recovering from a mid-run crash,
+                # not a startup failure, so the counter should not carry over).
+                self._bridge_restart_count = 0
+
+                try:
+                    restart_status = await self.start_bridge(distro)
+                    if restart_status.reachable:
+                        logger.info(
+                            "Bridge watchdog: bridge restarted successfully (port=%d)",
+                            BRIDGE_PORT,
+                        )
+                    else:
+                        logger.error(
+                            "Bridge watchdog: restart failed — %s",
+                            restart_status.error or restart_status.last_error,
+                        )
+                except Exception as exc:
+                    logger.error("Bridge watchdog: restart raised exception: %s", exc)
+
+        except asyncio.CancelledError:
+            logger.info("Bridge watchdog: cancelled cleanly")
+            raise
+
     async def cleanup_orphaned_bridge(self, distro: str | None = None) -> None:
         """Check for a leftover bridge process from a previous session and kill it."""
-        d = distro or DISTRO_NAME
+        d = get_transfera_wsl_distro() if distro is None else distro
+        if d is None:
+            return
         reachable = False
         try:
             check = await self.get_bridge_status(d)
@@ -650,20 +1002,19 @@ class WSLOrchestrator:
         await self.stop_bridge(d)
 
     async def get_bridge_status(self, distro: str | None = None) -> BridgeStatus:
-        d = distro or DISTRO_NAME
+        d = get_transfera_wsl_distro() if distro is None else distro
         status = BridgeStatus()
+        status.last_error = self._bridge_last_stderr
+        status.restart_count = self._bridge_restart_count
         reachable, devices = await self._probe_bridge(f"http://127.0.0.1:{BRIDGE_PORT}")
         if reachable:
             status.reachable = True
             status.running = True
             status.devices = devices
             return status
-        installed = await self._find_distro()
-        if installed is None:
+        if d is None:
             status.error = "Bridge is not reachable"
             return status
-        if distro is None:
-            d = installed
         try:
             rc, out, _ = await _run_cmd("wsl", "-d", d, "--", "hostname", "-I", timeout=5)
             if rc == 0 and out.strip():
@@ -681,7 +1032,7 @@ class WSLOrchestrator:
 
     async def _probe_bridge(self, base_url: str) -> tuple[bool, list[dict]]:
         try:
-            import aiohttp
+            import aiohttp  # type: ignore[import-untyped]
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{base_url}/health", timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status != 200:
@@ -691,18 +1042,25 @@ class WSLOrchestrator:
                         data = await resp.json()
                         return True, data.get("devices", [])
         except ImportError:
+            import json as _json
             import urllib.request
-            try:
-                req = urllib.request.Request(f"{base_url}/health")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    if resp.status == 200:
-                        req2 = urllib.request.Request(f"{base_url}/api/ios-devices")
-                        with urllib.request.urlopen(req2, timeout=5) as resp2:
-                            import json as _json
-                            data = _json.loads(resp2.read())
-                            return True, data.get("devices", [])
-            except Exception:
-                pass
+
+            def _sync_probe() -> tuple[bool, list[dict]]:
+                try:
+                    with urllib.request.urlopen(
+                        urllib.request.Request(f"{base_url}/health"), timeout=3
+                    ) as resp:
+                        if resp.status != 200:
+                            return False, []
+                    with urllib.request.urlopen(
+                        urllib.request.Request(f"{base_url}/api/ios-devices"), timeout=5
+                    ) as resp2:
+                        data = _json.loads(resp2.read())
+                        return True, data.get("devices", [])
+                except Exception:
+                    return False, []
+
+            return await asyncio.to_thread(_sync_probe)
         except Exception:
             pass
         return False, []
@@ -753,7 +1111,13 @@ class WSLOrchestrator:
         }
 
     async def attach_device(self, busid: str, distro: str | None = None) -> Tier2DeviceStatus:
-        d = distro or DISTRO_NAME
+        d = get_transfera_wsl_distro() if distro is None else distro
+        if d is None:
+            return Tier2DeviceStatus(
+                busid=busid,
+                error="No WSL distribution found. Cannot attach device. "
+                      "Please install a WSL distribution first.",
+            )
         status = Tier2DeviceStatus(busid=busid)
         try:
             rc, out, err = await _run_cmd("usbipd", "attach", "--wsl", "--busid", busid, "-d", d, timeout=30)
@@ -766,7 +1130,7 @@ class WSLOrchestrator:
         return status
 
     async def confirm_device_in_wsl(self, serial: str | None = None, distro: str | None = None, timeout: float = 15.0) -> bool:
-        d = distro or DISTRO_NAME
+        d = get_transfera_wsl_distro() if distro is None else distro
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             status = await self.get_bridge_status(d)
@@ -808,3 +1172,113 @@ class WSLOrchestrator:
                 "Recommend using Tier 1 (Apple driver) instead."
             )
         return status
+
+    async def auto_recover_apple_device(self) -> dict:
+        """Self-healing USB passthrough for Apple devices.
+
+        Called when ``usbmuxd`` (TCP 27015) is unreachable and Tier 2 is
+        the fallback path.  Scans all USB devices visible to ``usbipd``
+        and for every Apple device (VID ``05ac``):
+
+        * If the device is **not bound** — records it in ``needs_bind`` so
+          the caller can prompt the user for elevation.
+        * If bound but **not attached** — attempts ``usbipd attach``
+          automatically.
+        * If already **attached** — marks success.
+
+        Returns
+        -------
+        dict
+            ``apple_devices_found`` — count of Apple devices detected.
+
+            ``devices`` — per-device result list with keys ``busid``,
+            ``vid_pid``, ``device_name``, ``state``, ``bound``,
+            ``attached``, ``attach_result``, ``error``.
+
+            ``attach_errors`` — list of ``{"busid": ..., "error": ...}``
+            for devices whose auto-attach failed.
+
+            ``needs_bind`` — list of ``busid`` strings that require a
+            prior ``usbipd bind --force`` (elevation needed).
+
+            ``needs_elevation`` — ``True`` when at least one device needs
+            bind or attach failed with access-denied.
+
+            ``success`` — ``True`` if at least one Apple device is now
+            attached and usable.
+        """
+        devices = await self.list_usb_devices()
+        apple_devices = [d for d in devices if d.is_apple]
+
+        result: dict = {
+            "apple_devices_found": len(apple_devices),
+            "devices": [],
+            "attach_errors": [],
+            "needs_bind": [],
+            "needs_elevation": False,
+            "success": False,
+        }
+
+        for dev in apple_devices:
+            dev_result: dict = {
+                "busid": dev.busid,
+                "vid_pid": dev.vid_pid,
+                "device_name": dev.device_name,
+                "state": dev.state,
+                "bound": dev.is_bound,
+                "attached": dev.is_attached,
+                "attach_result": None,
+                "error": None,
+            }
+
+            # -- Device is not bound -- record the bind requirement
+            if not dev.is_bound:
+                result["needs_bind"].append(dev.busid)
+                result["needs_elevation"] = True
+                dev_result["error"] = (
+                    f"Device {dev.busid} ({dev.device_name}) is not bound. "
+                    f"Run 'usbipd bind --busid {dev.busid} --force' as Administrator "
+                    f"before it can be attached to WSL."
+                )
+                result["devices"].append(dev_result)
+                continue
+
+            # -- Device is already attached -- nothing to do
+            if dev.is_attached:
+                dev_result["attach_result"] = "already_attached"
+                result["success"] = True
+                result["devices"].append(dev_result)
+                continue
+
+            # -- Bound but not attached -- attempt auto-attach
+            try:
+                attach_status = await self.attach_device(dev.busid)
+                if attach_status.attached:
+                    dev_result["attach_result"] = "attached"
+                    result["success"] = True
+                else:
+                    dev_result["attach_result"] = "failed"
+                    error_text = attach_status.error or "unknown"
+                    dev_result["error"] = error_text
+                    result["attach_errors"].append({
+                        "busid": dev.busid,
+                        "error": error_text,
+                    })
+                    # Access-denied during attach means elevation needed
+                    if "access denied" in error_text.lower() or "5" in error_text:
+                        result["needs_elevation"] = True
+            except Exception as exc:
+                dev_result["attach_result"] = "failed"
+                error_text = str(exc)
+                dev_result["error"] = error_text
+                result["attach_errors"].append({
+                    "busid": dev.busid,
+                    "error": error_text,
+                })
+
+            result["devices"].append(dev_result)
+
+        if not apple_devices:
+            result["needs_elevation"] = False
+
+        return result

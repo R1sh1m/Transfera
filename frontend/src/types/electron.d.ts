@@ -76,6 +76,15 @@ export interface ElectronAPI {
   checkVirtualization: () => Promise<{ available: boolean; details: string }>
 
   restartApp: () => Promise<void>
+
+  // Open URL in default browser
+  openExternal: (url: string) => Promise<void>
+
+  // Tray progress — updates Windows taskbar progress overlay
+  setTrayProgress: (value: number | null) => Promise<void>
+
+  // Removable drive detection — fires when a new USB drive is connected
+  onNewRemovableDrive: (callback: (data: { driveLetter: string; volumeName: string | null }) => void) => () => void
 }
 
 declare global {

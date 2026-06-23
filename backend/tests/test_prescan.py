@@ -25,7 +25,7 @@ async def test_prescan_matches_by_filename_and_size(db_session):
         final_status=HopStatus.COMPLETED.value,
     )
     db_session.add(item)
-    await db_session.flush()
+    await db_session.commit()
 
     candidates = [
         {"abs_path": "/device/photo.jpg", "filename": "photo.jpg", "size_bytes": 1024000},
@@ -59,7 +59,7 @@ async def test_prescan_case_insensitive_match(db_session):
         final_status=HopStatus.COMPLETED.value,
     )
     db_session.add(item)
-    await db_session.flush()
+    await db_session.commit()
 
     candidates = [
         {"abs_path": "/device/photo.jpg", "filename": "photo.jpg", "size_bytes": 2048000},
@@ -81,7 +81,7 @@ async def test_prescan_only_completed_items(db_session):
         final_status=HopStatus.PENDING.value,
     )
     db_session.add(item)
-    await db_session.flush()
+    await db_session.commit()
 
     candidates = [
         {"abs_path": "/device/video.mp4", "filename": "video.mp4", "size_bytes": 5000000},

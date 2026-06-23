@@ -13,33 +13,32 @@ Sanity check: date must be >= 1995-01-01 AND <= now (+ 1 day tolerance).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 # Earliest plausible date for digital photography
-_MIN_DATE = datetime(1995, 1, 1, tzinfo=timezone.utc)
+_MIN_DATE = datetime(1995, 1, 1, tzinfo=UTC)
 
 # Tolerance for future dates (clock skew, etc.)
 _FUTURE_TOLERANCE = timedelta(days=1)
 
 
-def is_date_sane(dt: Optional[datetime]) -> bool:
+def is_date_sane(dt: datetime | None) -> bool:
     """Return True if the datetime is plausible for a 'date taken' value."""
     if dt is None:
         return False
     # Ensure timezone-aware for comparison
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
     return _MIN_DATE <= dt <= (now + _FUTURE_TOLERANCE)
 
 
 def resolve_item_date(
-    date_taken: Optional[datetime],
-    date_modified: Optional[datetime],
-) -> tuple[Optional[datetime], Optional[str]]:
+    date_taken: datetime | None,
+    date_modified: datetime | None,
+) -> tuple[datetime | None, str | None]:
     """
     Resolve the best date for a media item using the defined fallback chain.
 

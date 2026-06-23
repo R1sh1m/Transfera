@@ -9,10 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class ConnectionManager:
         payload = json.dumps({
             "event": event,
             "data": data,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         })
         dead: list[WebSocket] = []
         for ws in self._connections.get(session_id, []):
@@ -118,7 +118,7 @@ class ConnectionManager:
                         await ws.send_json({
                             "event": "ping",
                             "data": {},
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         })
                     except Exception:
                         dead.append(ws)
@@ -128,7 +128,7 @@ class ConnectionManager:
                     if event:
                         try:
                             await asyncio.wait_for(event.wait(), timeout=KEEPALIVE_TIMEOUT)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             logger.warning(
                                 "WS pong timeout: session=%d, disconnecting stale connection",
                                 session_id,

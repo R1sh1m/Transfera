@@ -76,6 +76,7 @@ backend/bin/exiftool/
 
 # --- Native build artifacts ---
 backend/bin/wpd_helper.exe
+backend/bin/wpd_helper_test.exe
 backend/bin/wpd_helper/
 backend/bin_debug/
 native/wpd_helper/build/
@@ -84,6 +85,9 @@ native/wpd_helper/.cache/
 *.pdb
 *.ilk
 *.exp
+
+# --- Documentation (design spec, not runtime code) ---
+DESIGN.md
 
 # --- Misc ---
 *.bak
@@ -102,3 +106,5 @@ Transfera_Architecture_Spec_v2.pdf
 test_dest/
 test_source/
 opencode.json
+.pytest_cache/
+.ruff_cache/

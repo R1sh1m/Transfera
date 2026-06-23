@@ -5,24 +5,23 @@ Pydantic models for WSL2/usbipd device access endpoints.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 
 class Tier2StatusResponse(BaseModel):
     wsl_installed: bool = False
-    distro_name: Optional[str] = None
+    distro_name: str | None = None
     distro_ready: bool = False
     usbipd_installed: bool = False
-    usbipd_version: Optional[str] = None
+    usbipd_version: str | None = None
     bridge_running: bool = False
     bridge_reachable: bool = False
     virtualization_available: bool = True
     restart_required: bool = False
     active_tier: str = "none"
     devices_on_tier2: list[str] = Field(default_factory=list)
-    error: Optional[str] = None
+    error: str | None = None
+    bridge_error: str | None = None
 
 
 class Tier2StepPreview(BaseModel):
@@ -31,8 +30,8 @@ class Tier2StepPreview(BaseModel):
     description: str
     requires_restart: bool = False
     requires_elevation: bool = False
-    elevation_description: Optional[str] = None
-    restart_description: Optional[str] = None
+    elevation_description: str | None = None
+    restart_description: str | None = None
     can_cancel: bool = True
 
 
@@ -52,14 +51,15 @@ class Tier2StepResponse(BaseModel):
     step_id: str
     completed: bool
     restart_required: bool = False
-    error: Optional[str] = None
-    next_step: Optional[str] = None
+    error: str | None = None
+    error_code: str | None = None
+    next_step: str | None = None
     details: dict = Field(default_factory=dict)
 
 
 class Tier2BindRequest(BaseModel):
     busid: str = Field(..., min_length=1)
-    serial: Optional[str] = None
+    serial: str | None = None
 
 
 class Tier2BindPreviewResponse(BaseModel):
@@ -81,7 +81,7 @@ class Tier2BindExecuteResponse(BaseModel):
     bound: bool = False
     attached: bool = False
     confirmed_in_wsl: bool = False
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class Tier2USBDeviceInfo(BaseModel):

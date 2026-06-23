@@ -9,17 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from backend.config import CACHE_DIR  # noqa: E402
+from datetime import UTC
+
 from backend.database.manager import (  # noqa: E402
     create_all_tables,
     dispose_engine,
@@ -28,10 +29,8 @@ from backend.database.manager import (  # noqa: E402
 )
 from backend.database.models import (  # noqa: E402
     Base,
-    BatchStatus,
     HopStatus,
     MediaItem,
-    TransferBatch,
     TransferSession,
 )
 from backend.engines.batch_manager import create_batches  # noqa: E402
@@ -102,12 +101,12 @@ def test_organizer_basic() -> None:
         dest = Path(tmp) / "archive"
 
         # Item with a known created_at
-        from datetime import datetime, timezone
+        from datetime import datetime
         item = MediaItem(
             source_path="/src/photo.jpg",
             file_name="photo.jpg",
             file_size=1024,
-            created_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            created_at=datetime(2024, 6, 15, tzinfo=UTC),
         )
         p = resolve_archive_path(dest, item)
         p_str = str(p).replace("\\", "/")
@@ -133,17 +132,56 @@ def test_organizer_year_month() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "archive"
-        from datetime import datetime, timezone
+        from datetime import datetime
         item = MediaItem(
             source_path="/src/video.mp4",
             file_name="video.mp4",
             file_size=2048,
-            created_at=datetime(2023, 12, 25, tzinfo=timezone.utc),
+            created_at=datetime(2023, 12, 25, tzinfo=UTC),
         )
         p = resolve_archive_path(dest, item, layout="year/month")
         p_str = str(p).replace("\\", "/")
         _check("Year/Month layout", p_str.endswith("2023/12/video.mp4"), f"got: {p_str}")
         _check("No day component", "/12/video.mp4" in p_str)
+
+
+def test_organizer_derive_timestamp_priority() -> None:
+    """
+    Verify _derive_timestamp prefers date_taken over original_capture_time
+    over created_at.
+    """
+    print("\n=== Organizer: Timestamp Priority ===")
+
+    from datetime import datetime
+
+    from backend.engines.organizer import _derive_timestamp
+
+    dt_taken = datetime(2023, 1, 1, tzinfo=UTC)
+    dt_capture = datetime(2022, 6, 15, tzinfo=UTC)
+    dt_created = datetime(2021, 12, 25, tzinfo=UTC)
+
+    item = MediaItem(
+        source_path="/src/photo.jpg",
+        file_name="photo.jpg",
+        file_size=1024,
+        created_at=dt_created,
+        date_taken=dt_taken,
+        original_capture_time=dt_capture,
+    )
+    result = _derive_timestamp(item)
+    _check("Prioritize date_taken", result == dt_taken, f"got: {result}")
+
+    item.date_taken = None
+    result = _derive_timestamp(item)
+    _check("Fallback to original_capture_time", result == dt_capture, f"got: {result}")
+
+    item.original_capture_time = None
+    result = _derive_timestamp(item)
+    _check("Fallback to created_at", result == dt_created, f"got: {result}")
+
+    item.created_at = None
+    result = _derive_timestamp(item)
+    _check("No timestamps returns None", result is None)
 
 
 # ======================================================================
@@ -160,12 +198,12 @@ def test_organizer_conflict() -> None:
         existing = dest / "photo.jpg"
         existing.write_bytes(b"existing")
 
-        from datetime import datetime, timezone
+        from datetime import datetime
         item = MediaItem(
             source_path="/src/photo.jpg",
             file_name="photo.jpg",
             file_size=1024,
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         p = resolve_archive_path(dest.parent.parent.parent, item)
         _check("Conflict resolved with suffix", p.name == "photo_001.jpg")
@@ -221,19 +259,19 @@ def test_live_photo_folder() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "archive"
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         img_item = MediaItem(
             source_path="/src/photo.HEIC",
             file_name="photo.HEIC",
             file_size=5000,
-            created_at=datetime(2024, 3, 10, tzinfo=timezone.utc),
+            created_at=datetime(2024, 3, 10, tzinfo=UTC),
         )
         vid_item = MediaItem(
             source_path="/src/video.mov",
             file_name="video.mov",
             file_size=50000,
-            created_at=datetime(2024, 3, 10, tzinfo=timezone.utc),
+            created_at=datetime(2024, 3, 10, tzinfo=UTC),
         )
 
         folder = resolve_live_photo_folder(dest, img_item, vid_item)
@@ -247,6 +285,7 @@ def test_live_photo_folder() -> None:
 # ======================================================================
 # 7. Duplicate Detector: no duplicates
 # ======================================================================
+@pytest.mark.asyncio
 async def test_no_duplicates() -> None:
     print("\n=== Duplicate Detector: No Duplicates ===")
 
@@ -279,6 +318,7 @@ async def test_no_duplicates() -> None:
 # ======================================================================
 # 8. Duplicate Detector: exact duplicates (hash + size match)
 # ======================================================================
+@pytest.mark.asyncio
 async def test_exact_duplicates() -> None:
     print("\n=== Duplicate Detector: Exact Duplicates ===")
 
@@ -331,6 +371,7 @@ async def test_exact_duplicates() -> None:
 # ======================================================================
 # 9. Duplicate Detector: potential duplicates (name match, hash mismatch)
 # ======================================================================
+@pytest.mark.asyncio
 async def test_potential_duplicates() -> None:
     print("\n=== Duplicate Detector: Potential Duplicates ===")
 
@@ -383,6 +424,7 @@ async def test_potential_duplicates() -> None:
 # ======================================================================
 # 10. Duplicate Detector: hash collision (same hash, different size)
 # ======================================================================
+@pytest.mark.asyncio
 async def test_hash_collision_different_size() -> None:
     print("\n=== Duplicate Detector: Hash Collision (Different Size) ===")
 
@@ -436,6 +478,7 @@ async def test_hash_collision_different_size() -> None:
 # ======================================================================
 # 11. check_batch: WebSocket event emission
 # ======================================================================
+@pytest.mark.asyncio
 async def test_check_batch_ws_event() -> None:
     print("\n=== check_batch: WebSocket Event ===")
 
@@ -503,6 +546,7 @@ async def test_check_batch_ws_event() -> None:
 # ======================================================================
 # 12. check_batch: no duplicates = no event
 # ======================================================================
+@pytest.mark.asyncio
 async def test_check_batch_no_duplicates() -> None:
     print("\n=== check_batch: No Duplicates = No Event ===")
 
@@ -545,12 +589,12 @@ def test_organizer_flat() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "archive"
-        from datetime import datetime, timezone
+        from datetime import datetime
         item = MediaItem(
             source_path="/src/img.png",
             file_name="img.png",
             file_size=500,
-            created_at=datetime(2024, 7, 4, tzinfo=timezone.utc),
+            created_at=datetime(2024, 7, 4, tzinfo=UTC),
         )
         p = resolve_archive_path(dest, item, layout="flat")
         _check("Flat layout -> dest_root/filename", p.name == "img.png" and p.parent == dest)
@@ -569,7 +613,6 @@ def test_conflict_exhaustion() -> None:
         for i in range(1, 1000):
             (folder / f"file_{i:03d}.txt").write_bytes(str(i).encode())
 
-        from backend.engines.organizer import _MAX_SUFFIX
         result = None
         try:
             result = _safe_path(folder / "file.txt")
@@ -590,6 +633,7 @@ async def main() -> None:
     # Pure logic tests (no DB)
     test_organizer_basic()
     test_organizer_year_month()
+    test_organizer_derive_timestamp_priority()
     test_organizer_conflict()
     test_safe_path()
     test_unique_folder()

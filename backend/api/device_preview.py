@@ -24,6 +24,46 @@ from backend.ios_device import browse_device_directory, read_device_file
 
 logger = logging.getLogger(__name__)
 
+
+async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -> bytes | None:
+    """
+    Read only the first *max_bytes* bytes of a file on the iOS device via AFC.
+
+    This is the key optimisation for iOS thumbnail generation: HEIC/JPEG files
+    embed a small JPEG preview (~20–80 KB) in their EXIF header, which sits in
+    the first ~128 KB of the file.  Reading 256 KB instead of the full 4–8 MB
+    is ~20–30× faster over USB.
+
+    Returns bytes on success, None on failure.
+    """
+    try:
+        import asyncio
+        from backend.ios_device import _get_afc_service
+
+        afc, lockdown = await _get_afc_service(device_id)
+        try:
+            handle = await asyncio.to_thread(afc.fopen, path)
+            try:
+                data = await asyncio.to_thread(afc.fread, handle, max_bytes)
+                return data if data else None
+            finally:
+                try:
+                    await asyncio.to_thread(afc.fclose, handle)
+                except Exception:
+                    pass
+        finally:
+            try:
+                afc.close()
+            except Exception:
+                pass
+            try:
+                lockdown.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("_read_device_file_partial failed for %s: %s", path, exc)
+        return None
+
 router = APIRouter(prefix="/api/device")
 
 # Supported extensions for preview scanning
@@ -128,17 +168,26 @@ def _generate_gray_fallback() -> bytes:
 
 def _generate_photo_thumbnail(path: str, size: int) -> bytes | None:
     """Generate thumbnail for a photo using Pillow."""
+    img = None
     try:
         from PIL import Image, ImageOps
         img = Image.open(path)
-        img = ImageOps.exif_transpose(img)
+        img = ImageOps.exif_transpose(img) or img
         img.thumbnail((size, size), Image.LANCZOS)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
         import io
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         return buf.getvalue()
     except Exception:
         return None
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
 
 
 def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
@@ -170,17 +219,61 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
 
 
 def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None:
-    """Generate thumbnail from raw bytes (for iOS/remote files)."""
+    """Generate thumbnail from raw bytes (for iOS/remote files).
+
+    Tries an embedded-EXIF thumbnail first (fast path for JPEG/HEIC).
+    Falls back to full decode with Pillow.
+    """
+    img = None
     try:
         from PIL import Image, ImageOps
+
+        # Fast path: try to extract embedded thumbnail from partial byte buffer.
+        # Most iOS HEIC/JPEG files embed a ~30-80 KB JPEG preview in their EXIF
+        # header, which is present in the first 128 KB of the file.
+        try:
+            import subprocess as _sp
+            import sys as _sys
+            from backend.engines.metadata_extractor import _bootstrap_exiftool
+            exe = _bootstrap_exiftool()
+            if exe and len(data) >= 4096:  # Only worth trying on real data
+                result = _sp.run(
+                    [exe, "-b", "-ThumbnailImage", "-Charset", "utf8", "-"],
+                    input=data,
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode == 0 and result.stdout and len(result.stdout) > 500:
+                    # Validate and resize the embedded thumbnail
+                    thumb_img = Image.open(_io.BytesIO(result.stdout))
+                    thumb_img = ImageOps.exif_transpose(thumb_img) or thumb_img
+                    thumb_img.thumbnail((size, size), Image.LANCZOS)
+                    if thumb_img.mode not in ("RGB",):
+                        thumb_img = thumb_img.convert("RGB")
+                    buf = _io.BytesIO()
+                    thumb_img.save(buf, format="JPEG", quality=82)
+                    thumb_img.close()
+                    return buf.getvalue()
+        except Exception:
+            pass  # Fall through to full Pillow decode
+
         img = Image.open(_io.BytesIO(data))
-        img = ImageOps.exif_transpose(img)
+        img = ImageOps.exif_transpose(img) or img
         img.thumbnail((size, size), Image.LANCZOS)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
         buf = _io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         return buf.getvalue()
     except Exception:
         return None
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -338,13 +431,16 @@ async def device_thumbnail(
         return Response(
             content=cached,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
 
+    # Offload CPU-bound Pillow decode + JPEG encode to the thread pool so the
+    # event loop stays free for other requests during thumbnail generation.
+    import asyncio
     if ext in PREVIEW_IMAGE_EXTENSIONS:
-        jpeg_bytes = _generate_photo_thumbnail(abs_path, size)
+        jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail, abs_path, size)
     else:
-        jpeg_bytes = _generate_video_thumbnail(abs_path, size)
+        jpeg_bytes = await asyncio.to_thread(_generate_video_thumbnail, abs_path, size)
 
     if jpeg_bytes is None:
         jpeg_bytes = _generate_gray_fallback()
@@ -353,7 +449,7 @@ async def device_thumbnail(
     return Response(
         content=jpeg_bytes,
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
 
 
@@ -442,30 +538,79 @@ async def ios_thumbnail(
     cache_key = (f"ios:{device_id}:{path}", size)
     cached = _get_thumb_cache(cache_key)
     if cached is not None:
-        return Response(content=cached, media_type="image/jpeg")
+        return Response(
+            content=cached,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
 
+    ext = os.path.splitext(path)[1].lower()
     jpeg_bytes: bytes | None = None
-    try:
-        file_bytes: bytes = await read_device_file(device_id, path)
 
-        ext = os.path.splitext(path)[1].lower()
+    try:
         if ext in PREVIEW_IMAGE_EXTENSIONS:
-            jpeg_bytes = _generate_photo_thumbnail_from_bytes(file_bytes, size)
-        else:
-            suffix = ext or ".mp4"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp.write(file_bytes)
-                tmp_path = tmp.name
+            # ----------------------------------------------------------------
+            # FAST PATH: Read only the first 256 KB of the file.
+            # iOS HEIC/JPEG files embed a small JPEG preview (typically 20-80 KB)
+            # in the EXIF header, which sits in the first ~128 KB of the file.
+            # Downloading 256 KB vs a full 5-8 MB file is ~20-30x faster.
+            # If the partial read doesn't contain a usable thumbnail, fall back
+            # to a full read.
+            # ----------------------------------------------------------------
+            PARTIAL_READ_BYTES = 256 * 1024  # 256 KB
+
+            partial_bytes: bytes | None = None
             try:
-                jpeg_bytes = _generate_video_thumbnail(tmp_path, size)
-            finally:
+                partial_bytes = await _read_device_file_partial(
+                    device_id, path, max_bytes=PARTIAL_READ_BYTES
+                )
+            except Exception as exc:
+                logger.debug("iOS partial read failed for %s: %s", path, exc)
+
+            if partial_bytes and len(partial_bytes) >= 4096:
+                jpeg_bytes = _generate_photo_thumbnail_from_bytes(partial_bytes, size)
+
+            # Fall back to full read if partial thumbnail extraction failed
+            if not jpeg_bytes:
+                logger.debug(
+                    "iOS partial-read thumbnail failed for %s (%d bytes) — falling back to full read",
+                    path, len(partial_bytes) if partial_bytes else 0,
+                )
                 try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+                    file_bytes = await read_device_file(device_id, path)
+                    jpeg_bytes = _generate_photo_thumbnail_from_bytes(file_bytes, size)
+                except Exception as exc:
+                    logger.debug("iOS full-read thumbnail error for %s: %s", path, exc)
+
+        else:
+            # Video: must download full file for ffmpeg frame extraction
+            suffix = ext or ".mp4"
+            try:
+                file_bytes = await read_device_file(device_id, path)
+            except Exception as exc:
+                logger.debug("iOS video file read error for %s: %s", path, exc)
+                file_bytes = None
+
+            if file_bytes:
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp.write(file_bytes)
+                    tmp_path = tmp.name
+                try:
+                    jpeg_bytes = _generate_video_thumbnail(tmp_path, size)
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
     except Exception as exc:
         logger.debug("iOS thumbnail error for %s: %s", path, exc)
 
     result = jpeg_bytes if (jpeg_bytes and len(jpeg_bytes) > 10) else _generate_gray_fallback()
     _put_thumb_cache(cache_key, result)
-    return Response(content=result, media_type="image/jpeg")
+    return Response(
+        content=result,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+

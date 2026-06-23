@@ -12,13 +12,15 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.source_types import SourceRef, SourceRefDevice, SourceRefLocal
 from backend.config import (
     ALL_MEDIA_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -27,15 +29,17 @@ from backend.config import (
 from backend.database.manager import session_scope
 from backend.database.models import HopStatus, MediaItem
 from backend.engines.date_resolver import resolve_item_date
-from backend.engines.metadata_extractor import FileMetadata, extract_metadata, _ts_to_datetime
+from backend.engines.metadata_extractor import (
+    FileMetadata,
+    _ts_to_datetime,
+    extract_metadata,
+    extract_metadata_batch,
+)
 from backend.ios_device import (
     IOS_SOURCE_PREFIX,
-    browse_device_directory,
     is_ios_source,
-    is_wpd_device_id,
     parse_ios_source,
 )
-from backend.api.source_types import SourceRef, SourceRefDevice, SourceRefLocal
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +101,7 @@ def _sort_key(meta: FileMetadata) -> datetime:
     Uses the shared resolve_item_date() fallback chain with sanity checks.
     Falls back to the Unix epoch if no sane timestamp is available.
     """
-    EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
     date, _source = resolve_item_date(
         date_taken=meta.date_taken,
         date_modified=meta.date_modified,
@@ -233,15 +237,17 @@ async def _walk_ios_directory(
     serial: str, path: str
 ) -> list:
     """
-    Recursively walk an iOS device directory via AFC.
+    Recursively walk an iOS device directory via unified manager.
 
     Returns a flat list of DeviceFileInfo for all files found.
     """
     from backend.ios_device import DeviceFileInfo
+    from backend.tier2_manager import get_device_manager
 
     all_files: list[DeviceFileInfo] = []
+    manager = get_device_manager()
     try:
-        entries = await browse_device_directory(serial, path)
+        entries = await manager.browse_device(serial, path)
     except Exception as exc:
         logger.warning("Failed to browse %s on device %s: %s", path, serial, exc)
         return all_files
@@ -300,23 +306,34 @@ async def _scan_local_files(
     # 2. Detect Live Photo groups
     lp_groups = _detect_live_photo_groups_from_paths(media_files)
 
-    # 3. Extract metadata for every file
+    # 3. Extract metadata for all files in one ExifTool round-trip (batch mode).
+    #    For a folder with N files this avoids N subprocess spawns; instead a
+    #    single persistent ExifTool process handles everything via stdin/stdout.
     entries: list[tuple[Path, FileMetadata, str | None]] = []
+    try:
+        batch_results = extract_metadata_batch(media_files)
+    except Exception as exc:
+        logger.warning("Batch metadata extraction failed, falling back to per-file: %s", exc)
+        batch_results = {}
+
     for idx, fpath in enumerate(media_files):
-        try:
-            meta = extract_metadata(fpath)
-        except Exception as exc:
-            logger.warning("Failed to extract metadata for %s: %s", fpath, exc)
-            stat = fpath.stat()
-            meta = FileMetadata(
-                file_path=str(fpath.resolve()),
-                file_name=fpath.name,
-                file_size=stat.st_size,
-                extension=fpath.suffix.lower(),
-                date_created=_ts_to_datetime(stat.st_ctime),
-                date_modified=_ts_to_datetime(stat.st_mtime),
-            )
-        lp_id = lp_groups.get(str(fpath.resolve()))
+        resolved = str(fpath.resolve())
+        meta = batch_results.get(resolved)
+        if meta is None:
+            try:
+                meta = extract_metadata(fpath)
+            except Exception as exc2:
+                logger.warning("Failed to extract metadata for %s: %s", fpath, exc2)
+                stat = fpath.stat()
+                meta = FileMetadata(
+                    file_path=resolved,
+                    file_name=fpath.name,
+                    file_size=stat.st_size,
+                    extension=fpath.suffix.lower(),
+                    date_created=_ts_to_datetime(getattr(stat, "st_birthtime", stat.st_ctime)),
+                    date_modified=_ts_to_datetime(stat.st_mtime),
+                )
+        lp_id = lp_groups.get(resolved)
         entries.append((fpath, meta, lp_id))
         if on_progress is not None:
             on_progress(idx + 1, total, str(fpath))
@@ -355,43 +372,76 @@ def _schedule_local_thumbnails(
 ) -> None:
     """Fire-and-forget thumbnail generation for local source files.
 
-    Runs in a daemon thread so it never blocks the transfer pipeline.
-    Stores thumbnails in the in-memory LRU cache (no disk writes).
+    Runs a pool of daemon threads (up to min(8, cpu_count) workers) so Pillow
+    decoding and JPEG re-encoding are distributed across CPU cores.  Thumbnails
+    are stored in the in-memory LRU cache (no disk writes).  DB updates are
+    batched in a single async pass after all workers complete.
     """
     import asyncio
+    import os
     import threading
-    from backend.engines.thumbnailer import generate_thumbnail_bytes
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from backend.engines.thumbnail_cache import thumbnail_cache
+    from backend.engines.thumbnailer import generate_thumbnail_bytes
 
     id_to_path = {
         row_id: fpath
         for row_id, (fpath, _meta, _lp) in zip(item_ids, entries)
     }
 
-    def _generate_all() -> None:
-        import time as _time
-        loop = asyncio.new_event_loop()
-        try:
-            for row_id, fpath in id_to_path.items():
-                try:
-                    data = generate_thumbnail_bytes(fpath)
-                    if data:
-                        thumbnail_cache.put(row_id, data)
-                        _time.sleep(0.05)
-                        loop.run_until_complete(_mark_thumb_ready(row_id))
-                except Exception as exc:
-                    logger.warning("Pre-scan thumbnail failed for item %d: %s", row_id, exc)
-        finally:
-            loop.close()
+    # Use up to 8 workers, capped at the number of logical CPUs.  Pillow image
+    # decode + JPEG re-encode is CPU-bound and benefits linearly from cores.
+    # We leave at least one core free for the uvicorn event loop.
+    worker_count = min(8, max(1, (os.cpu_count() or 2) - 1))
 
-    async def _mark_thumb_ready(item_id: int) -> None:
+    def _generate_one(row_id: int, fpath: Path) -> int | None:
+        """Generate thumbnail for one file. Returns row_id on success."""
+        try:
+            data = generate_thumbnail_bytes(fpath)
+            if data:
+                thumbnail_cache.put(row_id, data)
+                return row_id
+        except Exception as exc:
+            logger.warning("Pre-scan thumbnail failed for item %d: %s", row_id, exc)
+        return None
+
+    async def _mark_thumbs_ready_batch(ready_ids: list[int]) -> None:
+        """Batch DB update — mark all successfully thumbnailed items at once."""
         from backend.database.manager import session_scope
         from backend.database.models import MediaItem
         async with session_scope() as session:
-            db_item = await session.get(MediaItem, item_id)
-            if db_item is not None and db_item.thumbnail_path is None:
-                db_item.thumbnail_path = "memory"
-                db_item.touch()
+            for item_id in ready_ids:
+                db_item = await session.get(MediaItem, item_id)
+                if db_item is not None and db_item.thumbnail_path is None:
+                    db_item.thumbnail_path = "memory"
+                    db_item.touch()
+
+    def _generate_all() -> None:
+        ready_ids: list[int] = []
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="prescan-thumb"
+        ) as pool:
+            futures = {
+                pool.submit(_generate_one, rid, fp): rid
+                for rid, fp in id_to_path.items()
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    ready_ids.append(result)
+
+        if ready_ids:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_mark_thumbs_ready_batch(ready_ids))
+            finally:
+                loop.close()
+
+        logger.debug(
+            "Pre-scan thumbnail batch complete: %d/%d generated (%d workers)",
+            len(ready_ids), len(id_to_path), worker_count,
+        )
 
     t = threading.Thread(target=_generate_all, daemon=True, name="pre-scan-thumbnails")
     t.start()
@@ -465,16 +515,6 @@ async def scan(
     # --- iOS device source ---
     if is_ios_source(source_str):
         serial, afc_path = parse_ios_source(source_str)
-        if is_wpd_device_id(serial):
-            logger.error(
-                "Scan aborted: ios:// source has a WPD device ID (%s) instead of an "
-                "iOS UDID. The device must be selected from the iOS device list, not "
-                "the Windows device browser.", serial[:40]
-            )
-            raise RuntimeError(
-                "Device ID looks like a Windows device path, not an iPhone UDID. "
-                "Please re-select your iPhone from the iOS device panel."
-            )
         return await _scan_ios_device(
             serial,
             afc_path,
@@ -532,16 +572,6 @@ async def scan_from_ref(
             on_progress=on_progress,
         )
     elif isinstance(source_ref, SourceRefDevice):
-        if is_wpd_device_id(source_ref.device_id):
-            logger.error(
-                "Scan aborted: ios:// source has a WPD device ID (%s) instead of an "
-                "iOS UDID. The device must be selected from the iOS device list, not "
-                "the Windows device browser.", source_ref.device_id[:40]
-            )
-            raise RuntimeError(
-                "Device ID looks like a Windows device path, not an iPhone UDID. "
-                "Please re-select your iPhone from the iOS device panel."
-            )
         return await _scan_ios_device(
             source_ref.device_id,
             source_ref.device_path,

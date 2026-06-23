@@ -6,18 +6,19 @@ Run: python -m backend.tests.test_db_core
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 # Ensure the repo root is on sys.path when running directly.
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from sqlalchemy import inspect, text  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 from backend.database.manager import (  # noqa: E402
     create_all_tables,
@@ -40,7 +41,6 @@ from backend.utils.hashing import (  # noqa: E402
     hash_file_async,
     verify_hash,
 )
-
 
 # ======================================================================
 # Helpers
@@ -65,6 +65,7 @@ def _check(name: str, condition: bool, detail: str = "") -> None:
 # ======================================================================
 # 1. Database table creation + WAL mode
 # ======================================================================
+@pytest.mark.asyncio
 async def test_database() -> None:
     print("\n=== Database Tests ===")
 
@@ -265,6 +266,7 @@ def test_hashing_sync() -> None:
         os.unlink(tmp_path)
 
 
+@pytest.mark.asyncio
 async def test_hashing_async() -> None:
     print("\n=== Hashing Tests (async) ===")
 

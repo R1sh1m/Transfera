@@ -96,4 +96,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Restart the app (relaunch + exit)
   restartApp: () => ipcRenderer.invoke('tier2:restart'),
+
+  // Tray progress — updates Windows taskbar progress overlay
+  setTrayProgress: (value: number | null) => ipcRenderer.invoke('tray:set-progress', value),
+
+  // Removable drive detection — fires when a new USB drive is connected
+  onNewRemovableDrive: (callback: (data: { driveLetter: string; volumeName: string | null }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { driveLetter: string; volumeName: string | null }) => callback(data)
+    ipcRenderer.on('device:new-removable-drive', handler)
+    return () => ipcRenderer.removeListener('device:new-removable-drive', handler)
+  },
 })

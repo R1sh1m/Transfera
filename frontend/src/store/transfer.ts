@@ -17,6 +17,7 @@ import type {
   BatchStatus,
   SessionStatus,
   TransferMode,
+  FolderLayout,
 } from '@/types/api'
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,13 @@ export interface TransferSnapshot {
   totalItems: number
   completedItems: number
   failedItems: number
+  totalFiles: number
+  cachedFiles: number
+  importedFiles: number
+  failedFiles: number
+  currentBatch: number
+  totalBatches: number
+  progressPercent: number
   activeBatch: ActiveBatch | null
   batches: BatchInfo[]
   speed: number          // files/sec (rolling average)
@@ -90,6 +98,7 @@ export interface UIState {
   setupTransferMode: TransferMode
   setupMoveConfirmed: boolean
   setupOnlyNewMode: boolean
+  setupFolderLayout: FolderLayout
   wsError: string | null
 }
 
@@ -138,6 +147,7 @@ export interface TransferStore {
   setSetupTransferMode: (mode: TransferMode) => void
   setSetupMoveConfirmed: (confirmed: boolean) => void
   setSetupOnlyNewMode: (onlyNew: boolean) => void
+  setSetupFolderLayout: (layout: FolderLayout) => void
   resetSetup: () => void
   setWsError: (error: string | null) => void
 
@@ -159,6 +169,13 @@ const initialTransfer: TransferSnapshot = {
   totalItems: 0,
   completedItems: 0,
   failedItems: 0,
+  totalFiles: 0,
+  cachedFiles: 0,
+  importedFiles: 0,
+  failedFiles: 0,
+  currentBatch: 0,
+  totalBatches: 0,
+  progressPercent: 0,
   activeBatch: null,
   batches: [],
   speed: 0,
@@ -202,6 +219,7 @@ const initialUI: UIState = {
   setupTransferMode: 'copy',
   setupMoveConfirmed: false,
   setupOnlyNewMode: false,
+  setupFolderLayout: 'year/month',
   wsError: null,
 }
 
@@ -416,15 +434,35 @@ function handleWsEventReducer(
       break
     }
 
-    case 'session_complete': {
-      const td = d as Record<string, unknown>
-      const rawStatus = (td.status as string) ?? 'completed'
+    case 'session_completed':
+    case 'session_completed_with_errors': {
+      const isError = event.event === 'session_completed_with_errors'
+      const imported = (d.imported_files as number) ?? state.transfer.importedFiles
+      const failed = (d.failed_files as number) ?? state.transfer.failedFiles
       patch.transfer = {
         ...state.transfer,
-        status: rawStatus as SessionStatus,
-        completedItems: (td.completed_items as number) ?? state.transfer.completedItems,
-        failedItems: (td.failed_items as number) ?? state.transfer.failedItems,
+        status: isError ? ('completed_with_errors' as SessionStatus) : ('completed' as SessionStatus),
+        importedFiles: imported,
+        failedFiles: failed,
+        completedAt: Date.now(),
         activeBatch: null,
+      }
+      if (isError) {
+        patch.ui = {
+          ...state.ui,
+          notification: {
+            type: 'warning',
+            message: `${imported} transferred, ${failed} failed. See library for details.`,
+          },
+        }
+      } else {
+        patch.ui = {
+          ...state.ui,
+          notification: {
+            type: 'success',
+            message: `${imported} file${imported !== 1 ? 's' : ''} transferred successfully.`,
+          },
+        }
       }
       break
     }
@@ -524,11 +562,21 @@ export const useTransferStore = create<TransferStore>()(
           totalItems: progress.total_items,
           completedItems: progress.completed_items,
           failedItems: progress.failed_items,
+          totalFiles: progress.total_files ?? progress.total_items,
+          cachedFiles: progress.cached_files ?? 0,
+          importedFiles: progress.imported_files ?? 0,
+          failedFiles: progress.failed_files ?? 0,
+          currentBatch: progress.current_batch ?? 0,
+          totalBatches: progress.total_batches ?? 0,
+          progressPercent: progress.progress_percent ?? 0,
           activeBatch,
           startedAt,
           completedAt,
           currentFileName: progress.current_file_name,
           currentItemId: progress.current_item_id,
+          speed: progress.speed_files_per_sec ?? 0,
+          elapsed: (progress.elapsed_seconds ?? 0) * 1000,
+          eta: progress.eta_seconds != null ? progress.eta_seconds * 1000 : null,
         },
       }
     }),
@@ -632,6 +680,9 @@ export const useTransferStore = create<TransferStore>()(
   setSetupOnlyNewMode: (onlyNew) =>
     set((s) => ({ ui: { ...s.ui, setupOnlyNewMode: onlyNew } })),
 
+  setSetupFolderLayout: (layout) =>
+    set((s) => ({ ui: { ...s.ui, setupFolderLayout: layout } })),
+
   resetSetup: () =>
     set((s) => ({
       ui: {
@@ -642,6 +693,7 @@ export const useTransferStore = create<TransferStore>()(
         setupTransferMode: s.ui.defaultTransferMode,
         setupMoveConfirmed: false,
         setupOnlyNewMode: false,
+        setupFolderLayout: 'year/month',
       },
     })),
 
@@ -658,13 +710,13 @@ export const useTransferStore = create<TransferStore>()(
     // Side effect: fire a native notification on session completion if the
     // window is not focused. Only fires once per session (guarded by
     // _notifiedSessions set).
-    if (event.event === 'session_complete') {
+    if (event.event === 'session_completed' || event.event === 'session_completed_with_errors') {
       const d = event.data
       const sessionId = (d.session_id as number) ?? 0
-      const status = (d.status as string) ?? 'completed'
-      const totalItems = (d.total_items as number) ?? 0
-      const completedItems = (d.completed_items as number) ?? 0
-      const failedItems = (d.failed_items as number) ?? 0
+      const isError = event.event === 'session_completed_with_errors'
+      const importedFiles = (d.imported_files as number) ?? 0
+      const failedFiles = (d.failed_files as number) ?? 0
+      const totalFiles = importedFiles + failedFiles
 
       // Skip if already notified for this session
       if (_notifiedSessions.has(sessionId)) return
@@ -678,15 +730,12 @@ export const useTransferStore = create<TransferStore>()(
           let title: string
           let body: string
 
-          if (status === 'failed') {
-            title = 'Transfer failed'
-            body = `Transfer of ${totalItems} files failed. Open the app for details.`
-          } else if (failedItems > 0) {
+          if (isError) {
             title = 'Transfer completed with errors'
-            body = `${completedItems} of ${totalItems} files copied — ${failedItems} failed`
+            body = `${importedFiles} files copied — ${failedFiles} failed`
           } else {
             title = 'Transfer complete'
-            body = `${completedItems} of ${totalItems} files copied successfully`
+            body = `${importedFiles} of ${totalFiles} files copied successfully`
           }
 
           window.electronAPI!.showNotification({ title, body, sessionId })
@@ -707,6 +756,7 @@ export const useTransferStore = create<TransferStore>()(
           setupSessionName: state.ui.setupSessionName,
           setupTransferMode: state.ui.setupTransferMode,
           setupOnlyNewMode: state.ui.setupOnlyNewMode,
+          setupFolderLayout: state.ui.setupFolderLayout,
         },
       }),
       // Zustand's default merge does a shallow top-level spread, which means

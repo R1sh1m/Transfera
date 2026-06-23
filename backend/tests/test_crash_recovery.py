@@ -8,18 +8,20 @@ Run: python -m backend.tests.test_crash_recovery
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from sqlalchemy import select  # noqa: E402
+
 from backend.config import PARTIAL_SUFFIX  # noqa: E402
 from backend.database.manager import (  # noqa: E402
     create_all_tables,
@@ -41,7 +43,7 @@ from backend.engines.cache_manager import (  # noqa: E402
     _partial_path,
     cache_batch,
 )
-from backend.engines.importer import import_batch  # noqa: E402
+from backend.engines.importer import compute_archive_path, import_batch  # noqa: E402
 from backend.engines.recovery import recover_interrupted_batches  # noqa: E402
 
 # ======================================================================
@@ -89,10 +91,11 @@ async def _reset_db() -> None:
 # ======================================================================
 # 1. Hop 1 crash recovery: 1000 HEIC photos mid-batch
 # ======================================================================
+@pytest.mark.asyncio
 async def test_hop1_heic_crash_recovery() -> None:
     print("\n=== Hop 1 Crash Recovery: 1000 HEIC Photos ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
@@ -195,12 +198,13 @@ async def test_hop1_heic_crash_recovery() -> None:
 # ======================================================================
 # 2. Hop 2 crash recovery: ARCHIVED batch verification
 # ======================================================================
+@pytest.mark.asyncio
 async def test_hop2_archive_crash_recovery() -> None:
     print("\n=== Hop 2 Crash Recovery: ARCHIVED Batch ===")
 
     await _reset_db()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
@@ -240,18 +244,21 @@ async def test_hop2_archive_crash_recovery() -> None:
             batch.status = BatchStatus.ARCHIVED.value
             batch.touch()
 
-        # Place files at destination: 30 correct, 20 wrong
+        # Place files at destination using the same organized layout that
+        # compute_archive_path produces (recovery engine uses this to verify)
         dest_dir.mkdir(parents=True, exist_ok=True)
         for item in items[:30]:
             cache_p = _cache_path_for(cache_dir, Path(item.source_path))
-            dest_p = dest_dir / Path(item.source_path).name
+            dest_p = compute_archive_path(dest_dir, item)
+            dest_p.parent.mkdir(parents=True, exist_ok=True)
             if cache_p.is_file():
                 shutil.copy2(cache_p, dest_p)
             else:
                 dest_p.write_bytes(b"correct-content")
 
         for item in items[30:]:
-            dest_p = dest_dir / Path(item.source_path).name
+            dest_p = compute_archive_path(dest_dir, item)
+            dest_p.parent.mkdir(parents=True, exist_ok=True)
             dest_p.write_bytes(b"wrong-content-" + str(item.id).encode())
 
         # Verify .partial files should NOT exist at destination
@@ -288,7 +295,7 @@ async def test_hop2_archive_crash_recovery() -> None:
         # Verify wrong destination files removed
         wrong_files_exist = 0
         for item in items[30:]:
-            dest_p = dest_dir / Path(item.source_path).name
+            dest_p = compute_archive_path(dest_dir, item)
             if dest_p.exists():
                 wrong_files_exist += 1
         _check(f"All 20 wrong destination files removed ({wrong_files_exist} remain)", wrong_files_exist == 0)
@@ -296,7 +303,7 @@ async def test_hop2_archive_crash_recovery() -> None:
         # Verify correct destination files still exist
         correct_files_exist = 0
         for item in items[:30]:
-            dest_p = dest_dir / Path(item.source_path).name
+            dest_p = compute_archive_path(dest_dir, item)
             if dest_p.exists():
                 correct_files_exist += 1
         _check(f"All 30 correct destination files preserved ({correct_files_exist} exist)", correct_files_exist == 30)
@@ -314,12 +321,13 @@ async def test_hop2_archive_crash_recovery() -> None:
 # ======================================================================
 # 3. Live Photo HEIC+MOV bundle archive resolution
 # ======================================================================
+@pytest.mark.asyncio
 async def test_live_photo_bundle_archive() -> None:
     print("\n=== Live Photo HEIC+MOV Bundle Archive ===")
 
     await _reset_db()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
@@ -466,12 +474,13 @@ async def test_live_photo_bundle_archive() -> None:
 # ======================================================================
 # 4. Mixed bundle: HEIC+MOV with concurrent crash
 # ======================================================================
+@pytest.mark.asyncio
 async def test_mixed_bundle_crash() -> None:
     print("\n=== Mixed Bundle: HEIC+MOV with Crash Recovery ===")
 
     await _reset_db()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"

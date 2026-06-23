@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
@@ -113,6 +113,38 @@ async def create_all_tables() -> None:
         # SQLite migrations: add columns if they don't exist yet.
         migrations = [
             (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='total_files'",
+                "ALTER TABLE transfer_sessions ADD COLUMN total_files INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='cached_files'",
+                "ALTER TABLE transfer_sessions ADD COLUMN cached_files INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='imported_files'",
+                "ALTER TABLE transfer_sessions ADD COLUMN imported_files INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='failed_files'",
+                "ALTER TABLE transfer_sessions ADD COLUMN failed_files INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='current_batch'",
+                "ALTER TABLE transfer_sessions ADD COLUMN current_batch INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='total_batches'",
+                "ALTER TABLE transfer_sessions ADD COLUMN total_batches INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('media_items') WHERE name='original_capture_time'",
+                "ALTER TABLE media_items ADD COLUMN original_capture_time DATETIME DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('media_items') WHERE name='thumbnail_status'",
+                "ALTER TABLE media_items ADD COLUMN thumbnail_status VARCHAR(16) NOT NULL DEFAULT 'pending'",
+            ),
+            (
                 "SELECT name FROM pragma_table_info('media_items') WHERE name='thumbnail_path'",
                 "ALTER TABLE media_items ADD COLUMN thumbnail_path VARCHAR(4096) DEFAULT NULL",
             ),
@@ -136,6 +168,26 @@ async def create_all_tables() -> None:
                 "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='duplicate_resolutions_json'",
                 "ALTER TABLE transfer_sessions ADD COLUMN duplicate_resolutions_json TEXT DEFAULT NULL",
             ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='paused_at'",
+                "ALTER TABLE transfer_sessions ADD COLUMN paused_at DATETIME DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='total_paused_ms'",
+                "ALTER TABLE transfer_sessions ADD COLUMN total_paused_ms INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='speed_samples'",
+                "ALTER TABLE transfer_sessions ADD COLUMN speed_samples TEXT DEFAULT NULL",
+            ),
+            (
+                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='folder_layout'",
+                "ALTER TABLE transfer_sessions ADD COLUMN folder_layout VARCHAR(32) NOT NULL DEFAULT 'year/month'",
+            ),
+            (
+                "SELECT name FROM pragma_index_list('media_items') WHERE name='ix_media_items_filename_size'",
+                "CREATE INDEX IF NOT EXISTS ix_media_items_filename_size ON media_items (file_name, file_size)",
+            ),
         ]
         for check_sql, alter_sql in migrations:
             result = await conn.execute(text(check_sql))
@@ -144,6 +196,39 @@ async def create_all_tables() -> None:
                 logger.info("Migration applied: %s", alter_sql[:60])
 
     logger.info("All tables created.")
+
+
+# ---------------------------------------------------------------------------
+# Atomic session counter increments
+# ---------------------------------------------------------------------------
+
+async def increment_session_counter(
+    session_id: int,
+    column: str,
+    amount: int = 1,
+) -> None:
+    """Atomically increment a TransferSession counter column."""
+    from backend.database.models import TransferSession
+    async with session_scope() as db_session:
+        ts = await db_session.get(TransferSession, session_id)
+        if ts is not None:
+            current = getattr(ts, column, 0)
+            setattr(ts, column, current + amount)
+            ts.touch()
+
+
+async def set_session_field(
+    session_id: int,
+    column: str,
+    value: object,
+) -> None:
+    """Set a TransferSession field to a specific value."""
+    from backend.database.models import TransferSession
+    async with session_scope() as db_session:
+        ts = await db_session.get(TransferSession, session_id)
+        if ts is not None:
+            setattr(ts, column, value)
+            ts.touch()
 
 
 async def dispose_engine() -> None:

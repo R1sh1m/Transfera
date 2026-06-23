@@ -23,9 +23,11 @@ import type {
   InstallerStatusResponse,
   IOSBrowseResponse,
   IOSDeviceListResponse,
+  IOSDeviceRecoverResponse,
   PackageVerificationResponse,
   PathValidateResponse,
   PreflightValidateResponse,
+  Pymobiledevice3InstallResponse,
   ScanRequest,
   ScanResponse,
   SessionCreate,
@@ -38,6 +40,8 @@ import type {
   DuplicateCheckRequest,
   DuplicateReport,
   DuplicateResolution,
+  PrescanCandidate,
+  PrescanResponse,
   SourceRef,
   Tier2Status,
   Tier2SetupPreview,
@@ -47,6 +51,7 @@ import type {
   Tier2USBDeviceList,
   Tier2ElevatedCommand,
   Tier2ResetResponse,
+  DevicePreviewResponse,
 } from '@/types/api'
 
 // ---------------------------------------------------------------------------
@@ -61,6 +66,24 @@ export function useConfig() {
     },
     staleTime: Infinity,
     retry: 3,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Device Preview
+// ---------------------------------------------------------------------------
+export function useDevicePreview(path: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ['device-preview', path],
+    queryFn: async () => {
+      const { data } = await apiClient.get<DevicePreviewResponse>('/device/preview', {
+        params: { path, recursive: false, page: 1, page_size: 200 },
+      })
+      return data
+    },
+    enabled: enabled && path !== null,
+    staleTime: 30000,
+    retry: 1,
   })
 }
 
@@ -228,6 +251,15 @@ export function useResolveDuplicates() {
     },
     onError: (error) => {
       useTransferStore.getState().showNotification('error', extractErrorMessage(error))
+    },
+  })
+}
+
+export function usePrescanDuplicates() {
+  return useMutation({
+    mutationFn: async (candidates: PrescanCandidate[]) => {
+      const { data } = await apiClient.post<PrescanResponse>('/duplicates/prescan', { candidates })
+      return data
     },
   })
 }
@@ -635,8 +667,52 @@ export function useInstallDriver() {
     },
     onSuccess: () => {
       // Invalidate iOS device queries so they re-check driver status
+      qc.invalidateQueries({ queryKey: ['device-backend-status'] })
       qc.invalidateQueries({ queryKey: ['ios-devices'] })
       qc.invalidateQueries({ queryKey: ['installer-status'] })
+    },
+    onError: (error) => {
+      useTransferStore.getState().showNotification('error', extractErrorMessage(error))
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// pymobiledevice3 Installer (pip-based, open-source AFC)
+// ---------------------------------------------------------------------------
+export function useInstallPymobiledevice3() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post<Pymobiledevice3InstallResponse>('/pymobiledevice3/install')
+      return data
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['device-backend-status'] })
+      qc.invalidateQueries({ queryKey: ['ios-devices'] })
+    },
+    onError: (error) => {
+      useTransferStore.getState().showNotification('error', extractErrorMessage(error))
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// iOS Device Auto-Recovery
+// ---------------------------------------------------------------------------
+export function useRecoverIOSDevice() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post<IOSDeviceRecoverResponse>('/ios-devices/recover')
+      return data
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['device-backend-status'] })
+      qc.invalidateQueries({ queryKey: ['ios-devices'] })
+      if (data.overall === 'service_restored' || data.overall === 'usb_passthrough_restored') {
+        useTransferStore.getState().showNotification('success', 'iOS device connectivity restored')
+      }
     },
     onError: (error) => {
       useTransferStore.getState().showNotification('error', extractErrorMessage(error))

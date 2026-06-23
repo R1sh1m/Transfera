@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 # Ensure backend package is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -70,6 +72,18 @@ def _make_manager(backend: _StubBackend) -> DeviceBackendManager:
     manager._device_tier_map = {}
     manager._prefer_tier2 = False
     manager._wsl_orchestrator = None
+
+    # iOS isolation tracking set (must be initialised for _is_ios_device)
+    manager._ios_serials = set()
+
+    # Auto-activation state fields (set during initialize())
+    manager._apple_driver_installable = False
+    manager._apple_driver_package_name = None
+    manager._apple_driver_package_version = None
+    manager._bridge_auto_started = False
+    manager._wsl_setup_suggested = False
+    manager._tier2_error = None
+
     manager._tier1 = MagicMock()
     manager._tier1.is_configured = False
     manager._tier1.tier = DeviceAccessTier.TIER_1
@@ -80,6 +94,7 @@ def _make_manager(backend: _StubBackend) -> DeviceBackendManager:
     return manager
 
 
+@pytest.mark.asyncio
 async def test_browse_device_forwards_serial_and_path():
     """browse_device must pass (serial, path) to backend.browse()."""
     stub = _StubBackend()
@@ -96,6 +111,7 @@ async def test_browse_device_forwards_serial_and_path():
     assert result[0].name == "test.txt"
 
 
+@pytest.mark.asyncio
 async def test_file_info_device_forwards_serial_and_path():
     """get_device_file_info must pass (serial, path) to backend.file_info()."""
     stub = _StubBackend()
@@ -111,6 +127,7 @@ async def test_file_info_device_forwards_serial_and_path():
     assert result.name == "test.txt"
 
 
+@pytest.mark.asyncio
 async def test_read_device_file_forwards_serial_and_path():
     """read_device_file must pass (serial, path) to backend.read_file()."""
     stub = _StubBackend()
@@ -126,6 +143,7 @@ async def test_read_device_file_forwards_serial_and_path():
     assert result == b"file contents"
 
 
+@pytest.mark.asyncio
 async def test_browse_device_with_special_characters_in_serial():
     """Device IDs with URL-hostile characters must be forwarded verbatim."""
     stub = _StubBackend()

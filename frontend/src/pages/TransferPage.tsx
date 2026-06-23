@@ -26,8 +26,12 @@ import {
 import { useSession, useStartSession, usePauseSession, useCancelSession, useSessionProgress, useSessionBatches, useMediaList } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { useTransferWs } from '@/hooks/use-transfer-ws'
-import { cn } from '@/lib/utils'
+import { cn, isElectron } from '@/lib/utils'
 import type { SessionProgress, RecentItemProgress } from '@/types/api'
+
+// Keep track of session IDs that have already been started to prevent double-triggering
+// on component mount/remount in React Strict Mode.
+const startedSessions = new Set<number>()
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,12 +49,23 @@ function fileIcon(name: string) {
   return <FileText className="w-5 h-5 text-muted-foreground" />
 }
 
-function formatEta(ms: number | null) {
-  if (ms === null || ms <= 0) return '--:--'
+function formatEta(ms: number | null | 'done') {
+  if (ms === 'done') return '--'
+  if (ms === null) return 'Calculating...'
+  if (ms <= 0) return 'Calculating...'
   const sec = Math.floor(ms / 1000)
   const min = Math.floor(sec / 60)
   const s = sec % 60
-  return `${min}:${String(s).padStart(2, '0')}`
+  return `${min}m ${s}s remaining`
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return ''
+  if (bytes === 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 function formatElapsed(ms: number) {
@@ -127,8 +142,8 @@ function PreviewThumbnail({ itemId, name, thumbnailUrl: _ }: { itemId: number | 
 // ---------------------------------------------------------------------------
 function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
   const status = useTransferStore((s) => s.transfer.status)
-  const completedItems = progress?.completed_items ?? 0
-  const totalItems = progress?.total_items ?? 0
+  const completedItems = progress?.imported_files ?? progress?.completed_items ?? 0
+  const totalItems = progress?.total_files ?? progress?.total_items ?? 0
   const isRunning = status === 'running'
 
   // Accumulate items so they stay visible once they appear.
@@ -220,14 +235,71 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
 }
 
 // ---------------------------------------------------------------------------
+// TransferCompleteSummary — Post-transfer confirmation
+// ---------------------------------------------------------------------------
+interface TransferCompleteSummaryProps {
+  completedItems: number
+  failedItems: number
+  totalBytesVolume: number | null | undefined
+  transferMode: 'copy' | 'move'
+  destRoot: string
+}
+
+function TransferCompleteSummary({
+  completedItems,
+  failedItems,
+  totalBytesVolume,
+  transferMode,
+  destRoot,
+}: TransferCompleteSummaryProps) {
+  const hasSuccess = completedItems > 0
+  const sizeText = totalBytesVolume != null ? ` (${formatBytes(totalBytesVolume)})` : ''
+
+  return (
+    <div className="p-3 bg-muted/50 rounded-md space-y-2">
+      {hasSuccess ? (
+        <div className="flex items-start gap-2.5">
+          <CheckCircle2 className="w-5 h-5 text-green-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-foreground">
+              {completedItems} file{completedItems !== 1 ? 's' : ''}{sizeText} safely backed up and verified
+            </p>
+            {failedItems > 0 && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                {failedItems} file{failedItems !== 1 ? 's' : ''} could not be verified — see details below
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+              {transferMode === 'copy'
+                ? `These files have been copied and verified at ${destRoot}. It is now safe to delete them from your device if you'd like to free up space.`
+                : 'These files have been moved and verified — they were already removed from your device automatically.'}
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-start gap-2.5">
+          <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-foreground">No files were successfully transferred</p>
+            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+              {failedItems} file{failedItems !== 1 ? 's' : ''} could not be verified — see details below
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // TransferMonitor — Performance stats and progress (polling-based)
 // ---------------------------------------------------------------------------
 function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   const transfer = useTransferStore((s) => s.transfer)
   const wsConnected = useTransferStore((s) => s.wsConnected)
   const { sessionId } = transfer
+  const { data: session } = useSession(sessionId)
   const { data: batches } = useSessionBatches(sessionId)
-  const [, setTick] = useState(0)
 
   // Fetch failed items
   const { data: failedItemsData } = useMediaList({
@@ -236,29 +308,26 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
     pageSize: 100,
   })
 
-  // Re-render every second while transfer is active to update elapsed/speed/ETA
-  useEffect(() => {
-    if (transfer.status !== 'running' && transfer.status !== 'paused') return
-    const id = setInterval(() => setTick((t) => t + 1), 1000)
-    return () => clearInterval(id)
-  }, [transfer.status])
-
   const activeBatch = transfer.activeBatch
-  const overallPct = transfer.totalItems > 0
-    ? Math.round((transfer.completedItems / transfer.totalItems) * 100)
-    : 0
+  const totalFiles = transfer.totalFiles || transfer.totalItems || 1
+  const isCancelled = transfer.status === 'cancelled'
+  const isCompleted = transfer.status === 'completed'
+  const isCompletedWithErrors = transfer.status === 'completed_with_errors'
+  const isFailed = transfer.status === 'failed'
+  const isPaused = transfer.status === 'paused'
+  const isTerminal = [isCompleted, isCompletedWithErrors, isFailed, isCancelled].some(Boolean)
 
-  // Compute elapsed and speed — use fixed completion time for terminal states
-  const isTerminal = ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(transfer.status)
-  const now = Date.now()
-  const elapsedMs = transfer.startedAt
-    ? isTerminal && transfer.completedAt
-      ? transfer.completedAt - transfer.startedAt
-      : now - transfer.startedAt
-    : 0
-  const speed = elapsedMs > 0 ? transfer.completedItems / (elapsedMs / 1000) : 0
-  const remaining = transfer.totalItems - transfer.completedItems
-  const etaMs = isTerminal ? null : (speed > 0 ? (remaining / speed) * 1000 : null)
+  // Use server-provided progress_percent for the main bar
+  // On completion: animate to 100%. On cancel/failure: freeze at last value.
+  let displayPct = transfer.progressPercent
+  if (isCompleted || isCompletedWithErrors) {
+    displayPct = 100
+  }
+
+  // Use server-computed timing values (updated each poll)
+  const elapsedMs = transfer.elapsed
+  const speed = transfer.speed
+  const etaMs = isTerminal ? 'done' : transfer.eta
 
   // Determine phase text
   let phaseText = ''
@@ -270,11 +339,22 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   }
   else if (transfer.status === 'running') phaseText = 'Processing...'
   else if (transfer.status === 'paused') phaseText = 'Paused'
-  else if (transfer.status === 'completed') phaseText = 'Transfer complete'
-  else if (transfer.status === 'completed_with_errors') phaseText = 'Transfer completed with errors'
-  else if (transfer.status === 'failed') phaseText = 'Transfer failed'
-  else if (transfer.status === 'cancelled') phaseText = 'Transfer cancelled'
+  else if (isCompleted) phaseText = 'Transfer complete'
+  else if (isCompletedWithErrors) phaseText = 'Transfer completed with errors'
+  else if (isFailed) phaseText = 'Transfer failed'
+  else if (isCancelled) phaseText = 'Transfer cancelled'
   else phaseText = transfer.status
+
+  // Sync progress to Windows taskbar overlay via tray IPC
+  useEffect(() => {
+    if (!isElectron) return
+    if (isTerminal) {
+      window.electronAPI?.setTrayProgress?.(null)
+    } else if (transfer.status === 'running' || transfer.status === 'paused') {
+      const fraction = Math.max(0, Math.min(1, (transfer.progressPercent ?? 0) / 100))
+      window.electronAPI?.setTrayProgress?.(fraction)
+    }
+  }, [transfer.progressPercent, transfer.status, isTerminal])
 
   return (
     <div className="w-80 bg-card border border-border rounded-lg flex flex-col">
@@ -289,41 +369,60 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
       </div>
 
       <div className="flex-1 p-4 space-y-4 overflow-y-auto">
-        {/* Overall Progress */}
+        {/* Overall Progress — cumulative, never resets between batches */}
         <div>
           <div className="flex justify-between text-xs text-muted-foreground mb-1">
             <span>Overall Progress</span>
-            <span className="font-medium text-foreground">{overallPct}%</span>
+            <span className="font-medium text-foreground">{displayPct}%</span>
           </div>
           <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
             <motion.div
               className={cn(
                 'h-full rounded-full transition-colors',
-                transfer.status === 'completed' ? 'bg-green-500' :
-                transfer.status === 'completed_with_errors' ? 'bg-amber-500' :
-                transfer.status === 'failed' ? 'bg-red-500' :
+                isCompleted ? 'bg-green-500' :
+                isCompletedWithErrors ? 'bg-amber-500' :
+                isFailed ? 'bg-red-500' :
                 'bg-primary',
               )}
               initial={{ width: 0 }}
-              animate={{ width: `${overallPct}%` }}
-              transition={{ duration: 0.3 }}
+              animate={{ width: `${displayPct}%` }}
+              transition={{ duration: isTerminal ? 0.8 : 0.3 }}
             />
           </div>
           <div className="flex justify-between text-[11px] text-muted-foreground mt-1">
-            <span>{transfer.completedItems} / {transfer.totalItems}</span>
-            <span>{transfer.failedItems} failed</span>
+            <span>
+              Cached {transfer.cachedFiles} / {totalFiles}
+              {' · '}
+              Transferred {transfer.importedFiles} / {totalFiles}
+            </span>
+            <span>{transfer.failedFiles} failed</span>
           </div>
-        </div>
-
-        {/* Phase / Status */}
-        <div className="p-3 bg-muted/50 rounded-md">
-          <p className="text-xs font-medium text-foreground">{phaseText}</p>
-          {transfer.currentFileName && (
-            <p className="text-[11px] text-muted-foreground mt-1 truncate">
-              {transfer.currentFileName}
-            </p>
+          {transfer.totalBatches > 0 && (
+            <div className="text-[10px] text-muted-foreground mt-0.5">
+              Batch {transfer.currentBatch} of {transfer.totalBatches}
+            </div>
           )}
         </div>
+
+        {/* Phase / Status — summary on completion, phase text otherwise */}
+        {isCompleted || isCompletedWithErrors ? (
+          <TransferCompleteSummary
+            completedItems={transfer.importedFiles}
+            failedItems={transfer.failedFiles}
+            totalBytesVolume={session?.total_bytes_volume}
+            transferMode={transfer.transferMode as 'copy' | 'move'}
+            destRoot={transfer.destRoot}
+          />
+        ) : (
+          <div className="p-3 bg-muted/50 rounded-md">
+            <p className="text-xs font-medium text-foreground">{phaseText}</p>
+            {transfer.currentFileName && (
+              <p className="text-[11px] text-muted-foreground mt-1 truncate">
+                {transfer.currentFileName}
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Hop Progress */}
         {activeBatch && (
@@ -361,7 +460,11 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Speed</p>
             <p className="text-sm font-semibold text-foreground mt-0.5">
-              {speed > 0 ? `${speed.toFixed(1)} f/s` : '--'}
+              {speed > 0
+                ? speed >= 1.0
+                  ? `${speed.toFixed(1)} files/sec`
+                  : `${(speed * 60).toFixed(0)} files/min`
+                : '--'}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
@@ -372,8 +475,11 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Elapsed</p>
-            <p className="text-sm font-semibold text-foreground mt-0.5">
+            <p className="text-sm font-semibold text-foreground mt-0.5 flex items-center gap-1.5">
               {formatElapsed(elapsedMs)}
+              {isPaused && (
+                <span className="text-[10px] font-bold text-amber-500 uppercase">Paused</span>
+              )}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
@@ -458,15 +564,23 @@ export default function TransferPage() {
   const initialisedRef = useRef(false)
   const autoStartedRef = useRef(false)
   const navigateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hasNavigatedRef = useRef(false)
 
   // Connect to WS for real-time events (bonus, not required)
   useTransferWs(transfer.sessionId)
 
-  // Cleanup timers on unmount
+  // Cleanup timers and state on unmount
   useEffect(() => {
     return () => {
       if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current)
       if (navigateTimerRef.current) clearTimeout(navigateTimerRef.current)
+
+      // If the session is finished, reset transfer state so it doesn't persist
+      const state = useTransferStore.getState().transfer
+      const isFinished = ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(state.status)
+      if (isFinished) {
+        useTransferStore.getState().resetTransfer()
+      }
     }
   }, [])
 
@@ -481,43 +595,82 @@ export default function TransferPage() {
   // Auto-start: when a fresh session (status 'created') is loaded, immediately
   // call the start endpoint so the user doesn't need to click "Start" manually.
   useEffect(() => {
-    if (session && initialisedRef.current && session.status === 'created' && !autoStartedRef.current) {
+    if (session && initialisedRef.current && session.status === 'created' && transfer.sessionId && !startedSessions.has(transfer.sessionId)) {
+      startedSessions.add(transfer.sessionId)
       autoStartedRef.current = true
-      if (transfer.sessionId) {
-        startSession.mutate(transfer.sessionId)
-      }
+      startSession.mutate(transfer.sessionId)
     }
   }, [session, transfer.sessionId, startSession])
 
-  // Auto-navigate to Library when a transfer reaches a terminal status.
-  // completed/completed_with_errors → navigate after 2s delay with success toast.
-  // failed → show error toast but stay on page so user can inspect.
+  // Navigate to Library when a transfer reaches a terminal status.
+  // Uses hasNavigatedRef to prevent double-navigation on re-renders.
   useEffect(() => {
+    if (hasNavigatedRef.current) return
+
     if (transfer.status === 'completed' || transfer.status === 'completed_with_errors') {
-      const message = 'Transfer complete — opening Library...'
-      useTransferStore.getState().showNotification('success', message)
-      navigateTimerRef.current = setTimeout(() => {
-        setCurrentPage('library')
-      }, 2000)
-      return () => {
-        if (navigateTimerRef.current) {
-          clearTimeout(navigateTimerRef.current)
-          navigateTimerRef.current = null
+      hasNavigatedRef.current = true
+      const isError = transfer.status === 'completed_with_errors'
+      const delay = isError ? 4000 : 2000
+      const imported = transfer.importedFiles
+      const failed = transfer.failedFiles
+
+      // If no notification was already set by WS, set one now (polling fallback)
+      if (!useTransferStore.getState().ui.notification) {
+        if (isError) {
+          useTransferStore.getState().showNotification(
+            'warning',
+            `${imported} transferred, ${failed} failed. See library for details.`,
+          )
+        } else {
+          useTransferStore.getState().showNotification(
+            'success',
+            `${imported} file${imported !== 1 ? 's' : ''} transferred successfully.`,
+          )
         }
       }
+
+      navigateTimerRef.current = setTimeout(() => {
+        resetTransfer()
+        setCurrentPage('library')
+      }, delay)
     }
+  }, [transfer.status, transfer.importedFiles, transfer.failedFiles, setCurrentPage, resetTransfer])
+
+  // Show error notification for failed transfers (no navigation — user inspects).
+  useEffect(() => {
     if (transfer.status === 'failed') {
       useTransferStore.getState().showNotification('error', 'Transfer failed. Check the error log.')
     }
-  }, [transfer.status, setCurrentPage])
+  }, [transfer.status])
 
   // Sync polling data into store (authoritative source for all live fields).
-  // This runs at ~750ms and replaces WS events as the primary data source.
+  // Also serves as polling fallback: if WS message was missed, detect completion here.
   useEffect(() => {
-    if (progress) {
-      updateFromPolling(progress)
+    if (!progress) return
+    updateFromPolling(progress)
+    if (
+      (progress.status === 'completed' || progress.status === 'completed_with_errors') &&
+      !hasNavigatedRef.current
+    ) {
+      hasNavigatedRef.current = true
+      const isError = progress.status === 'completed_with_errors'
+      const delay = isError ? 4000 : 2000
+      const imported = progress.imported_files
+      const failed = progress.failed_files
+
+      useTransferStore.getState().showNotification(
+        isError ? 'warning' : 'success',
+        isError
+          ? `${imported} transferred, ${failed} failed. See library for details.`
+          : `${imported} file${imported !== 1 ? 's' : ''} transferred successfully.`,
+      )
+
+      navigateTimerRef.current = setTimeout(() => {
+        resetTransfer()
+        setCurrentPage('library')
+      }, delay)
     }
-  }, [progress, updateFromPolling])
+  }, [progress, updateFromPolling, setCurrentPage, resetTransfer])
 
   // Esc key to go back (safe guard for mid-transfer)
   useEffect(() => {
@@ -543,7 +696,10 @@ export default function TransferPage() {
     if (transfer.sessionId) {
       // If auto-start already initiated for a fresh (created) session, don't
       // double-start. Paused sessions (Resume) are unaffected by this guard.
-      if (transfer.status === 'created' && autoStartedRef.current) return
+      if (transfer.status === 'created' && (autoStartedRef.current || startedSessions.has(transfer.sessionId))) return
+      if (transfer.status === 'created') {
+        startedSessions.add(transfer.sessionId)
+      }
       startSession.mutate(transfer.sessionId)
     }
   }

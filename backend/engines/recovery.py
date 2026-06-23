@@ -11,7 +11,7 @@ import hashlib
 import logging
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from backend.config import BATCH_SIZE, CACHE_DIR, PARTIAL_SUFFIX
 from backend.database.manager import session_scope
@@ -22,8 +22,8 @@ from backend.database.models import (
     TransferBatch,
     TransferSession,
 )
-from backend.engines.cache_manager import _cache_path_for, _partial_path
-from backend.engines.importer import compute_archive_path, _cleanup_cache_file
+from backend.engines.cache_manager import _partial_path, get_cache_path
+from backend.engines.importer import _cleanup_cache_file, compute_archive_path
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +158,15 @@ async def _recover_loading_batch(
 
         for item in items:
             # Delete .partial cache file
-            src = Path(item.source_path).resolve()
-            partial = _partial_path(_cache_path_for(cache_dir, src))
+            from backend.ios_device import is_ios_source
+            if is_ios_source(item.source_path):
+                from backend.ios_device import parse_ios_source
+                serial, afc_path = parse_ios_source(item.source_path)
+                src_filename = afc_path.rsplit("/", 1)[-1] if "/" in afc_path else afc_path
+                dst = get_cache_path(cache_dir, item.source_path, src_filename)
+            else:
+                dst = get_cache_path(cache_dir, item.source_path, item.file_name)
+            partial = _partial_path(dst)
             partial.unlink(missing_ok=True)
 
             # Reset hop1_status if not completed
@@ -209,9 +216,11 @@ async def _recover_archived_batch(
         )
         items = list(result.scalars().all())
 
+        folder_layout = ts.folder_layout if ts else "year/month"
+
         for item in items:
             # Check destination (use compute_archive_path to match importer layout)
-            dst = compute_archive_path(dest_root, item)
+            dst = compute_archive_path(dest_root, item, layout=folder_layout)
             partial = dst.with_suffix(dst.suffix + PARTIAL_SUFFIX)
 
             # Clean up any .partial files

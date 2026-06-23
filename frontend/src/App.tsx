@@ -171,6 +171,7 @@ function TitleBar() {
           </button>
           <button
             onClick={() => window.electronAPI?.closeWindow()}
+            title="Close to System Tray"
             className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 1L9 9M9 1L1 9"/></svg>
@@ -187,13 +188,6 @@ function TitleBar() {
 function PageRouter() {
   const currentPage = useTransferStore((s) => s.ui.currentPage)
 
-  const pageMap: Record<UIState['currentPage'], React.ReactNode> = {
-    dashboard: <PageErrorBoundary pageName="Dashboard"><DashboardPage /></PageErrorBoundary>,
-    setup: <PageErrorBoundary pageName="Setup"><DeviceSetupPage /></PageErrorBoundary>,
-    transfer: <PageErrorBoundary pageName="Transfer"><TransferPage /></PageErrorBoundary>,
-    library: <PageErrorBoundary pageName="Library"><LibraryPage /></PageErrorBoundary>,
-  }
-
   return (
     <AnimatePresence mode="wait">
       <motion.div
@@ -204,7 +198,26 @@ function PageRouter() {
         transition={{ duration: 0.15 }}
         className="flex-1 overflow-y-auto px-6 py-5"
       >
-        {pageMap[currentPage] ?? <PageErrorBoundary pageName="Dashboard"><DashboardPage /></PageErrorBoundary>}
+        {currentPage === 'dashboard' && (
+          <PageErrorBoundary pageName="Dashboard">
+            <DashboardPage />
+          </PageErrorBoundary>
+        )}
+        {currentPage === 'setup' && (
+          <PageErrorBoundary pageName="Setup">
+            <DeviceSetupPage />
+          </PageErrorBoundary>
+        )}
+        {currentPage === 'transfer' && (
+          <PageErrorBoundary pageName="Transfer">
+            <TransferPage />
+          </PageErrorBoundary>
+        )}
+        {currentPage === 'library' && (
+          <PageErrorBoundary pageName="Library">
+            <LibraryPage />
+          </PageErrorBoundary>
+        )}
       </motion.div>
     </AnimatePresence>
   )

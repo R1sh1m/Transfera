@@ -297,6 +297,7 @@ Store and shop surfaces retain the same chassis but switch modes. The product co
 
 ### Brand & Accent
 - **Action Blue** (`{colors.primary}` — #0066cc): The single brand-level interactive color. All text links, all blue pill CTAs ("Learn more", "Buy"), and the focus ring root. This is Apple's quiet but universal "click me" signal. Press state shifts to a slightly darker variant via the active scale transform rather than a hex change.
+  - **Tailwind utility:** `bg-action`, `text-action`, `ring-action` — defined in `index.css` as `--color-action: oklch(0.49 0.19 264)`. Used for media cell selection circles, focus rings on the source preview grid, and the "Transfer selected" button.
 - **Focus Blue** (`{colors.primary-focus}` — #0071e3): A marginally brighter sibling of Action Blue, reserved for the keyboard focus ring on buttons (`outline: 2px solid`).
 - **Sky Link Blue** (`{colors.primary-on-dark}` — #2997ff): A brighter blue used on dark surfaces for in-copy links and inline callouts, where Action Blue would disappear against the tile background.
 
@@ -616,6 +617,66 @@ Contextual action card shown on the Dashboard when the app detects optional setu
   - Actions row: `flex items-center gap-2 mt-2` — primary button `text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md` + dismiss link `text-xs text-muted-foreground hover:text-foreground`
 - Appears as a `space-y-2` stack when multiple cards are active
 - Each card is independently dismissible via a dismiss button that adds its id to a local `dismissedCards` set
+### `component.source-preview-panel`
+
+The inline media preview panel on the Setup page that appears when a source directory is selected.
+
+**When it appears:** Immediately below the SourcePicker once a valid source (local folder or device path) is selected. Not visible at all without an active source. Resets when source changes.
+
+**Structure (vertical stack, top to bottom):**
+
+| Zone | Content |
+|---|---|
+| Header bar | Left: "Source preview" label in `text-xs font-medium` + `text-xs text-muted-foreground` file count/size metadata. Right: "Select all" / "Deselect all" text button in `text-primary` with "(Ctrl+A)" hint |
+| Filter + sort row | Left: three filter pills (All / Photos with Image icon / Videos with Film icon), active pill `bg-primary text-primary-foreground`, inactive `bg-muted text-muted-foreground`. Right: sort dropdown (6 options) with SlidersHorizontal icon |
+| Pre-scan banner | Conditional — blue-tinted bar (`bg-blue-50 dark:bg-blue-950/40`) when prescan finds likely duplicates. Text: "X files already appear to be in your library." Right: "Select only new files" button (`bg-blue-600`) |
+| Thumbnail grid | 4-column grid, `gap-0.5`, each cell `aspect-square rounded-lg overflow-hidden cursor-pointer`. Contains `component.media-thumb-cell` instances |
+| Load more | "Load more (X remaining)" button at `w-full`, `text-primary`, `border border-border rounded-lg` — only shown when `page < totalPages` |
+| Bottom action bar | Left: selection count (`text-xs font-medium`) + total size / placeholder text (`text-xs text-muted-foreground`). Right: "Transfer selected" button with Upload icon — `bg-action text-white` when items selected, `bg-muted text-muted-foreground opacity-40 cursor-default` when 0 selected |
+
+**States:**
+- **Loading:** `SkeletonGrid` — 4-column grid of `aspect-square rounded-lg bg-muted` cells with a shimmer gradient sweep (`@keyframes shimmer` — gradient moves from -200% to 200% over 1.5s, infinite), each cell staggered by `0.05s`
+- **Empty:** Centered `ImageOff` icon + "No media files found in this directory" in `text-muted-foreground`
+- **Loaded:** Real thumbnail grid with progressive loading (max 4 concurrent fetches)
+- **Thumbnail failed:** `ImageOff` icon fallback in the cell; file is still selectable
+
+**Keyboard navigation:**
+- Arrow keys move the focus indicator (`ring-2 ring-action ring-offset-1`) through the grid
+- Space or Enter toggles selection on the focused cell
+- Ctrl+A triggers Select all / Deselect all
+
+### `component.media-thumb-cell`
+
+A single square cell in the source preview thumbnail grid.
+
+**Structure (positioned children, all absolute):**
+
+| Layer | Position | Content |
+|---|---|---|
+| Thumbnail | Fill | `<img>` with `object-cover`, `transition-opacity duration-150`. Dims to `opacity-82` when selected |
+| Failed placeholder | Fill | `ImageOff` icon centered in `bg-muted` — shown only when thumbnail fetch permanently failed |
+| Loading placeholder | Fill | Spinning circle (`animate-spin`) centered in `bg-muted` — shown while thumbnail is being fetched |
+| Selection circle | `top-1.5 right-1.5` | 20×20px circle. Unselected: `border-2 border-white/85 bg-black/15`. Selected: `bg-action border-2 border-white shadow-xs` with white `Check` icon. Icon animates in via 150ms scale (`motion.div` initial: scale 0, animate: scale 1, exit: scale 0) |
+| Video badge | `bottom-1 left-1` | Black semi-transparent (`bg-black/45`) rounded pill with `Film` icon. If `duration_s` is available, shows duration in M:SS format next to the icon |
+| Duplicate badge | `bottom-1 right-1` | Black semi-transparent (`bg-black/45`) rounded pill with `CheckCircle` icon + "In library" label — shown when prescan marks this file as likely already backed up |
+
+**Selection behavior:**
+- Click toggles selection immediately (no "selection mode" entry step)
+- Selected cells show filled blue circle with checkmark + dimmed thumbnail
+- Deselected cells show empty circle ring
+- `transition-all duration-150` on the circle background/border; checkmark uses Framer Motion `duration: 0.15`
+
+### `component.action-button`
+
+Primary action button using the Action Blue token.
+
+**Specs:**
+- Background: `bg-action`, text: `text-white`
+- Hover: `hover:bg-action/90`
+- Active: `active:scale-[0.95]` (matches DESIGN.md button-press micro-interaction)
+- Disabled: `bg-muted text-muted-foreground opacity-40 cursor-default`
+- Used for: "Transfer selected" button in `component.source-preview-panel`
+
 ## Known Gaps
 
 - Form validation and error states were not surfaced on the analyzed pages; only the neutral search input is documented.

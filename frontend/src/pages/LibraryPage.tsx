@@ -3,7 +3,7 @@
 // Masonry view of completed items with infinite scroll.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useRef, useCallback, useState } from 'react'
+import { useEffect, useRef, useCallback, useState, Component } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Image,
@@ -11,6 +11,7 @@ import {
   Music,
   FileText,
   Search,
+  History,
   Grid3X3,
   LayoutList,
   CheckCircle2,
@@ -19,11 +20,14 @@ import {
   HardDrive,
   RefreshCw,
   Trash2,
+  AlertTriangle,
 } from 'lucide-react'
 import { useMediaList, useClearLibrary } from '@/lib/queries'
+import TransferHistoryTable from '@/components/TransferHistoryTable'
 import apiClient from '@/lib/api-client'
 import { useTransferStore } from '@/store/transfer'
 import { cn } from '@/lib/utils'
+import { fetchThumbnail } from '@/lib/thumbnail-fetch'
 import type { MediaItemInfo, HopStatus } from '@/types/api'
 
 // ---------------------------------------------------------------------------
@@ -105,9 +109,38 @@ function useMasonryColumns(items: MediaItemInfo[], containerWidth: number, gap =
 // LibraryCard
 // ---------------------------------------------------------------------------
 function LibraryCard({ item }: { item: MediaItemInfo }) {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null)
   const isImage = item.extension && ['.jpg', '.jpeg', '.png', '.gif', '.heic', '.webp', '.raw', '.bmp', '.tiff', '.tif', '.avif', '.jxl'].includes(item.extension)
   const isVideo = item.extension && ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.3gp'].includes(item.extension)
   const isAudio = item.extension && ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma'].includes(item.extension)
+  const isFailed = item.thumbnail_status === 'failed'
+
+  useEffect(() => {
+    if (isFailed) return
+    // Allow fetching if thumbnail_status is 'ready' OR 'pending' (endpoint generates on demand)
+    if (item.thumbnail_status !== 'ready' && item.thumbnail_status !== 'pending') return
+
+    const controller = new AbortController()
+    let cancelled = false
+
+    fetchThumbnail(item.id, controller.signal).then((url) => {
+      if (!cancelled && url) {
+        setThumbUrl(url)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [item.id, item.thumbnail_status, isFailed])
+
+  // Cleanup blob URLs on unmount
+  useEffect(() => {
+    return () => {
+      if (thumbUrl) URL.revokeObjectURL(thumbUrl)
+    }
+  }, [thumbUrl])
 
   return (
     <motion.div
@@ -120,17 +153,17 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
       <div className={cn(
         'relative flex items-center justify-center overflow-hidden',
         isVideo ? 'aspect-4/3' : isImage ? 'aspect-square' : 'aspect-4/3',
-        isImage && !item.thumbnail_url ? 'bg-blue-50 dark:bg-blue-950' : '',
-        isVideo && !item.thumbnail_url ? 'bg-purple-50 dark:bg-purple-950' : '',
+        isImage && !thumbUrl && !isFailed ? 'bg-blue-50 dark:bg-blue-950' : '',
+        isVideo && !thumbUrl && !isFailed ? 'bg-purple-50 dark:bg-purple-950' : '',
         isAudio ? 'bg-green-50 dark:bg-green-950' : '',
-        !isImage && !isVideo && !isAudio ? 'bg-muted' : '',
+        isFailed ? 'bg-muted' : '',
+        !isImage && !isVideo && !isAudio && !isFailed ? 'bg-muted' : '',
       )}>
-        {item.thumbnail_url ? (
+        {thumbUrl ? (
           <img
-            src={item.thumbnail_url}
+            src={thumbUrl}
             alt={item.file_name}
             className="w-full h-full object-cover"
-            loading="lazy"
           />
         ) : (
           <div className={cn(
@@ -228,13 +261,49 @@ function ConfirmDialog({
 }
 
 // ---------------------------------------------------------------------------
+// MediaGridBoundary
+// ---------------------------------------------------------------------------
+class MediaGridBoundary extends Component<
+  { children: React.ReactNode },
+  { crashed: boolean }
+> {
+  state = { crashed: false }
+
+  static getDerivedStateFromError(): { crashed: true } {
+    return { crashed: true }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('MediaGrid error:', error)
+  }
+
+  render() {
+    if (this.state.crashed) {
+      return (
+        <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
+          <AlertTriangle className="w-12 h-12 mb-3 opacity-30" />
+          <p className="text-sm">Unable to load media</p>
+          <button
+            onClick={() => this.setState({ crashed: false })}
+            className="mt-3 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity"
+          >
+            Retry
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+// ---------------------------------------------------------------------------
 // LibraryPage
 // ---------------------------------------------------------------------------
 export default function LibraryPage() {
   const [search, setSearch] = useState('')
   const [extension, setExtension] = useState('')
   const [finalStatus, setFinalStatus] = useState('')
-  const [viewMode, setViewMode] = useState<'masonry' | 'list'>('masonry')
+  const [viewMode, setViewMode] = useState<'masonry' | 'list' | 'history'>('masonry')
   const [regenStatus, setRegenStatus] = useState<'idle' | 'loading' | 'done'>('idle')
   const [showClearDialog, setShowClearDialog] = useState(false)
   const clearLibrary = useClearLibrary()
@@ -255,6 +324,14 @@ export default function LibraryPage() {
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [containerWidth, setContainerWidth] = useState(800)
+
+  // Abort controller for in-flight requests on page unmount
+  useEffect(() => {
+    const ac = new AbortController()
+    return () => {
+      ac.abort()
+    }
+  }, [])
 
   // Reset library on filter change
   useEffect(() => {
@@ -310,10 +387,38 @@ export default function LibraryPage() {
     try {
       setRegenStatus('loading')
       const res = await apiClient.post('/media/regenerate-thumbnails')
-      const count = (res.data as { count: number }).count
-      if (count === 0) {
+      const data = res.data as {
+        count?: number
+        total?: number
+        succeeded?: number
+        failed?: number
+        failed_ids?: number[]
+      }
+      const total = data.total ?? data.count ?? 0
+      if (total === 0) {
         setRegenStatus('done')
       } else {
+        // Update local state for failed items immediately
+        const failedIds = data.failed_ids
+        if (failedIds && failedIds.length > 0) {
+          const updated = library.items.map((item) => ({
+            ...item,
+            thumbnail_status: failedIds.includes(item.id)
+              ? ('failed' as const)
+              : ('pending' as const),
+          }))
+          resetLibrary()
+          appendLibraryItems(updated, library.total, library.totalPages)
+        } else {
+          // Mark all items as pending to trigger a fresh fetch
+          const updated = library.items.map((item) => ({
+            ...item,
+            thumbnail_status: 'pending' as const,
+          }))
+          resetLibrary()
+          appendLibraryItems(updated, library.total, library.totalPages)
+        }
+
         // Poll: check periodically for thumbnail_url to appear
         let attempts = 0
         const poll = setInterval(async () => {
@@ -383,17 +488,29 @@ export default function LibraryPage() {
               'p-2 rounded-l-md transition-colors',
               viewMode === 'masonry' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
             )}
+            title="Grid view"
           >
             <Grid3X3 className="w-4 h-4" />
           </button>
           <button
             onClick={() => setViewMode('list')}
             className={cn(
-              'p-2 rounded-r-md transition-colors',
+              'p-2 transition-colors',
               viewMode === 'list' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
             )}
+            title="List view"
           >
             <LayoutList className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setViewMode('history')}
+            className={cn(
+              'p-2 rounded-r-md transition-colors',
+              viewMode === 'history' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
+            )}
+            title="Transfer history"
+          >
+            <History className="w-4 h-4" />
           </button>
         </div>
 
@@ -446,7 +563,9 @@ export default function LibraryPage() {
 
       {/* Content */}
       <div ref={containerRef} className="flex-1 overflow-y-auto">
-        {isLoading && library.items.length === 0 ? (
+        {viewMode === 'history' ? (
+          <TransferHistoryTable />
+        ) : isLoading && library.items.length === 0 ? (
           <div className="grid grid-cols-3 gap-3">
             {Array.from({ length: 9 }).map((_, i) => (
               <div key={i} className="bg-card border border-border rounded-lg overflow-hidden animate-pulse">
@@ -464,47 +583,53 @@ export default function LibraryPage() {
             <p className="text-sm">No items in library yet</p>
             <p className="text-xs mt-1">Complete a transfer to see files here</p>
           </div>
-        ) : viewMode === 'masonry' ? (
-          <div className="flex gap-2" style={{ minHeight: 400 }}>
-            {columns.map((col, colIdx) => (
-              <div key={colIdx} className="flex-1 space-y-2">
-                {col.map((item) => (
-                  <LibraryCard key={item.id} item={item} />
+        ) : (
+          <MediaGridBoundary>
+            {viewMode === 'masonry' ? (
+              <div className="flex gap-2" style={{ minHeight: 400 }}>
+                {columns.map((col, colIdx) => (
+                  <div key={colIdx} className="flex-1 space-y-2">
+                    {col.map((item) => (
+                      <LibraryCard key={item.id} item={item} />
+                    ))}
+                  </div>
                 ))}
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-1">
-            <AnimatePresence>
-              {library.items.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md hover:bg-muted/50 transition-colors"
-                >
-                  <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
-                    {getIcon(item.extension)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground truncate">{item.file_name}</p>
-                    <p className="text-xs text-muted-foreground truncate">{item.source_path}</p>
-                  </div>
-                  <span className="text-xs text-muted-foreground shrink-0">{formatSize(item.file_size)}</span>
-                  {getStatusIcon(item.final_status)}
-                </div>
-              ))}
-            </AnimatePresence>
-          </div>
+            ) : (
+              <div className="space-y-1">
+                <AnimatePresence>
+                  {library.items.map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md hover:bg-muted/50 transition-colors"
+                    >
+                      <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
+                        {getIcon(item.extension)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-foreground truncate">{item.file_name}</p>
+                        <p className="text-xs text-muted-foreground truncate">{item.source_path}</p>
+                      </div>
+                      <span className="text-xs text-muted-foreground shrink-0">{formatSize(item.file_size)}</span>
+                      {getStatusIcon(item.final_status)}
+                    </div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            )}
+          </MediaGridBoundary>
         )}
 
-        {/* Infinite scroll sentinel */}
-        <div ref={sentinelRef} className="h-10" />
-
-        {/* Loading more indicator */}
-        {library.isLoadingMore && (
-          <div className="flex justify-center py-4">
-            <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
-          </div>
+        {/* Infinite scroll sentinel — only for non-history views */}
+        {viewMode !== 'history' && (
+          <>
+            <div ref={sentinelRef} className="h-10" />
+            {library.isLoadingMore && (
+              <div className="flex justify-center py-4">
+                <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

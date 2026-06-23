@@ -2,6 +2,7 @@
 Transfera v2 — Thumbnail Generator (memory-only)
 Generates JPEG thumbnail bytes using a multi-strategy approach:
 1. ExifTool fast-path: extract embedded JPEG thumbnails from EXIF data
+   (skipped for formats that cannot structurally contain embedded thumbnails)
 2. Pillow decode + resize: full image decode with EXIF-orientation-aware resize
 3. ffmpeg frame extraction: extract a single frame from video files
 4. rawpy: RAW format decoding (if available)
@@ -32,8 +33,7 @@ THUMBNAIL_QUALITY = 82   # JPEG quality for generated thumbnails
 _PILLOW_READY = False
 _PILLOW_HEIF_READY = False
 try:
-    from PIL import Image
-    from PIL import ImageOps
+    from PIL import Image, ImageOps
 
     _PILLOW_READY = True
 
@@ -92,6 +92,16 @@ _VIDEO_EXTENSIONS = frozenset({
     ".3gp", ".wmv", ".flv", ".mpg", ".mpeg",
 })
 
+# Formats that structurally cannot contain an embedded JPEG thumbnail in EXIF
+# metadata. Running ExifTool's -ThumbnailImage on these is guaranteed to return
+# nothing, so we skip that subprocess entirely for a significant speed win.
+# JPEG, HEIC, CR2/CR3, NEF, ARW, DNG — these CAN have embedded thumbnails.
+# PNG, BMP, GIF, WebP, TIFF, SVG, ICO — these cannot.
+_NO_EMBEDDED_THUMB_EXTS = frozenset({
+    ".png", ".bmp", ".gif", ".webp",
+    ".tiff", ".tif", ".svg", ".ico",
+})
+
 
 # ---------------------------------------------------------------------------
 # ExifTool fast-path: extract embedded thumbnail
@@ -101,6 +111,9 @@ def _extract_embedded_thumbnail(file_path: Path) -> bytes | None:
     Try to extract an embedded JPEG thumbnail from EXIF data using ExifTool.
     Many JPEG and HEIC files contain a small preview image in their EXIF
     metadata. Extracting it is much faster than decoding the full image.
+
+    Only called for formats that can structurally contain embedded thumbnails
+    (JPEG, HEIC, RAW formats) — never for PNG/BMP/GIF/WebP/TIFF.
     """
     from backend.engines.metadata_extractor import _bootstrap_exiftool
 
@@ -142,6 +155,9 @@ def _generate_image_thumbnail(file_path: Path) -> bytes | None:
 
     try:
         img = Image.open(file_path)
+    except Image.UnidentifiedImageError:
+        logger.warning("Corrupt or unsupported image: %s", file_path)
+        return None
     except Exception as exc:
         logger.debug("Pillow cannot open %s: %s", file_path.name, exc)
         return None
@@ -149,8 +165,14 @@ def _generate_image_thumbnail(file_path: Path) -> bytes | None:
     try:
         img = ImageOps.exif_transpose(img) or img
 
-        if img.mode not in ("RGB", "L"):
+        if img.mode not in ("RGB", "RGBA", "L", "P"):
             img = img.convert("RGB")
+        elif img.mode in ("RGBA", "P"):
+            # Flatten transparency onto white background
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            mask = img.split()[3] if img.mode == "RGBA" else None
+            bg.paste(img.convert("RGB"), mask=mask)
+            img = bg
         elif img.mode == "L":
             img = img.convert("RGB")
 
@@ -220,8 +242,16 @@ def _generate_video_thumbnail(file_path: Path) -> bytes | None:
         )
         if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
             return result.stdout
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+
+        stderr = result.stderr.decode("utf-8", errors="replace")[:2000]
+        logger.error(
+            "ffmpeg thumbnail failed for %s (returncode=%d, stdout=%d bytes): %s",
+            file_path, result.returncode, len(result.stdout or b""), stderr,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg thumbnail timed out for %s", file_path)
+    except OSError as exc:
+        logger.error("ffmpeg thumbnail OS error for %s: %s", file_path, exc)
 
     return None
 
@@ -265,6 +295,13 @@ def generate_thumbnail_bytes(source_path: Path) -> bytes | None:
     Generate a JPEG thumbnail from *source_path*.
     Returns raw JPEG bytes on success, None on failure.
     Never writes to disk.
+
+    Strategy:
+    1. For formats with EXIF support (JPEG, HEIC, RAW): try embedded thumbnail
+       extraction first (fast) — skipped for formats that can't have them.
+    2. Full Pillow decode + resize (works for all raster formats).
+    3. ffmpeg frame extraction for video files.
+    4. rawpy for RAW camera files.
     """
     path = source_path.resolve()
     if not path.is_file():
@@ -276,16 +313,19 @@ def generate_thumbnail_bytes(source_path: Path) -> bytes | None:
         if ext in (".heic", ".heif") and not _PILLOW_HEIF_READY:
             return None
 
-        # Embedded thumbnail fast path
-        embedded = _extract_embedded_thumbnail(path)
-        if embedded:
-            try:
-                from PIL import Image as _TestImg
-                test = _TestImg.open(io.BytesIO(embedded))
-                test.verify()
-                return embedded
-            except Exception:
-                pass
+        # Embedded thumbnail fast path — only for formats that can have one.
+        # Skipping PNG/BMP/GIF/WebP eliminates hundreds of wasted ExifTool
+        # subprocesses when processing screenshot folders.
+        if ext not in _NO_EMBEDDED_THUMB_EXTS:
+            embedded = _extract_embedded_thumbnail(path)
+            if embedded:
+                try:
+                    from PIL import Image as _TestImg
+                    test = _TestImg.open(io.BytesIO(embedded))
+                    test.verify()
+                    return embedded
+                except Exception:
+                    pass
 
         if _PILLOW_READY:
             result = _generate_image_thumbnail(path)

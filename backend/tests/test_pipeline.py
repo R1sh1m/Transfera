@@ -12,15 +12,19 @@ import os
 import shutil
 import sys
 import tempfile
-import threading
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from unittest.mock import patch  # noqa: E402
+
 from sqlalchemy import select  # noqa: E402
-from backend.config import CACHE_DIR, PARTIAL_SUFFIX  # noqa: E402
+
+from backend.config import PARTIAL_SUFFIX  # noqa: E402
 from backend.database.manager import (  # noqa: E402
     create_all_tables,
     dispose_engine,
@@ -42,6 +46,7 @@ from backend.engines.cache_manager import (  # noqa: E402
     cache_batch,
 )
 from backend.engines.importer import (  # noqa: E402
+    MAX_IMMEDIATE_RETRIES,
     compute_archive_path,
     import_batch,
 )
@@ -101,10 +106,11 @@ async def _reset_db() -> None:
 # ======================================================================
 # 1. Batch creation and chunking
 # ======================================================================
+@pytest.mark.asyncio
 async def test_batch_creation() -> None:
     print("\n=== Batch Creation ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src = Path(tmp) / "source"
         src.mkdir()
         for i in range(250):
@@ -137,16 +143,17 @@ async def test_batch_creation() -> None:
             if batch_num < 3:
                 _check(f"Batch {batch_num} has 100 items", len(items) == 100)
             else:
-                _check(f"Batch 3 has 50 items", len(items) == 50)
+                _check("Batch 3 has 50 items", len(items) == 50)
 
 
 # ======================================================================
 # 2. Hop 1: Full cache cycle
 # ======================================================================
+@pytest.mark.asyncio
 async def test_hop1_full_cache() -> None:
     print("\n=== Hop 1: Full Cache Cycle ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         src_dir.mkdir()
@@ -196,10 +203,11 @@ async def test_hop1_full_cache() -> None:
 # ======================================================================
 # 3. Hop 1: Skip if cache already valid
 # ======================================================================
+@pytest.mark.asyncio
 async def test_hop1_skip_existing() -> None:
     print("\n=== Hop 1: Skip Existing Cache ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         src_dir.mkdir()
@@ -250,10 +258,11 @@ async def test_hop1_skip_existing() -> None:
 # ======================================================================
 # 4. Hop 2: Import cycle
 # ======================================================================
+@pytest.mark.asyncio
 async def test_hop2_import() -> None:
     print("\n=== Hop 2: Import Cycle ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
@@ -295,10 +304,11 @@ async def test_hop2_import() -> None:
 # ======================================================================
 # 5. Crash recovery: LOADING batch
 # ======================================================================
+@pytest.mark.asyncio
 async def test_recovery_loading() -> None:
     print("\n=== Crash Recovery: LOADING Batch ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         src_dir.mkdir()
@@ -364,12 +374,13 @@ async def test_recovery_loading() -> None:
 # ======================================================================
 # 6. Crash recovery: ARCHIVED batch
 # ======================================================================
+@pytest.mark.asyncio
 async def test_recovery_archived() -> None:
     print("\n=== Crash Recovery: ARCHIVED Batch ===")
 
     await _reset_db()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
@@ -446,10 +457,11 @@ async def test_recovery_archived() -> None:
 # ======================================================================
 # 7. Pipeline integrity: no duplicates, no data loss
 # ======================================================================
+@pytest.mark.asyncio
 async def test_pipeline_integrity() -> None:
     print("\n=== Pipeline Integrity ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
@@ -480,7 +492,8 @@ async def test_pipeline_integrity() -> None:
 
         # Count DB rows
         async with session_scope() as session:
-            from sqlalchemy import func, select as sel
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
             result = await session.execute(sel(func.count(MediaItem.id)))
             db_count = result.scalar()
 
@@ -504,6 +517,131 @@ async def test_pipeline_integrity() -> None:
         partials = list(cache_dir.rglob(f"*{PARTIAL_SUFFIX}"))
         partials += list(dest_dir.rglob(f"*{PARTIAL_SUFFIX}"))
         _check("No .partial files in cache or dest", len(partials) == 0)
+
+
+# ======================================================================
+# 8. Import retry on hash mismatch
+# ======================================================================
+import backend.engines.importer as _importer_mod
+
+
+@pytest.mark.asyncio
+async def test_import_retry_succeeds_on_second_attempt() -> None:
+    """When _copy_cache_to_dest returns a wrong hash once then correct, item completes."""
+    print("\n=== Import Retry: Succeeds on Second Attempt ===")
+
+    call_count = [0]
+    real_copy = _importer_mod._copy_cache_to_dest
+
+    async def _mock_copy_once(src, dst, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            return "0" * 64
+        return await real_copy(src, dst, **kwargs)
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        src_dir = Path(tmp) / "source"
+        cache_dir = Path(tmp) / "cache"
+        dest_dir = Path(tmp) / "dest"
+        src_dir.mkdir()
+
+        _touch(src_dir / "retry_test.jpg", content=b"photo-content-for-retry-test" * 100)
+
+        async with session_scope() as session:
+            ts = TransferSession(
+                session_name="retry-test",
+                source_root=str(src_dir),
+                dest_root=str(dest_dir),
+            )
+            session.add(ts)
+            await session.flush()
+            session_id = ts.id
+
+        from backend.engines.scanner import scan
+        item_ids = await scan(src_dir, session_id=session_id)
+        batch_ids = await create_batches(session_id, item_ids)
+
+        await cache_batch(batch_ids[0], cache_dir=cache_dir)
+
+        with patch.object(_importer_mod, "_copy_cache_to_dest", _mock_copy_once):
+            imported = await import_batch(
+                batch_ids[0],
+                dest_root=dest_dir,
+                cache_dir=cache_dir,
+            )
+
+        _check("Item imported after retry", imported == 1)
+
+        async with session_scope() as session:
+            result = await session.execute(
+                select(MediaItem.final_status).where(MediaItem.batch_id == batch_ids[0])
+            )
+            statuses = [r[0] for r in result.all()]
+            _check("Item marked COMPLETED", statuses == [HopStatus.COMPLETED.value])
+
+        _check(f"_copy_cache_to_dest called {call_count[0]} times (2 expected)", call_count[0] == 2)
+
+
+@pytest.mark.asyncio
+async def test_import_retry_exhausted_fails() -> None:
+    """After MAX_IMMEDIATE_RETRIES+1 consecutive hash mismatches, item is FAILED."""
+    print("\n=== Import Retry: Exhausted → FAILED ===")
+
+    call_count = [0]
+
+    async def _mock_copy_always_fail(src, dst, **kwargs):
+        call_count[0] += 1
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        return "0" * 64
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        src_dir = Path(tmp) / "source"
+        cache_dir = Path(tmp) / "cache"
+        dest_dir = Path(tmp) / "dest"
+        src_dir.mkdir()
+
+        _touch(src_dir / "exhaust_test.jpg", content=b"photo-content-for-exhaust-test" * 100)
+
+        async with session_scope() as session:
+            ts = TransferSession(
+                session_name="exhaust-test",
+                source_root=str(src_dir),
+                dest_root=str(dest_dir),
+            )
+            session.add(ts)
+            await session.flush()
+            session_id = ts.id
+
+        from backend.engines.scanner import scan
+        item_ids = await scan(src_dir, session_id=session_id)
+        batch_ids = await create_batches(session_id, item_ids)
+
+        await cache_batch(batch_ids[0], cache_dir=cache_dir)
+
+        with patch.object(_importer_mod, "_copy_cache_to_dest", _mock_copy_always_fail):
+            imported = await import_batch(
+                batch_ids[0],
+                dest_root=dest_dir,
+                cache_dir=cache_dir,
+            )
+
+        _check("Item not imported (retries exhausted)", imported == 0)
+
+        async with session_scope() as session:
+            result = await session.execute(
+                select(MediaItem.final_status).where(MediaItem.batch_id == batch_ids[0])
+            )
+            statuses = [r[0] for r in result.all()]
+            _check("Item marked FAILED", statuses == [HopStatus.FAILED.value])
+
+        expected_calls = MAX_IMMEDIATE_RETRIES + 1
+        _check(
+            f"_copy_cache_to_dest called {call_count[0]} times ({expected_calls} expected)",
+            call_count[0] == expected_calls,
+        )
 
 
 # ======================================================================
@@ -535,6 +673,12 @@ async def main() -> None:
     await _reset_db()
 
     await test_pipeline_integrity()
+    await _reset_db()
+
+    await test_import_retry_succeeds_on_second_attempt()
+    await _reset_db()
+
+    await test_import_retry_exhausted_fails()
     await _reset_db()
 
     print("\n" + "=" * 60)

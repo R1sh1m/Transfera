@@ -5,7 +5,7 @@ Shared dependency for protecting destructive endpoints with a local secret token
 
 from __future__ import annotations
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Header, HTTPException
 
 from backend.config import LOCAL_SECRET_TOKEN
 

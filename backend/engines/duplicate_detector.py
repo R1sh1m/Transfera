@@ -9,15 +9,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.manager import session_scope
-from backend.database.models import BatchStatus, HopStatus, MediaItem, TransferBatch
+from backend.database.models import HopStatus, MediaItem, TransferBatch
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +28,14 @@ class DuplicateEntry:
     item_id: int
     file_name: str
     source_path: str
-    source_hash: Optional[str]
+    source_hash: str | None
     file_size: int
     match_type: str  # "exact" | "potential"
-    matched_path: Optional[str] = None  # path of the existing archive copy
-    matched_item_id: Optional[int] = None  # ID of the matched library item
-    matched_file_size: Optional[int] = None  # size of the matched item
-    matched_date_taken: Optional[str] = None  # ISO datetime of the matched item
-    matched_thumbnail_url: Optional[str] = None  # thumbnail URL for the matched item
+    matched_path: str | None = None  # path of the existing archive copy
+    matched_item_id: int | None = None  # ID of the matched library item
+    matched_file_size: int | None = None  # size of the matched item
+    matched_date_taken: str | None = None  # ISO datetime of the matched item
+    matched_thumbnail_url: str | None = None  # thumbnail URL for the matched item
 
 
 @dataclass
@@ -45,7 +43,7 @@ class DuplicateReport:
     """Full report returned by ``check_batch()``."""
     batch_id: int
     session_id: int
-    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    checked_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     exact_duplicates: list[DuplicateEntry] = field(default_factory=list)
     potential_duplicates: list[DuplicateEntry] = field(default_factory=list)
     total_items_checked: int = 0
@@ -194,12 +192,12 @@ def _detect_duplicates(
             hash_index.setdefault(ai.source_hash.lower(), []).append(ai)
         name_index.setdefault(ai.file_name.lower(), []).append(ai)
 
-    def _make_matched_url(mi: MediaItem) -> Optional[str]:
+    def _make_matched_url(mi: MediaItem) -> str | None:
         if mi.thumbnail_path:
             return f"/api/media/{mi.id}/thumbnail"
         return None
 
-    def _make_matched_date(mi: MediaItem) -> Optional[str]:
+    def _make_matched_date(mi: MediaItem) -> str | None:
         if mi.date_taken:
             return mi.date_taken.isoformat()
         return None
@@ -361,6 +359,68 @@ async def resume_after_duplicates(batch_id: int) -> None:
     """
     await event_bus.emit("duplicates_resolved", {
         "batch_id": batch_id,
-        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "resolved_at": datetime.now(UTC).isoformat(),
     })
     logger.info("Duplicates resolved for batch %d — processing resumed.", batch_id)
+
+
+# ---------------------------------------------------------------------------
+# Pre-scan (hash-free, filename + size match)
+# ---------------------------------------------------------------------------
+
+async def prescan_against_library(
+    candidates: list[dict],
+) -> dict:
+    """
+    Fast pre-scan: compare candidate source files against the existing
+    library by (file_name, file_size) BEFORE any hashing/caching happens.
+
+    Parameters
+    ----------
+    candidates : list[dict]
+        Each dict has at minimum: "abs_path", "filename", "size_bytes" —
+        matching the shape of items from GET /api/device/preview.
+
+    Returns
+    -------
+    dict with shape:
+      {
+        "checked": int,
+        "likely_duplicate_count": int,
+        "likely_duplicate_paths": list[str],
+      }
+    """
+    if not candidates:
+        return {"checked": 0, "likely_duplicate_count": 0, "likely_duplicate_paths": []}
+
+
+    from backend.database.manager import session_scope
+    from backend.database.models import HopStatus
+
+    async with session_scope() as session:
+        result = await session.execute(
+            select(MediaItem.file_name, MediaItem.file_size).where(
+                MediaItem.final_status == HopStatus.COMPLETED.value
+            )
+        )
+        rows = result.fetchall()
+
+    # Build O(1) lookup set: (lowercase_name, size_bytes) -> True
+    library_set: set[tuple[str, int]] = {
+        (row[0].lower(), row[1]) for row in rows if row[0] and row[1] is not None
+    }
+
+    likely_duplicate_paths: list[str] = []
+    for c in candidates:
+        name = (c.get("filename") or "").lower()
+        size = c.get("size_bytes") or 0
+        if (name, size) in library_set:
+            path = c.get("abs_path") or ""
+            if path:
+                likely_duplicate_paths.append(path)
+
+    return {
+        "checked": len(candidates),
+        "likely_duplicate_count": len(likely_duplicate_paths),
+        "likely_duplicate_paths": likely_duplicate_paths,
+    }

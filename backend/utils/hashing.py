@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from backend.config import BATCH_SIZE
 

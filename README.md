@@ -40,6 +40,18 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ---
 
+## Screenshots
+
+> ![Transfera Dashboard](docs/screenshots/dashboard.png)
+> *Dashboard view — Recent Sessions list and device status.*
+>
+> ![Transfer Progress](docs/screenshots/transfer.png)
+> *Active transfer with batch progress, media preview, and real-time ETA.*
+
+*(Screenshots to be added — this section will be populated once the UI is finalized.)*
+
+---
+
 ## Core Prerequisites
 
 Transfera targets **Windows 11** as its primary platform. Ensure the following are installed before proceeding.

@@ -6,10 +6,10 @@ Endpoints for WSL2/usbipd iPhone access setup and management.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from backend.api.auth import require_local_token
 from backend.api.tier2_schemas import (
     Tier2BindExecuteRequest,
     Tier2BindExecuteResponse,
@@ -18,34 +18,43 @@ from backend.api.tier2_schemas import (
     Tier2CancelResponse,
     Tier2ResetResponse,
     Tier2ResumeNotification,
-    Tier2RestartRequest,
     Tier2SetupPreviewResponse,
+    Tier2StatusResponse,
     Tier2StepPreview,
     Tier2StepRequest,
     Tier2StepResponse,
-    Tier2StatusResponse,
     Tier2USBDeviceInfo,
     Tier2USBDeviceListResponse,
 )
-from backend.api.auth import require_local_token
-from backend.tier2_manager import get_device_manager, DeviceAccessTier
+from backend.tier2_manager import get_device_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tier2")
+
+_fallback_orchestrator: WSLOrchestrator | None = None
+
+
+def _get_or_create_orchestrator(manager) -> WSLOrchestrator | None:
+    global _fallback_orchestrator
+    orch = manager.get_orchestrator()
+    if orch is not None:
+        return orch
+    if _fallback_orchestrator is None:
+        try:
+            from backend.wsl_orchestrator import WSLOrchestrator
+            _fallback_orchestrator = WSLOrchestrator()
+        except Exception:
+            return None
+    return _fallback_orchestrator
 
 
 @router.get("/status", response_model=Tier2StatusResponse)
 async def get_tier2_status() -> Tier2StatusResponse:
     """Get comprehensive Tier 2 setup status."""
     manager = get_device_manager()
-    orchestrator = manager.get_orchestrator()
-
+    orchestrator = _get_or_create_orchestrator(manager)
     if orchestrator is None:
-        try:
-            from backend.wsl_orchestrator import WSLOrchestrator
-            orchestrator = WSLOrchestrator()
-        except Exception:
-            return Tier2StatusResponse(error="WSL orchestrator not available")
+        return Tier2StatusResponse(error="WSL orchestrator not available")
 
     wsl_status = await orchestrator.check_feasibility()
     usbipd_status = await orchestrator.verify_usbipd_installed()
@@ -69,6 +78,7 @@ async def get_tier2_status() -> Tier2StatusResponse:
         active_tier=(await manager.get_active_tier()).value,
         devices_on_tier2=devices_on_tier2,
         error=wsl_status.error or usbipd_status.error or bridge_status.error,
+        bridge_error=bridge_status.last_error,
     )
 
 
@@ -79,14 +89,9 @@ async def get_setup_preview() -> Tier2SetupPreviewResponse:
     Shows exactly what will happen, including restart/elevation requirements.
     """
     manager = get_device_manager()
-    orchestrator = manager.get_orchestrator()
-
+    orchestrator = _get_or_create_orchestrator(manager)
     if orchestrator is None:
-        try:
-            from backend.wsl_orchestrator import WSLOrchestrator
-            orchestrator = WSLOrchestrator()
-        except Exception:
-            raise HTTPException(status_code=503, detail="WSL orchestrator not available")
+        raise HTTPException(status_code=503, detail="WSL orchestrator not available")
 
     wsl_status = await orchestrator.check_feasibility()
     usbipd_status = await orchestrator.verify_usbipd_installed()
@@ -149,14 +154,9 @@ async def execute_setup_step(req: Tier2StepRequest) -> Tier2StepResponse:
     showing notification gates between each step.
     """
     manager = get_device_manager()
-    orchestrator = manager.get_orchestrator()
-
+    orchestrator = _get_or_create_orchestrator(manager)
     if orchestrator is None:
-        try:
-            from backend.wsl_orchestrator import WSLOrchestrator
-            orchestrator = WSLOrchestrator()
-        except Exception:
-            raise HTTPException(status_code=503, detail="WSL orchestrator not available")
+        raise HTTPException(status_code=503, detail="WSL orchestrator not available")
 
     step_id = req.step_id
 
@@ -173,6 +173,7 @@ async def execute_setup_step(req: Tier2StepRequest) -> Tier2StepResponse:
             step_id="start_bridge",
             completed=bridge_status.reachable,
             error=bridge_status.error,
+            error_code=bridge_status.error_code,
             details={"devices": bridge_status.devices},
         )
     elif step_id == "verify_restart":
@@ -185,6 +186,7 @@ async def execute_setup_step(req: Tier2StepRequest) -> Tier2StepResponse:
         completed=result.completed,
         restart_required=result.restart_required,
         error=result.error,
+        error_code=result.error_code,
         next_step=result.next_step,
         details=result.details,
     )
@@ -335,7 +337,7 @@ async def reset_setup(_: None = Depends(require_local_token)) -> Tier2ResetRespo
       - Clears per-device tier preference mappings.
       - Clears any cached/incomplete setup progress state.
     """
-    from backend.wsl_orchestrator import Tier2PersistedState, STATE_DIR
+    from backend.wsl_orchestrator import STATE_DIR, Tier2PersistedState
 
     manager = get_device_manager()
     orchestrator = manager.get_orchestrator()

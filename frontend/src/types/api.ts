@@ -46,6 +46,7 @@ export interface ScanResponse {
 
 // --- Session --------------------------------------------------------------
 export type TransferMode = 'copy' | 'move'
+export type FolderLayout = 'year/month/day' | 'year/month' | 'flat'
 
 export interface SessionCreate {
   session_name: string
@@ -54,6 +55,31 @@ export interface SessionCreate {
   dest_root: string
   transfer_mode: TransferMode
   only_new_since_last_import?: boolean
+  selected_files?: string[] | null
+  folder_layout?: FolderLayout
+}
+
+// --- Device Preview ----------------------------------------------------------
+export interface DevicePreviewItem {
+  id: string
+  filename: string
+  abs_path: string
+  type: 'photo' | 'video'
+  size_bytes: number
+  mtime: number
+  duration_s: number | null
+  thumbnail_ready: boolean
+}
+
+export interface DevicePreviewResponse {
+  total: number
+  photos: number
+  videos: number
+  total_size_bytes: number
+  page: number
+  page_size: number
+  pages: number
+  items: DevicePreviewItem[]
 }
 
 export interface SessionInfo {
@@ -67,6 +93,7 @@ export interface SessionInfo {
   completed_items: number
   failed_items: number
   only_new_mode: boolean
+  folder_layout: string
   created_at: string
   updated_at: string
   started_at?: string
@@ -117,6 +144,7 @@ export interface MediaItemInfo {
   final_status: HopStatus
   live_photo_group?: string
   thumbnail_url?: string
+  thumbnail_status: 'pending' | 'ready' | 'failed'
   date_taken?: string
   date_source?: 'exif' | 'file_modified'
   error_message?: string
@@ -156,6 +184,18 @@ export interface DuplicateReport {
   total_items_checked: number
   processing_paused: boolean
   summary: string
+}
+
+export interface PrescanCandidate {
+  abs_path: string
+  filename: string
+  size_bytes: number
+}
+
+export interface PrescanResponse {
+  checked: number
+  likely_duplicate_count: number
+  likely_duplicate_paths: string[]
 }
 
 export interface DuplicateCheckRequest {
@@ -222,6 +262,8 @@ export type WSEventType =
   | 'session_started'
   | 'session_paused'
   | 'session_complete'
+  | 'session_completed'
+  | 'session_completed_with_errors'
   | 'error'
   | 'pong'
 
@@ -341,7 +383,7 @@ export type SourceRefDevice = {
   type: 'device'
   device_id: string
   device_path: string
-  device_name?: string | null
+  device_name?: string
 }
 
 export type SourceRef = SourceRefLocal | SourceRefDevice
@@ -410,8 +452,9 @@ export interface PackageVerificationResponse {
 }
 
 export interface InstallDriverResponse {
-  executable: string
-  args: string[]
+  success: boolean
+  exit_code: number | null
+  error?: string
   message: string
 }
 
@@ -429,6 +472,7 @@ export interface Tier2Status {
   active_tier: 'tier1' | 'tier2' | 'wpd' | 'none'
   devices_on_tier2: string[]
   error?: string
+  bridge_error?: string
 }
 
 export interface Tier2StepPreview {
@@ -454,6 +498,7 @@ export interface Tier2StepResponse {
   completed: boolean
   restart_required: boolean
   error?: string
+  error_code?: string
   next_step?: string
   details: Record<string, unknown>
 }
@@ -520,8 +565,40 @@ export interface DeviceBackendStatusResponse {
   apple_driver_installable: boolean
   apple_driver_package_name: string | null
   apple_driver_package_version: string | null
+  pymobiledevice3_installable: boolean
   bridge_auto_started: boolean
   wsl_setup_suggested: boolean
+  initializing: boolean
+  active_tier: 'tier1' | 'wpd' | 'tier2' | 'none'
+  tier2_available: boolean
+  tier2_error: string | null
+  ios_available: boolean
+}
+
+// --- iOS Device Recovery ----------------------------------------------------
+export interface IOSDeviceRecoverResponse {
+  overall: 'service_restored' | 'usb_passthrough_restored' | 'elevation_required' | 'needs_bind' | 'needs_elevation' | 'no_device_found' | 'no_recovery_needed'
+  service: {
+    state: string
+    needs_elevation: boolean
+    elevation_command: string[] | null
+    exit_code: number | null
+    message: string
+    service_name: string
+  }
+  usb: {
+    success: boolean
+    apple_devices_found: number
+    devices: Record<string, unknown>[]
+    attach_errors: Record<string, unknown>[]
+    needs_bind: string[]
+    needs_elevation: boolean
+  }
+}
+
+export interface Pymobiledevice3InstallResponse {
+  success: boolean
+  message: string
 }
 
 export interface DevicePreferenceRequest {
@@ -535,6 +612,14 @@ export interface SessionProgress {
   total_items: number
   completed_items: number
   failed_items: number
+
+  total_files: number
+  cached_files: number
+  imported_files: number
+  failed_files: number
+  current_batch: number
+  total_batches: number
+  progress_percent: number
 
   current_item_id: number | null
   current_file_name: string
@@ -552,6 +637,10 @@ export interface SessionProgress {
 
   started_at: string | null
   completed_at: string | null
+
+  elapsed_seconds: number
+  eta_seconds: number | null
+  speed_files_per_sec: number
 }
 
 export interface RecentItemProgress {

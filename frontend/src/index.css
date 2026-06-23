@@ -76,6 +76,8 @@
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
 
+  --color-action: oklch(0.49 0.19 264);
+
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -90,6 +92,23 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/* Shimmer animation for skeleton grid */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-animate {
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-animate {
+    animation: none;
   }
 }
 

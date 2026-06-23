@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { useState, useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   HardDrive,
@@ -27,10 +28,11 @@ import {
   X,
   Smartphone,
   Wifi,
+  Terminal,
 } from 'lucide-react'
-import { useSessionList, useRecovery, useFolderMetadata, useHealth, useDiskSpace, useClearSessions, useDeviceBackendStatus, useInstallDriver } from '@/lib/queries'
+import { useSessionList, useRecovery, useFolderMetadata, useHealth, useDiskSpace, useClearSessions, useDeviceBackendStatus, useInstallDriver, useInstallPymobiledevice3 } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
-import { cn, isElectron } from '@/lib/utils'
+import { cn, extractErrorMessage, isElectron } from '@/lib/utils'
 import type { SessionInfo, SessionStatus } from '@/types/api'
 
 // ---------------------------------------------------------------------------
@@ -73,7 +75,7 @@ const statusConfig: Record<SessionStatus, { color: string; bg: string; icon: Rea
   cancelled: { color: 'text-muted-foreground', bg: 'bg-muted',               icon: <Clock className="w-3.5 h-3.5" /> },
 }
 
-function StatusBadge({ status }: { status: SessionStatus }) {
+export function StatusBadge({ status }: { status: SessionStatus }) {
   const c = statusConfig[status] ?? fallbackBadge
   return (
     <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', c.bg, c.color)}>
@@ -642,21 +644,41 @@ function SessionRow({ session }: { session: SessionInfo }) {
 // ---------------------------------------------------------------------------
 function DriverSetupCard({ name, version, onDismiss }: { name: string | null; version: string | null; onDismiss: () => void }) {
   const installDriver = useInstallDriver()
+  const queryClient = useQueryClient()
   const handleInstall = async () => {
     try {
+      // Try non-elevated install via backend API first
       const result = await installDriver.mutateAsync()
-      if (isElectron && window.electronAPI?.runElevated) {
-        window.electronAPI.runElevated({
-          executable: result.executable,
-          args: result.args,
-          description: 'Install Apple Mobile Device Support',
-        })
-      } else {
-        useTransferStore.getState().showNotification('info', 'Open Settings > Device Setup to install the Apple driver')
+      if (!result.success) {
+        // If winget failed and Electron is available, try elevated install
+        if (isElectron && window.electronAPI?.installDriverElevated) {
+          const elevated = await window.electronAPI.installDriverElevated({
+            executable: 'winget',
+            args: [
+              'install', '-e', '--id', 'Apple.AppleMobileDeviceSupport',
+              '--accept-package-agreements', '--accept-source-agreements', '--silent',
+            ],
+          })
+          if (elevated.success) {
+            queryClient.invalidateQueries({ queryKey: ['device-backend-status'] })
+            queryClient.invalidateQueries({ queryKey: ['ios-devices'] })
+            useTransferStore.getState().showNotification('success', 'Apple Mobile Device Support installed. Please reconnect your iPhone.')
+            onDismiss()
+            return
+          }
+          useTransferStore.getState().showNotification(
+            'error',
+            elevated.error || `Installation failed (exit code: ${elevated.exitCode})`,
+          )
+          return
+        }
+        useTransferStore.getState().showNotification('error', result.error || `Installation failed (exit code: ${result.exit_code})`)
+        return
       }
+      useTransferStore.getState().showNotification('success', 'Apple Mobile Device Support installed. Please reconnect your iPhone.')
       onDismiss()
-    } catch {
-      useTransferStore.getState().showNotification('error', 'Failed to prepare Apple driver installation')
+    } catch (err) {
+      useTransferStore.getState().showNotification('error', extractErrorMessage(err))
     }
   }
 
@@ -738,6 +760,53 @@ function BridgeAutoStartedNotice() {
   )
 }
 
+function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
+  const installPymobiledevice3 = useInstallPymobiledevice3()
+  const handleInstall = async () => {
+    try {
+      const result = await installPymobiledevice3.mutateAsync()
+      if (!result.success) {
+        useTransferStore.getState().showNotification('error', result.message || 'pymobiledevice3 install failed')
+        return
+      }
+      useTransferStore.getState().showNotification('success', 'pymobiledevice3 installed. Open-source AFC is now available.')
+      onDismiss()
+    } catch (err) {
+      useTransferStore.getState().showNotification('error', extractErrorMessage(err))
+    }
+  }
+
+  return (
+    <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
+      <div className="shrink-0 w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
+        <Terminal className="w-4 h-4 text-amber-700 dark:text-amber-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-foreground">Install open-source iOS library</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          pymobiledevice3 provides driverless iPhone access via AFC. Install it now for
+          open-source device support without Apple's driver.
+        </p>
+        <div className="flex items-center gap-2 mt-2">
+          <button
+            onClick={handleInstall}
+            disabled={installPymobiledevice3.isPending}
+            className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {installPymobiledevice3.isPending ? 'Installing...' : 'Install pymobiledevice3'}
+          </button>
+          <button
+            onClick={onDismiss}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
@@ -755,9 +824,10 @@ export default function DashboardPage() {
   }
 
   const showAppleCard = backendStatus?.apple_driver_installable && !dismissedCards.includes('apple-driver')
+  const showPymobileCard = backendStatus?.pymobiledevice3_installable && !dismissedCards.includes('pymobiledevice3')
   const showWslCard = backendStatus?.wsl_setup_suggested && !dismissedCards.includes('wsl-setup')
   const showBridgeCard = backendStatus?.bridge_auto_started && !dismissedCards.includes('bridge-started')
-  const showAnySetupCard = showAppleCard || showWslCard || showBridgeCard
+  const showAnySetupCard = showAppleCard || showPymobileCard || showWslCard || showBridgeCard
 
   const latestSession = sessionList?.sessions[0]
   const activeSource = sourceRoot || latestSession?.source_root || null
@@ -785,6 +855,9 @@ export default function DashboardPage() {
               version={backendStatus?.apple_driver_package_version ?? null}
               onDismiss={() => dismissCard('apple-driver')}
             />
+          )}
+          {showPymobileCard && (
+            <Pymobiledevice3InstallCard onDismiss={() => dismissCard('pymobiledevice3')} />
           )}
           {showWslCard && (
             <WslSetupCard onDismiss={() => dismissCard('wsl-setup')} />

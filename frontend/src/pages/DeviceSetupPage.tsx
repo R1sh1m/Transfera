@@ -5,7 +5,7 @@
 // a virtual folder browser backed by the device API, not the native OS dialog.
 // ---------------------------------------------------------------------------
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   FolderOpen,
@@ -31,13 +31,16 @@ import {
   RotateCcw,
   Wifi,
   Usb,
+  X,
 } from 'lucide-react'
-import { useConfig, useCreateSession, usePreflightValidate, useValidatePath, useIOSDevices, useDeviceImportState, useClearDeviceImportState, useTier2Status, useTier2SetupPreview, useTier2ExecuteStep, useTier2Cancel, useTier2Reset, useDevicePreference, useSetDevicePreference } from '@/lib/queries'
+import { useQueryClient } from '@tanstack/react-query'
+import { useConfig, useCreateSession, usePreflightValidate, useValidatePath, useIOSDevices, useDeviceImportState, useClearDeviceImportState, useTier2Status, useTier2SetupPreview, useTier2ExecuteStep, useTier2Cancel, useTier2Reset, useDevicePreference, useSetDevicePreference, useDeviceBackendStatus, useInstallDriver, useRecoverIOSDevice } from '@/lib/queries'
 import { useTransferStore } from '@/store/transfer'
 import { cn, extractErrorMessage, isElectron } from '@/lib/utils'
 import type { TransferMode, IOSDeviceInfo, SourceRef, Tier2StepPreview } from '@/types/api'
-import { IOS_SOURCE_PREFIX, isWPDPath, sourceRefToString } from '@/types/api'
+import { IOS_SOURCE_PREFIX, sourceRefToString } from '@/types/api'
 import { DeviceFolderBrowser } from '@/components/DeviceFolderBrowser'
+import SourcePreviewPanel from '@/components/SourcePreviewPanel'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -140,11 +143,75 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
     if (sourceRef?.type === 'local_folder') setDeviceListExpanded(false)
   }, [sourceRef?.type])
 
+  // Sync mode when sourceRef changes externally (e.g. from drive-detection banner)
+  useEffect(() => {
+    if (sourceRef?.type === 'device') setMode('device')
+    else if (sourceRef?.type === 'local_folder') setMode('folder')
+    else setMode('none')
+  }, [sourceRef])
+
+  const [initializingTimedOut, setInitializingTimedOut] = useState(false)
+  const backendStatus = useDeviceBackendStatus()
+  useEffect(() => {
+    if (backendStatus.data?.initializing) {
+      setInitializingTimedOut(false)
+      const timer = setTimeout(() => setInitializingTimedOut(true), 30000)
+      return () => clearTimeout(timer)
+    }
+  }, [backendStatus.data?.initializing])
+
+  const backendActiveTier = backendStatus.data?.active_tier
+  const iosAvailable = !!backendStatus.data?.ios_available
+
   const tier2Status = useTier2Status()
   const allDevices = iosDevices?.devices || []
   const readyDevices = allDevices.filter(d => d.status === 'ready')
   const nonReadyDevices = allDevices.filter(d => d.status !== 'ready')
-  const tier2Attention = !!tier2Status.data?.error
+  const tier2Attention = !!tier2Status.data?.error && backendActiveTier !== 'wpd' && backendActiveTier !== 'tier1'
+
+  const recoverMutation = useRecoverIOSDevice()
+  const [appleElevationCommand, setAppleElevationCommand] = useState<string[] | null>(null)
+  const handleAppleElevationConfirm = async () => {
+    const cmd = appleElevationCommand
+    setAppleElevationCommand(null)
+    if (cmd && cmd.length >= 2 && isElectron && window.electronAPI?.runElevated) {
+      await window.electronAPI.runElevated({
+        executable: cmd[0]!,
+        args: cmd.slice(1),
+        description: 'Start Apple Mobile Device Service',
+      })
+      useTransferStore.getState().showNotification('info', 'Apple service elevation requested. Refreshing device list...')
+      setTimeout(() => recoverMutation.mutate(), 2000)
+    }
+  }
+  const handleAppleElevationCancel = () => setAppleElevationCommand(null)
+
+  // Handle recovery results: show elevation prompt when needed
+  useEffect(() => {
+    if (!recoverMutation.data) return
+    const r = recoverMutation.data
+    if (r.overall === 'elevation_required' && r.service.elevation_command) {
+      setAppleElevationCommand(r.service.elevation_command)
+    } else if (r.overall === 'needs_bind') {
+      useTransferStore.getState().showNotification(
+        'warning',
+        'USB device needs binding before it can be attached. Open Device Setup and run bind with admin rights.',
+      )
+    } else if (r.overall === 'needs_elevation') {
+      useTransferStore.getState().showNotification(
+        'warning',
+        'USB attach requires administrator permissions.',
+      )
+    } else if (r.overall === 'no_device_found') {
+      useTransferStore.getState().showNotification(
+        'error',
+        'No Apple device found. Check your USB connection and try again.',
+      )
+    }
+  }, [recoverMutation.data])
+
+  // Resolve the initializing spinner when any tier finds a device
+  const anyTierFoundDevice = iosAvailable || readyDevices.length > 0
 
   const [selectedDevice, setSelectedDevice] = useState<IOSDeviceInfo | null>(null)
   const pathValidation = useValidatePath(
@@ -178,14 +245,6 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
   // Handle device folder browser path selection
   const handleDevicePathSelected = (devicePath: string) => {
     if (selectedDevice) {
-      // Guard: reject WPD device paths that slipped into the serial field
-      if (isWPDPath(selectedDevice.serial)) {
-        console.warn(
-          'Device serial looks like a WPD path \u2014 refusing to set as iOS source:',
-          selectedDevice.serial,
-        )
-        return
-      }
       onSourceChange({
         type: 'device',
         device_id: selectedDevice.serial,
@@ -392,6 +451,44 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
             {!iosLoading && allDevices.length === 0 && (
               <>
                 {(() => {
+                  /* Device manager is still probing tiers — show a brief
+                     loading message instead of a premature empty state.
+                     Time out after 30s to avoid an infinite spinner.
+                     Resolve as soon as any tier enumerates a device. */
+                  if (backendStatus.data?.initializing && !anyTierFoundDevice) {
+                    if (initializingTimedOut) {
+                      return (
+                        <div className="space-y-2">
+                          <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-2.5">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+                            <div>
+                              <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                                Connection check taking longer than expected
+                              </p>
+                              <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
+                                Your iPhone may still connect via the Windows driver.
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => recoverMutation.mutate()}
+                            disabled={recoverMutation.isPending}
+                            className="flex items-center gap-1.5 text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${recoverMutation.isPending ? 'animate-spin' : ''}`} />
+                            {recoverMutation.isPending ? 'Recovering...' : 'Try Auto-Recovery'}
+                          </button>
+                        </div>
+                      )
+                    }
+                    return (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Detecting iPhone connection method&hellip;</span>
+                      </div>
+                    )
+                  }
+
                   const activeTier = tier2Status.data?.active_tier
 
                   /* Some tier is actively working, just no devices
@@ -525,9 +622,50 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
             ))}
 
             {/* Prefer Tier 2 setting — advanced option to use open-source bridge */}
-            <PreferTier2Toggle attention={tier2Attention}>
-              {allDevices.length > 0 && <Tier2SetupPanel />}
+            <PreferTier2Toggle attention={tier2Attention} activeTier={backendActiveTier}>
+              {allDevices.length > 0 && backendActiveTier !== 'wpd' && backendActiveTier !== 'tier1' && !readyDevices.some(d => d.active_tier === 'wpd' || d.active_tier === 'tier1') && <Tier2SetupPanel />}
             </PreferTier2Toggle>
+
+              {/* Apple service elevation notification */}
+              <AnimatePresence>
+                {appleElevationCommand && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    className="bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-4 space-y-3"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <Shield className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-semibold text-blue-700 dark:text-blue-300">
+                          Permission Required
+                        </p>
+                        <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                          Administrator privileges are required to start the Apple Mobile Device Service.
+                          A Windows User Account Control dialog will appear.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 ml-6">
+                      <button
+                        type="button"
+                        onClick={handleAppleElevationConfirm}
+                        className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 active:scale-[0.95] transition-all"
+                      >
+                        Continue
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAppleElevationCancel}
+                        className="px-3 py-1.5 bg-muted text-foreground rounded-lg text-xs font-medium hover:bg-muted/80 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               </div>
             </motion.div>
           )}
@@ -542,12 +680,15 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
 // ---------------------------------------------------------------------------
 // PreferTier2Toggle — advanced setting to prefer open-source bridge
 // ---------------------------------------------------------------------------
-function PreferTier2Toggle({ children, attention }: { children?: React.ReactNode; attention?: boolean }) {
+function PreferTier2Toggle({ children, attention, activeTier }: { children?: React.ReactNode; attention?: boolean; activeTier?: string }) {
   const { data: pref } = useDevicePreference()
   const setPref = useSetDevicePreference()
   const [expanded, setExpanded] = useState(false)
+  const tier2Status = useTier2Status()
 
   const preferTier2 = pref?.prefer_tier2 ?? false
+  const bridgeError = tier2Status.data?.bridge_error
+  const wpdActive = activeTier === 'wpd'
 
   const handleToggle = () => {
     setPref.mutate({ prefer_tier2: !preferTier2 })
@@ -603,6 +744,33 @@ function PreferTier2Toggle({ children, attention }: { children?: React.ReactNode
                 </div>
               </label>
               {children && <div className="border-t border-border pt-2">{children}</div>}
+              {bridgeError && wpdActive && (
+                <div className="border-t border-border pt-2">
+                  <div className="flex items-start gap-2 bg-muted/30 rounded-lg p-2.5">
+                    <span className="text-[10px] text-muted-foreground leading-relaxed">
+                      ⓘ Linux bridge unavailable — using Windows driver instead.
+                    </span>
+                  </div>
+                  <details className="mt-1">
+                    <summary className="text-[9px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+                      Show error details
+                    </summary>
+                    <pre className="text-[10px] text-red-600 dark:text-red-400 bg-muted/50 rounded p-2 mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap overflow-wrap-anywhere font-mono leading-relaxed select-text">
+                      {bridgeError}
+                    </pre>
+                  </details>
+                </div>
+              )}
+              {bridgeError && !wpdActive && (
+                <div className="border-t border-border pt-2">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-1">
+                    Bridge log
+                  </p>
+                  <pre className="text-[10px] text-red-600 dark:text-red-400 bg-muted/50 rounded p-2 max-h-32 overflow-y-auto whitespace-pre-wrap overflow-wrap-anywhere font-mono leading-relaxed select-text">
+                    {bridgeError}
+                  </pre>
+                </div>
+              )}
             </div>
           </motion.div>
         )}
@@ -616,6 +784,8 @@ function PreferTier2Toggle({ children, attention }: { children?: React.ReactNode
 // DriverInstallerInline — compact inline driver installer
 // ---------------------------------------------------------------------------
 function DriverInstallerInline() {
+  const installDriver = useInstallDriver()
+  const queryClient = useQueryClient()
   const [installing, setInstalling] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -627,16 +797,34 @@ function DriverInstallerInline() {
     setInstalling(true)
     setError(null)
     try {
-      const response = await fetch('/api/ios-driver/install', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-      if (!response.ok) {
-        const data = await response.json()
-        const detail = typeof data?.detail === 'string' ? data.detail : 'Installation failed'
-        throw new Error(detail)
+      const result = await installDriver.mutateAsync()
+      if (!result.success) {
+        // Fall back to elevated install via Electron IPC
+        if (window.electronAPI?.installDriverElevated) {
+          const elevated = await window.electronAPI.installDriverElevated({
+            executable: 'winget',
+            args: [
+              'install', '-e', '--id', 'Apple.AppleMobileDeviceSupport',
+              '--accept-package-agreements', '--accept-source-agreements', '--silent',
+            ],
+          })
+          if (elevated.success) {
+            queryClient.invalidateQueries({ queryKey: ['device-backend-status'] })
+            queryClient.invalidateQueries({ queryKey: ['ios-devices'] })
+            setInstalling(false)
+            return
+          }
+          setError(elevated.error || `Installation failed (exit code: ${elevated.exitCode})`)
+          setInstalling(false)
+          return
+        }
+        setError(result.error || `Installation failed (exit code: ${result.exit_code})`)
+        setInstalling(false)
+        return
       }
+      queryClient.invalidateQueries({ queryKey: ['device-backend-status'] })
+      queryClient.invalidateQueries({ queryKey: ['ios-devices'] })
+      useTransferStore.getState().showNotification('success', 'Apple Mobile Device Support installed. Please reconnect your iPhone.')
       setInstalling(false)
     } catch (err) {
       setError(extractErrorMessage(err))
@@ -687,6 +875,7 @@ function Tier2SetupPanel() {
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [notificationShown, setNotificationShown] = useState<Record<string, boolean>>({})
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<string | null>(null)
   const [errorCount, setErrorCount] = useState(0)
   const [restartNotification, setRestartNotification] = useState<{ step: Tier2StepPreview } | null>(null)
   const [elevationNotification, setElevationNotification] = useState<{ step: Tier2StepPreview } | null>(null)
@@ -720,6 +909,7 @@ function Tier2SetupPanel() {
   const handleStartStep = async (step: Tier2StepPreview) => {
     setCurrentStep(step.step_id)
     setError(null)
+    setErrorCode(null)
     try {
       const result = await executeStep.mutateAsync({ step_id: step.step_id, confirmed: true })
       if (result.completed) {
@@ -730,6 +920,7 @@ function Tier2SetupPanel() {
         setRestartNotification({ step })
       } else if (result.error) {
         setError(result.error)
+        setErrorCode(result.error_code ?? null)
         setErrorCount(prev => prev + 1)
         setCurrentStep(null)
       }
@@ -749,10 +940,17 @@ function Tier2SetupPanel() {
     setCompletedSteps([])
     setCurrentStep(null)
     setError(null)
+    setErrorCode(null)
     setErrorCount(0)
     setNotificationShown({})
     setRestartNotification(null)
     setElevationNotification(null)
+  }
+
+  const handleRetry = () => {
+    setError(null)
+    setErrorCode(null)
+    setErrorCount(prev => prev - 1)
   }
 
   const handleRestartConfirm = async () => {
@@ -789,8 +987,22 @@ function Tier2SetupPanel() {
     setNotificationShown({})
   }
 
+  const tier2PanelBackendStatus = useDeviceBackendStatus()
+
   // Don't show panel if bridge is already running and devices are accessible
   if (status?.bridge_running && status?.active_tier === 'tier2') {
+    return null
+  }
+
+  // Don't show panel if WPD is already working with a device
+  if (tier2PanelBackendStatus.data?.active_tier === 'wpd') {
+    return null
+  }
+
+  // Don't show panel if any device is already ready on WPD or Tier 1
+  const { data: iosDevices } = useIOSDevices()
+  const readyDevices = iosDevices?.devices.filter(d => d.status === 'ready') || []
+  if (readyDevices.some(d => d.active_tier === 'wpd' || d.active_tier === 'tier1')) {
     return null
   }
 
@@ -904,26 +1116,67 @@ function Tier2SetupPanel() {
         <motion.div
           initial={{ opacity: 0, y: -4 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl p-4 space-y-3"
+          className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl p-4 space-y-3 overflow-hidden"
         >
           <div className="flex items-start gap-2.5">
             <XCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
             <div>
               <p className="text-sm font-semibold text-red-700 dark:text-red-300">Setup Error</p>
-              <p className="text-xs text-red-600 dark:text-red-400 mt-1">{error}</p>
+              {errorCode === 'NO_WSL_DISTRO' ? (
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">
+                  No WSL Linux environment found. Install Ubuntu from the Microsoft Store, then return here and click 'Set up Linux-side tools'.
+                </p>
+              ) : errorCode === 'APT_LOCK_TIMEOUT' || (error && error.includes('--lock-timeout')) ? (
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">
+                  Ubuntu is running background updates. This usually clears in 1–2 minutes — tap 'Retry' to try again.
+                </p>
+              ) : (
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">{error}</p>
+              )}
             </div>
           </div>
           {errorCount >= 1 && (
             <div className="flex gap-2 ml-6">
-              <button
-                type="button"
-                onClick={handleReset}
-                disabled={resetSetup.isPending}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 active:scale-[0.95] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                {resetSetup.isPending ? 'Resetting...' : 'Reset Device Setup'}
-              </button>
+              {errorCode === 'NO_WSL_DISTRO' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isElectron && typeof window.electronAPI?.openExternal === 'function') {
+                      window.electronAPI.openExternal(
+                        'ms-windows-store://pdp/?productid=9PDXGNCFSCZV'
+                      )
+                    } else {
+                      window.open(
+                        'https://apps.microsoft.com/detail/9PDXGNCFSCZV',
+                        '_blank',
+                        'noopener',
+                      )
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 active:scale-[0.95] transition-all"
+                >
+                  Open Microsoft Store
+                </button>
+              ) : errorCode === 'APT_LOCK_TIMEOUT' || (error && error.includes('--lock-timeout')) ? (
+                <button
+                  type="button"
+                  onClick={handleRetry}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-medium hover:bg-amber-700 active:scale-[0.95] transition-all"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Retry
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  disabled={resetSetup.isPending}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700 active:scale-[0.95] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  {resetSetup.isPending ? 'Resetting...' : 'Reset Device Setup'}
+                </button>
+              )}
             </div>
           )}
         </motion.div>
@@ -1302,6 +1555,7 @@ export default function DeviceSetupPage() {
   const storeTransferMode = useTransferStore((s) => s.ui.setupTransferMode)
   const moveConfirmed = useTransferStore((s) => s.ui.setupMoveConfirmed)
   const onlyNewMode = useTransferStore((s) => s.ui.setupOnlyNewMode)
+  const folderLayout = useTransferStore((s) => s.ui.setupFolderLayout)
 
   const setSourcePath = useTransferStore((s) => s.setSetupSourcePath)
   const setDestPath = useTransferStore((s) => s.setSetupDestPath)
@@ -1309,6 +1563,7 @@ export default function DeviceSetupPage() {
   const setStoreTransferMode = useTransferStore((s) => s.setSetupTransferMode)
   const setMoveConfirmed = useTransferStore((s) => s.setSetupMoveConfirmed)
   const setSetupOnlyNewMode = useTransferStore((s) => s.setSetupOnlyNewMode)
+  const setSetupFolderLayout = useTransferStore((s) => s.setSetupFolderLayout)
   const resetSetup = useTransferStore((s) => s.resetSetup)
 
   const defaultTransferMode = useTransferStore((s) => s.ui.defaultTransferMode)
@@ -1319,8 +1574,12 @@ export default function DeviceSetupPage() {
   const createSession = useCreateSession()
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
   const initTransfer = useTransferStore((s) => s.initTransfer)
+  const showNotification = useTransferStore((s) => s.showNotification)
 
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([])
   const [startError, setStartError] = useState<string | null>(null)
+  const [pendingDrive, setPendingDrive] = useState<{ driveLetter: string; volumeName: string | null } | null>(null)
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Source reference — the typed source (either local folder or device)
   const [sourceRef, setSourceRef] = useState<SourceRef | null>(() => {
@@ -1330,8 +1589,6 @@ export default function DeviceSetupPage() {
         const withoutPrefix = sourcePath.slice(IOS_SOURCE_PREFIX.length)
         const slashIdx = withoutPrefix.indexOf('/')
         const deviceId = slashIdx === -1 ? withoutPrefix : withoutPrefix.slice(0, slashIdx)
-        // Guard: reject WPD device IDs from stored legacy paths
-        if (isWPDPath(deviceId)) return null
         return {
           type: 'device',
           device_id: deviceId,
@@ -1383,8 +1640,23 @@ export default function DeviceSetupPage() {
     if (mode === 'copy') setMoveConfirmed(false)
   }, [setStoreTransferMode, setDefaultTransferMode, setMoveConfirmed])
 
+  const handleSelectionConfirm = useCallback((paths: string[]) => {
+    setSelectedFiles(paths)
+    if (paths.length > 0) {
+      showNotification('success', `${paths.length} file(s) selected for transfer.`)
+    } else {
+      showNotification('info', 'Selection cleared. All files will be transferred.')
+    }
+  }, [showNotification])
+
   const handleStart = useCallback(async () => {
     setStartError(null)
+    if (import.meta.env.DEV && selectedFiles.length > 0) {
+      console.log(
+        `[Transfer] Starting session with ${selectedFiles.length} selected file(s). First 3:`,
+        selectedFiles.slice(0, 3),
+      )
+    }
     const name = sessionName.trim() || `backup-${Date.now()}`
     try {
       const session = await createSession.mutateAsync({
@@ -1394,14 +1666,17 @@ export default function DeviceSetupPage() {
         dest_root: destPath,
         transfer_mode: transferMode,
         only_new_since_last_import: isIOSDevice && onlyNewMode,
+        folder_layout: folderLayout,
+        selected_files: selectedFiles.length > 0 ? selectedFiles : null,
       })
       initTransfer(session)
       resetSetup()
+      setSelectedFiles([])
       setCurrentPage('transfer')
     } catch (err) {
       setStartError(extractErrorMessage(err))
     }
-  }, [sessionName, effectiveSourcePath, sourceRef, destPath, transferMode, isIOSDevice, onlyNewMode, createSession, initTransfer, resetSetup, setCurrentPage])
+  }, [sessionName, effectiveSourcePath, sourceRef, destPath, transferMode, isIOSDevice, onlyNewMode, selectedFiles, folderLayout, createSession, initTransfer, resetSetup, setCurrentPage])
 
   // Reset only-new-mode when source changes away from iOS device
   useEffect(() => {
@@ -1409,6 +1684,11 @@ export default function DeviceSetupPage() {
       setSetupOnlyNewMode(false)
     }
   }, [isIOSDevice, onlyNewMode, setSetupOnlyNewMode])
+
+  // Clear selected files when source changes
+  useEffect(() => {
+    setSelectedFiles([])
+  }, [sourceRef])
 
   // Esc key to go back
   useEffect(() => {
@@ -1422,6 +1702,30 @@ export default function DeviceSetupPage() {
     return () => window.removeEventListener('keydown', handler)
   }, [setCurrentPage])
 
+  // Listen for newly connected removable drives (USB flash, SD card, etc.)
+  useEffect(() => {
+    if (!isElectron || !window.electronAPI?.onNewRemovableDrive) return
+
+    const unsub = window.electronAPI.onNewRemovableDrive((data) => {
+      if (sourceRef) return
+      const currentDest = useTransferStore.getState().ui.setupDestPath
+      if (data.driveLetter && currentDest && currentDest.trim().toLowerCase().startsWith(data.driveLetter.toLowerCase())) return
+
+      setPendingDrive(data)
+
+      if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
+      dismissTimerRef.current = setTimeout(() => setPendingDrive(null), 10000)
+    })
+
+    return () => {
+      unsub()
+      if (dismissTimerRef.current) {
+        clearTimeout(dismissTimerRef.current)
+        dismissTimerRef.current = null
+      }
+    }
+  }, [sourceRef])
+
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       {/* Header */}
@@ -1431,6 +1735,59 @@ export default function DeviceSetupPage() {
           Configure source and destination for your backup
         </p>
       </div>
+
+      {/* Removable drive detected banner */}
+      <AnimatePresence>
+        {pendingDrive && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="flex items-center gap-3 px-4 py-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-lg">
+              <HardDrive className="w-5 h-5 text-blue-500 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                  Detected a new drive at {pendingDrive.driveLetter}
+                  {pendingDrive.volumeName ? ` (${pendingDrive.volumeName})` : ''}
+                </p>
+                <p className="text-xs text-blue-600/70 dark:text-blue-400/70">
+                  Use as source for this backup?
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSourceRef({ type: 'local_folder', path: pendingDrive.driveLetter + '\\' })
+                  setPendingDrive(null)
+                  if (dismissTimerRef.current) {
+                    clearTimeout(dismissTimerRef.current)
+                    dismissTimerRef.current = null
+                  }
+                }}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-md transition-colors shrink-0"
+              >
+                Use as source
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingDrive(null)
+                  if (dismissTimerRef.current) {
+                    clearTimeout(dismissTimerRef.current)
+                    dismissTimerRef.current = null
+                  }
+                }}
+                className="p-1 text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 transition-colors shrink-0"
+                aria-label="Dismiss"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Source and Destination Selection */}
       <motion.div
@@ -1448,6 +1805,30 @@ export default function DeviceSetupPage() {
           sourceRef={sourceRef}
           onSourceChange={setSourceRef}
         />
+
+        {/* Source preview panel — inline media picker */}
+        {sourceRef?.type === 'local_folder' && sourceRef.path && (
+          <div className="border border-border rounded-xl p-3 bg-card">
+            <SourcePreviewPanel
+              sourcePath={sourceRef.path}
+              deviceSource={null}
+              onSelectionConfirm={handleSelectionConfirm}
+            />
+          </div>
+        )}
+
+        {sourceRef?.type === 'device' && sourceRef.device_id && sourceRef.device_path && (
+          <div className="border border-border rounded-xl p-3 bg-card">
+            <SourcePreviewPanel
+              sourcePath={null}
+              deviceSource={{
+                device_id: sourceRef.device_id,
+                device_path: sourceRef.device_path,
+              }}
+              onSelectionConfirm={handleSelectionConfirm}
+            />
+          </div>
+        )}
 
         {/* Destination: existing folder picker */}
         <div>
@@ -1485,6 +1866,39 @@ export default function DeviceSetupPage() {
               <FolderOpen className="w-4 h-4" />
               Browse
             </button>
+          </div>
+        </div>
+
+        {/* Folder layout */}
+        <div>
+          <label className="text-sm font-medium text-foreground mb-2 block">
+            Folder Layout
+          </label>
+          <div className="inline-flex gap-0.5 bg-muted rounded-lg p-0.5">
+            {(['year/month/day', 'year/month', 'flat'] as const).map((layout) => (
+              <button
+                key={layout}
+                type="button"
+                onClick={() => setSetupFolderLayout(layout)}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium rounded-md transition-all',
+                  folderLayout === layout
+                    ? 'bg-background text-foreground shadow-xs'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {layout === 'year/month/day' && 'Year / Month / Day'}
+                {layout === 'year/month' && 'Year / Month'}
+                {layout === 'flat' && 'Flat'}
+              </button>
+            ))}
+          </div>
+          <div className="mt-1.5 text-xs text-muted-foreground">
+            Preview: {folderLayout === 'flat'
+              ? 'IMG_0001.jpg'
+              : folderLayout === 'year/month'
+                ? `${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, '0')}/IMG_0001.jpg`
+                : `${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, '0')}/${String(new Date().getDate()).padStart(2, '0')}/IMG_0001.jpg`}
           </div>
         </div>
 
@@ -1727,17 +2141,22 @@ export default function DeviceSetupPage() {
               <Loader2 className="w-4 h-4 animate-spin" />
               Creating session...
             </>
+          ) : selectedFiles.length > 0 ? (
+            <>
+              Transfer {selectedFiles.length} selected file{selectedFiles.length !== 1 ? 's' : ''}
+              <ChevronRight className="w-4 h-4" />
+            </>
           ) : (
             <>
-              Start Backup
+              Transfer all files
               <ChevronRight className="w-4 h-4" />
             </>
           )}
         </motion.button>
         {startError && (
-          <div className="flex items-start gap-2.5 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg p-3.5 mt-3">
+          <div className="flex items-start gap-2.5 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg p-3.5 mt-3 overflow-hidden">
             <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-            <p className="text-xs text-red-600 dark:text-red-400">{startError}</p>
+            <p className="text-xs text-red-600 dark:text-red-400 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">{startError}</p>
           </div>
         )}
         {!canStart && !startError && (

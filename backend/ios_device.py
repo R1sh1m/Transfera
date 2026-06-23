@@ -16,7 +16,6 @@ import logging
 import posixpath
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -131,15 +130,15 @@ async def list_ios_devices() -> list[IOSDevice]:
         return []
 
     try:
-        from pymobiledevice3.usbmux import list_devices
-        from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.exceptions import ConnectionFailedToUsbmuxdError
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.usbmux import list_devices
     except Exception as exc:
         logger.warning("Failed to import pymobiledevice3 usbmux: %s", exc)
         return []
 
     try:
-        mux_devices = await list_devices()
+        mux_devices = list_devices()
     except ConnectionFailedToUsbmuxdError:
         logger.info(
             "usbmuxd not running — Apple Mobile Device Support driver not detected. "
@@ -164,7 +163,7 @@ async def list_ios_devices() -> list[IOSDevice]:
         serial = mux_dev.serial
         try:
             lockdown = await asyncio.wait_for(
-                create_using_usbmux(serial=serial, autopair=False),
+                asyncio.to_thread(create_using_usbmux, serial=serial, autopair=False),
                 timeout=5.0,
             )
             try:
@@ -177,7 +176,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                 # Determine trust status
                 status = DeviceStatus.READY
                 try:
-                    # Attempt to get more info — this requires trust
+                    # Attempt to access all_values — this requires trust
                     _ = lockdown.all_values
                 except Exception:
                     status = DeviceStatus.NOT_TRUSTED
@@ -196,7 +195,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                 ))
             finally:
                 lockdown.close()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Device %s timed out during lockdown — device may be locked", serial)
             devices.append(IOSDevice(
                 serial=serial,
@@ -244,8 +243,7 @@ def check_driver_status() -> str:
         return "no_pymobiledevice3"
 
     try:
-        from pymobiledevice3.usbmux import list_devices as _ld
-        from pymobiledevice3.exceptions import ConnectionFailedToUsbmuxdError
+        pass
     except Exception:
         return "no_pymobiledevice3"
 
@@ -258,7 +256,7 @@ def check_driver_status() -> str:
         sock.connect(("127.0.0.1", 27015))
         sock.close()
         return "ready"
-    except (ConnectionRefusedError, OSError, socket.timeout):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return "no_driver"
     except Exception:
         return "no_driver"
@@ -280,7 +278,7 @@ async def _get_afc_service(serial: str):
 
     try:
         lockdown = await asyncio.wait_for(
-            create_using_usbmux(serial=serial, autopair=True),
+            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True),
             timeout=10.0,
         )
     except ConnectionError:
@@ -289,7 +287,7 @@ async def _get_afc_service(serial: str):
             "is installed (iTunes or Apple Devices from the Microsoft Store) "
             "and the device is connected via USB."
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         raise RuntimeError(
             "Device connection timed out. The device may be locked. "
             "Please unlock the device and tap 'Trust This Computer'."
@@ -304,7 +302,6 @@ async def _get_afc_service(serial: str):
 
     try:
         afc = AfcService(lockdown=lockdown)
-        await afc.__aenter__()
         return afc, lockdown
     except Exception as exc:
         lockdown.close()
@@ -329,12 +326,12 @@ async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFi
     """
     afc, lockdown = await _get_afc_service(serial)
     try:
-        entries = await afc.listdir(path)
+        entries = await asyncio.to_thread(afc.listdir, path)
         result: list[DeviceFileInfo] = []
         for name in entries:
             full_path = posixpath.join(path, name) if path != "/" else f"/{name}"
             try:
-                info = await afc.stat(full_path)
+                info = await asyncio.to_thread(afc.stat, full_path)
                 is_dir = info.get("st_ifmt") == "S_IFDIR"
                 size = int(info.get("st_size", 0))
                 mtime = info.get("st_mtime")
@@ -357,7 +354,7 @@ async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFi
                 ))
         return result
     finally:
-        await afc.aclose()
+        afc.close()
         lockdown.close()
 
 
@@ -365,7 +362,7 @@ async def get_device_file_info(serial: str, path: str) -> DeviceFileInfo:
     """Get info for a single file/directory on the device."""
     afc, lockdown = await _get_afc_service(serial)
     try:
-        info = await afc.stat(path)
+        info = await asyncio.to_thread(afc.stat, path)
         is_dir = info.get("st_ifmt") == "S_IFDIR"
         size = int(info.get("st_size", 0))
         mtime = info.get("st_mtime")
@@ -378,7 +375,7 @@ async def get_device_file_info(serial: str, path: str) -> DeviceFileInfo:
             mtime=mtime_val,
         )
     finally:
-        await afc.aclose()
+        afc.close()
         lockdown.close()
 
 
@@ -390,9 +387,9 @@ async def read_device_file(serial: str, path: str) -> bytes:
     """
     afc, lockdown = await _get_afc_service(serial)
     try:
-        return await afc.get_file_contents(path)
+        return await asyncio.to_thread(afc.get_file_contents, path)
     finally:
-        await afc.aclose()
+        afc.close()
         lockdown.close()
 
 
@@ -400,9 +397,9 @@ async def get_device_info(serial: str) -> dict[str, str]:
     """Get device filesystem info (total capacity, free space, etc.)."""
     afc, lockdown = await _get_afc_service(serial)
     try:
-        return await afc.get_device_info()
+        return await asyncio.to_thread(afc.get_device_info)
     finally:
-        await afc.aclose()
+        afc.close()
         lockdown.close()
 
 
@@ -430,43 +427,45 @@ class AFCFileReader:
     async def open(self):
         """Open the file handle on the device."""
         self._afc, self._lockdown = await _get_afc_service(self.serial)
-        info = await self._afc.stat(self.path)
+        info = await asyncio.to_thread(self._afc.stat, self.path)
         self._size = int(info.get("st_size", 0))
-        self._handle = await self._afc.fopen(self.path)
+        self._handle = await asyncio.to_thread(self._afc.fopen, self.path)
         return self
 
     async def read(self, n: int = -1) -> bytes:
         """Read up to n bytes. -1 reads all remaining."""
-        if self._handle is None:
+        if self._afc is None or self._handle is None:
             return b""
         if n == -1:
             n = self._size - self._pos
         if n <= 0:
             return b""
-        data = await self._afc.fread(self._handle, n)
+        data = await asyncio.to_thread(self._afc.fread, self._handle, n)
         self._pos += len(data)
         return data
 
     async def close(self):
         """Close the file handle and AFC connection."""
-        if self._handle is not None and self._afc is not None:
-            try:
-                await self._afc.fclose(self._handle)
-            except Exception:
-                pass
+        try:
+            if self._handle is not None and self._afc is not None:
+                try:
+                    await asyncio.to_thread(self._afc.fclose, self._handle)
+                except Exception:
+                    pass
+        finally:
             self._handle = None
-        if self._afc is not None:
-            try:
-                await self._afc.aclose()
-            except Exception:
-                pass
-            self._afc = None
-        if self._lockdown is not None:
-            try:
-                self._lockdown.close()
-            except Exception:
-                pass
-            self._lockdown = None
+            if self._afc is not None:
+                try:
+                    self._afc.close()
+                except Exception:
+                    pass
+                self._afc = None
+            if self._lockdown is not None:
+                try:
+                    self._lockdown.close()
+                except Exception:
+                    pass
+                self._lockdown = None
 
     async def __aenter__(self):
         return await self.open()

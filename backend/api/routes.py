@@ -11,17 +11,20 @@ import logging
 import math
 import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import joinedload
 
+from backend.api import websocket as ws_events
+from backend.api.auth import require_local_token
 from backend.api.schemas import (
     BatchInfo,
     BatchList,
@@ -37,22 +40,18 @@ from backend.api.schemas import (
     DiskSpaceRequest,
     DiskSpaceResponse,
     DuplicateCheckRequest,
-    DuplicateReportResponse,
     DuplicateEntrySchema,
+    DuplicateReportResponse,
     DuplicateResolveRequest,
-    ErrorResponse,
     FolderMetadataRequest,
     FolderMetadataResponse,
-    HealthResponse,
-    InstallDriverRequest,
     InstallDriverResponse,
     InstallerStatusResponse,
     IOSBrowseRequest,
     IOSBrowseResponse,
-    IOSDeviceInfoRequest,
     IOSDeviceFileEntry,
+    IOSDeviceInfoRequest,
     IOSDeviceListResponse,
-    IOSDeviceInfo as IOSDeviceInfoSchema,
     MediaItemInfo,
     MediaList,
     PackageVerificationResponse,
@@ -60,6 +59,8 @@ from backend.api.schemas import (
     PathValidateResponse,
     PreflightValidateRequest,
     PreflightValidateResponse,
+    PrescanRequest,
+    PrescanResponse,
     RecentItemProgress,
     ScanRequest,
     ScanResponse,
@@ -69,14 +70,15 @@ from backend.api.schemas import (
     SessionList,
     SessionProgressResponse,
 )
-from backend.api.auth import require_local_token
+from backend.api.schemas import (
+    IOSDeviceInfo as IOSDeviceInfoSchema,
+)
 from backend.api.source_types import (
     SourceRefLocal,
     legacy_string_to_source_ref,
     source_ref_to_legacy_string,
 )
 from backend.api.websocket import manager as ws_manager
-from backend.api import websocket as ws_events
 from backend.config import (
     AUDIO_EXTENSIONS,
     BATCH_SIZE,
@@ -90,7 +92,11 @@ from backend.config import (
     PORT,
     VIDEO_EXTENSIONS,
 )
-from backend.database.manager import create_all_tables, dispose_engine, get_engine, get_session, session_scope
+from backend.database.manager import (
+    dispose_engine,
+    session_scope,
+    set_session_field,
+)
 from backend.database.models import (
     BatchStatus,
     HopStatus,
@@ -99,14 +105,15 @@ from backend.database.models import (
     TransferBatch,
     TransferSession,
 )
-from backend.engines.batch_manager import create_batches, get_batch_items, mark_batch_status
+from backend.device_backend import (
+    DeviceLockedError,
+    DeviceNotTrustedError,
+    WpdDeviceAccessDenied,
+    get_device_backend_manager,
+)
+from backend.engines.batch_manager import create_batches
 from backend.engines.cache_manager import cache_batch
-from backend.engines.duplicate_detector import check_batch
-from backend.engines.importer import _mark_thumbnail_ready, import_batch, purge_hop1_cache_for_completed_items
-from backend.engines.recovery import recover_interrupted_batches
-from backend.engines.reporter import generate_session_report
-from backend.engines.scanner import scan as run_scan
-from backend.device_backend import get_device_backend_manager
+from backend.engines.capture_time import extract_capture_datetime
 from backend.engines.device_import_state import (
     clear_device_state,
     compute_cutoff_from_session,
@@ -115,12 +122,44 @@ from backend.engines.device_import_state import (
     list_all_device_states,
     upsert_device_state,
 )
+from backend.engines.duplicate_detector import check_batch, prescan_against_library
+from backend.engines.importer import (
+    _mark_thumbnail_failed,
+    _mark_thumbnail_ready,
+    import_batch,
+    purge_hop1_cache_for_completed_items,
+)
 from backend.engines.organizer import format_month_folder
+from backend.engines.recovery import recover_interrupted_batches
+from backend.engines.reporter import generate_session_report
+from backend.engines.scanner import scan as run_scan
 from backend.engines.source_reader import DeviceSourceReader
 from backend.engines.thumbnail_cache import thumbnail_cache
 from backend.engines.thumbnailer import generate_thumbnail_bytes
-from backend.ios_device import DeviceStatus, check_driver_status, is_ios_support_available, is_wpd_device_id, list_ios_devices, parse_ios_source
-from backend.ios_driver_installer import get_install_command, get_installer_status as _get_status, verify_package as _verify
+from backend.ios_device import (
+    DeviceStatus,
+    check_driver_status,
+    is_ios_support_available,
+    list_ios_devices,
+    parse_ios_source,
+)
+
+try:
+    from pymobiledevice3.exceptions import (
+        AfcException,
+        ConnectionFailedToUsbmuxdError,
+        DeviceHasPasscodeSetError,
+        LockdownError,
+        MuxException,
+        NotPairedError,
+        PasscodeRequiredError,
+    )
+    _HAS_PYMOBILE_EXC = True
+except ImportError:
+    _HAS_PYMOBILE_EXC = False
+from backend.ios_driver_installer import get_installer_status as _get_status
+from backend.ios_driver_installer import install_driver as _install_driver
+from backend.ios_driver_installer import verify_package as _verify
 from backend.tier2_manager import get_device_manager
 
 logger = logging.getLogger(__name__)
@@ -131,12 +170,27 @@ router = APIRouter(prefix="/api")
 # background task to stop.  Checked inside cache_batch / import_batch loops.
 _cancellation_events: dict[int, asyncio.Event] = {}
 
+# In-memory selected-files map — populated during session creation and consumed
+# during the scan/batch-building phase in _run_transfer_background.  Cleared
+# after batches are created so the memory is released for completed sessions.
+_selected_files_map: dict[int, set[str]] = {}
+
+# Thread/Task locks for session state modifications to prevent concurrent start/resume/pause races
+_session_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_session_lock(session_id: int) -> asyncio.Lock:
+    if session_id not in _session_locks:
+        _session_locks[session_id] = asyncio.Lock()
+    return _session_locks[session_id]
+
 
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 @router.get("/health")
 async def health_check() -> dict:
+    """Return service health status for frontend polling and startup detection."""
     return {"status": "ok", "version": "2.0"}
 
 
@@ -144,19 +198,28 @@ async def health_check() -> dict:
 # Device Backend Status (auto-activation hints for the frontend)
 # ---------------------------------------------------------------------------
 @router.get("/device-backend/status")
-async def device_backend_status() -> dict:
+async def device_backend_status(request: Request) -> dict:
     """Return auto-activation status for Apple driver and WSL bridge.
 
     The frontend uses these fields to show contextual setup cards or
     one-click install prompts on the Dashboard.
     """
     mgr = get_device_backend_manager()
+    init_task = getattr(request.app.state, "device_manager_init_task", None)
+    initializing = init_task is not None and not init_task.done()
+    active_tier = (await mgr.get_active_tier()).value if not initializing else "none"
     return {
         "apple_driver_installable": mgr.apple_driver_installable,
         "apple_driver_package_name": mgr.apple_driver_package_name,
         "apple_driver_package_version": mgr.apple_driver_package_version,
+        "pymobiledevice3_installable": mgr.pymobiledevice3_installable,
         "bridge_auto_started": mgr.bridge_auto_started,
         "wsl_setup_suggested": mgr.wsl_setup_suggested,
+        "initializing": initializing,
+        "active_tier": active_tier,
+        "tier2_available": mgr.tier2_available,
+        "tier2_error": mgr.tier2_error,
+        "ios_available": mgr.ios_available,
     }
 
 
@@ -196,8 +259,16 @@ async def get_config() -> ConfigResponse:
         video_extensions=sorted(VIDEO_EXTENSIONS),
         audio_extensions=sorted(AUDIO_EXTENSIONS),
         document_extensions=sorted(DOCUMENT_EXTENSIONS),
-        local_secret_token=LOCAL_SECRET_TOKEN,
     )
+
+
+@router.get("/local-token")
+async def get_local_token(request: Request) -> dict:
+    """Return the local auth token. Only callable from localhost."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Only callable from localhost")
+    return {"local_secret_token": LOCAL_SECRET_TOKEN}
 
 
 # ---------------------------------------------------------------------------
@@ -248,29 +319,194 @@ async def list_ios_devices() -> IOSDeviceListResponse:
     )
 
 
-@router.post("/ios-devices/browse", response_model=IOSBrowseResponse)
+@router.post("/ios-devices/browse")
 async def browse_ios_device(req: IOSBrowseRequest) -> IOSBrowseResponse:
-    """Browse a directory on a connected iOS device."""
+    """Browse a directory on a connected iOS device.
+
+    Returns detailed error schemas for device-locked, not-trusted, and
+    path-not-found states instead of generic HTTP 400/404, so the
+    Electron frontend can display a contextual prompt (e.g. "Please tap
+    'Trust This Computer' on your iPhone") rather than a bare error toast.
+    """
+    # Normalise path separators at the API boundary.  iOS internal paths
+    # and the WSL bridge both use forward slashes; backslashes from a
+    # Windows file-picker or a WPD-derived path are converted here so
+    # that every downstream backend receives a consistent POSIX-style path.
+    normalised_path = req.path.replace("\\", "/")
+    if not normalised_path.startswith("/"):
+        normalised_path = f"/{normalised_path}"
+    logger.debug(
+        "browse_ios_device: serial=%s path=%r normalised=%r",
+        req.serial, req.path, normalised_path,
+    )
+
     manager = get_device_manager()
 
-    # Verify device is connected and ready via unified manager
+    # Verify device is connected and ready via unified manager.  Rather
+    # than returning a bare 404/400 here, we first sniff the device
+    # status from the most recent listing so we can differentiate
+    # LOCKED / NOT_TRUSTED states early.
     devices, _ = await manager.list_devices()
     device = next((d for d in devices if d.serial == req.serial), None)
+
     if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    if device.status != DeviceStatus.READY:
-        raise HTTPException(status_code=400, detail=f"Device not ready: {device.status.value}")
+        # Device not found in ANY tier's listing.  May have been
+        # disconnected, or no backend can see it yet.
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "disconnected",
+                "message": f"Device {req.serial} is not connected or not reachable. "
+                "Ensure the device is plugged in via USB and unlocked.",
+            },
+        )
+
+    # Early-exit for terminal device states that no backend can work around.
+    if device.status == DeviceStatus.LOCKED:
+        raise HTTPException(
+            status_code=423,
+            detail={
+                "status": "locked",
+                "message": "Your iPhone is locked. Please unlock it and tap "
+                "'Trust This Computer' when prompted, then try again.",
+            },
+        )
+    if device.status == DeviceStatus.NOT_TRUSTED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": "not_trusted",
+                "message": "Please tap 'Trust This Computer' on your iPhone "
+                "and enter your passcode, then try again.",
+            },
+        )
 
     try:
-        entries = await manager.browse_device(req.serial, req.path)
+        entries = await manager.browse_device(req.serial, normalised_path)
+    except DeviceLockedError as exc:
+        raise HTTPException(
+            status_code=423,
+            detail={"status": "locked", "message": exc.message},
+        )
+    except DeviceNotTrustedError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"status": "not_trusted", "message": exc.message},
+        )
+    except WpdDeviceAccessDenied as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "wpd_denied",
+                "message": str(exc),
+            },
+        )
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        error_text = str(exc)
+        exc_lower = error_text.lower()
+        if "locked" in exc_lower or "lock" in exc_lower:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "status": "locked",
+                    "message": "Your iPhone is locked. Please unlock it and "
+                               "tap 'Trust This Computer' when prompted, then try again.",
+                },
+            )
+        if "trust" in exc_lower or "pair" in exc_lower or "paired" in exc_lower:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "status": "not_trusted",
+                    "message": "Please tap 'Trust This Computer' on your "
+                               "iPhone and enter your passcode, then try again.",
+                },
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": error_text},
+        )
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Path not found on device: {req.path}")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "not_found",
+                "message": f"Path not found on device: {normalised_path}",
+            },
+        )
+    except Exception as exc:
+        if _HAS_PYMOBILE_EXC:
+            if isinstance(exc, (PasscodeRequiredError, DeviceHasPasscodeSetError)):
+                raise HTTPException(
+                    status_code=423,
+                    detail={
+                        "status": "locked",
+                        "message": "Your iPhone is locked. Please unlock it and "
+                                   "tap 'Trust This Computer' when prompted, then try again.",
+                    },
+                )
+            if isinstance(exc, NotPairedError):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "status": "not_trusted",
+                        "message": "Please tap 'Trust This Computer' on your iPhone "
+                                   "and enter your passcode, then try again.",
+                    },
+                )
+            if isinstance(exc, (MuxException, ConnectionFailedToUsbmuxdError)):
+                logger.warning(
+                    "browse_ios_device: usbmux error for %s at %s: %s",
+                    req.serial, normalised_path, exc,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "mux_error",
+                        "message": "Device connection lost. Please check the USB cable "
+                                   "and ensure the device is unlocked.",
+                    },
+                )
+            if isinstance(exc, AfcException):
+                logger.warning(
+                    "browse_ios_device: AFC error for %s at %s: %s",
+                    req.serial, normalised_path, exc,
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "status": "afc_error",
+                        "message": f"File system error: {exc}",
+                    },
+                )
+            if isinstance(exc, LockdownError):
+                logger.warning(
+                    "browse_ios_device: lockdown error for %s: %s",
+                    req.serial, exc,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "lockdown_error",
+                        "message": "Failed to establish a secure session with the device. "
+                                   "Please disconnect and reconnect the device.",
+                    },
+                )
+        logger.exception(
+            "Unexpected error browsing device %s at %s",
+            req.serial, normalised_path,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": f"Unexpected error browsing device: {exc}",
+            },
+        )
 
     return IOSBrowseResponse(
         serial=req.serial,
-        path=req.path,
+        path=normalised_path,
         entries=[
             IOSDeviceFileEntry(
                 name=e.name,
@@ -286,22 +522,48 @@ async def browse_ios_device(req: IOSBrowseRequest) -> IOSBrowseResponse:
 
 @router.post("/ios-devices/file-info")
 async def get_ios_device_file_info(req: IOSDeviceInfoRequest) -> IOSDeviceFileEntry:
-    """Get file/directory info for a single path on an iOS device."""
+    """Get file/directory info for a single path on an iOS device.
+
+    Returns structured error responses for locked/not-trusted states
+    (HTTP 423) consistent with the browse endpoint.
+    """
     manager = get_device_manager()
+
+    normalised_path = req.path.replace("\\", "/")
 
     devices, _ = await manager.list_devices()
     device = next((d for d in devices if d.serial == req.serial), None)
     if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    if device.status != DeviceStatus.READY:
-        raise HTTPException(status_code=400, detail=f"Device not ready: {device.status.value}")
+        raise HTTPException(status_code=404, detail={"status": "disconnected", "message": "Device not found"})
+    if device.status == DeviceStatus.LOCKED:
+        raise HTTPException(
+            status_code=423,
+            detail={
+                "status": "locked",
+                "message": "Your iPhone is locked. Please unlock it and tap "
+                "'Trust This Computer' when prompted, then try again.",
+            },
+        )
+    if device.status == DeviceStatus.NOT_TRUSTED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": "not_trusted",
+                "message": "Please tap 'Trust This Computer' on your iPhone "
+                "and enter your passcode, then try again.",
+            },
+        )
 
     try:
-        info = await manager.get_device_file_info(req.serial, req.path)
+        info = await manager.get_device_file_info(req.serial, normalised_path)
+    except DeviceLockedError as exc:
+        raise HTTPException(status_code=423, detail={"status": "locked", "message": exc.message})
+    except DeviceNotTrustedError as exc:
+        raise HTTPException(status_code=403, detail={"status": "not_trusted", "message": exc.message})
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail={"status": "error", "message": str(exc)})
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Path not found on device: {req.path}")
+        raise HTTPException(status_code=404, detail={"status": "not_found", "message": f"Path not found on device: {normalised_path}"})
 
     return IOSDeviceFileEntry(
         name=info.name,
@@ -310,6 +572,51 @@ async def get_ios_device_file_info(req: IOSDeviceInfoRequest) -> IOSDeviceFileEn
         size=info.size,
         mtime=info.mtime,
     )
+
+
+# ---------------------------------------------------------------------------
+# iOS Device Recovery (self-healing connectivity)
+# ---------------------------------------------------------------------------
+@router.post("/ios-devices/recover")
+async def recover_ios_device() -> dict:
+    """
+    Attempt to self-heal iOS device connectivity.
+
+    Two-phase recovery:
+      1. Ensure Apple Mobile Device Service is running (Tier 1).
+      2. If the Apple service is not installed at all, try usbipd
+         passthrough so the WSL bridge (Tier 2) can reach the device.
+
+    Returns a dict with ``service``, ``usb`` sub-results and an ``overall``
+    status string the frontend can use to decide what to show.
+    """
+    mgr = get_device_manager()
+    result: dict = {"service": {}, "usb": {}, "overall": "no_recovery_needed"}
+
+    # Phase 1: ensure the Apple Windows service is running
+    service = await mgr.ensure_apple_service_running()
+    result["service"] = service
+
+    if service["state"] in ("running",):
+        result["overall"] = "service_restored"
+
+    # Phase 2: if service is not_installed, try USB passthrough
+    if service["state"] == "not_installed":
+        usb = await mgr.auto_recover_apple_device()
+        result["usb"] = usb
+        if usb["success"]:
+            result["overall"] = "usb_passthrough_restored"
+        elif usb["needs_bind"]:
+            result["overall"] = "needs_bind"
+        elif usb["needs_elevation"]:
+            result["overall"] = "needs_elevation"
+        else:
+            result["overall"] = "no_device_found"
+
+    if service.get("needs_elevation") and service["state"] != "not_installed":
+        result["overall"] = "elevation_required"
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -340,29 +647,56 @@ async def verify_package() -> PackageVerificationResponse:
 
 
 @router.post("/ios-driver/install", response_model=InstallDriverResponse)
-async def install_driver(_req: InstallDriverRequest, _: None = Depends(require_local_token)) -> InstallDriverResponse:
+async def install_driver(_: None = Depends(require_local_token)) -> InstallDriverResponse:
     """
-    Return the elevated install command for the Electron shell to execute.
+    Install Apple Mobile Device Support via winget (direct subprocess).
 
-    The actual elevation (UAC prompt) is handled by the Electron main process
-    using ShellExecuteW with the "runas" verb. This endpoint only verifies
-    the package and returns the command details.
+    Calls winget directly from Python — no PowerShell Start-Process
+    wrapper.  Output is streamed to the backend logs for visibility.
+    The winget "already installed" exit code is treated as success.
+
+    After a successful install, re-probes the driver status so the
+    frontend banner auto-dismisses.
     """
-    # Verify the package before returning the install command
-    verification = _verify()
-    if not verification.success:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot verify package: {verification.error}",
+    result = await asyncio.to_thread(_install_driver, None, 180)
+
+    if result["success"]:
+        mgr = get_device_backend_manager()
+        await mgr.recheck_driver_installable()
+        return InstallDriverResponse(
+            success=True,
+            exit_code=result["exit_code"],
+            message="Apple Mobile Device Support installed.",
         )
 
-    cmd = get_install_command()
-    package_label = verification.package_name or "Apple Mobile Device Support"
-    return InstallDriverResponse(
-        executable=cmd["executable"],
-        args=cmd["args"],
-        message=f"Ready to install {package_label} (version {verification.version or 'latest'}). Windows will ask for permission.",
-    )
+    message = result["error"] or "Installation failed"
+    raise HTTPException(status_code=400, detail=message)
+
+
+# ---------------------------------------------------------------------------
+# pymobiledevice3 Installer (pip-based, for open-source AFC access)
+# ---------------------------------------------------------------------------
+@router.post("/pymobiledevice3/install")
+async def install_pymobiledevice3() -> dict:
+    """
+    Install pymobiledevice3 via pip so open-source AFC is available.
+
+    Requires that pip is on PATH.  The frontend should call
+    ``/device-backend/status`` after this returns to refresh the
+    ``pymobiledevice3_installable`` flag.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pip", "install", "pymobiledevice3",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return {"success": True, "message": "pymobiledevice3 installed"}
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        return {"success": False, "message": detail or "pip install failed"}
+    except Exception as exc:
+        return {"success": False, "message": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +805,7 @@ async def start_scan(req: ScanRequest, background_tasks: BackgroundTasks) -> Sca
         source_root_str = source_ref_to_legacy_string(source_ref)
 
     dest = Path(req.dest_path).resolve() if req.dest_path else CACHE_DIR
-    session_name = req.session_name or f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    session_name = req.session_name or f"scan-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
 
     # Create session
     async with session_scope() as session:
@@ -504,12 +838,22 @@ async def _run_scan_background(session_id: int, source_path: str) -> None:
 
         # Emit events
         await ws_events.emit_scan_complete(session_id, len(item_ids))
-        for bid in batch_ids:
-            async with session_scope() as session:
-                batch = await session.get(TransferBatch, bid)
-                await ws_events.emit_batch_created(
-                    session_id, bid, batch.batch_number, batch.total_items
-                )
+        async with session_scope() as session:
+            result = await session.execute(
+                select(TransferBatch).where(TransferBatch.id.in_(batch_ids))
+            )
+            batches = list(result.scalars().all())
+
+        if len(batches) < len(batch_ids):
+            logger.warning(
+                "Only retrieved %d of %d batches from database for session %d",
+                len(batches), len(batch_ids), session_id
+            )
+
+        for batch in batches:
+            await ws_events.emit_batch_created(
+                session_id, batch.id, batch.batch_number, batch.total_items
+            )
 
         # Mark session as ready
         async with session_scope() as session:
@@ -548,9 +892,19 @@ async def create_session(req: SessionCreate) -> SessionInfo:
             dest_root=req.dest_root,
             transfer_mode=req.transfer_mode,
             only_new_mode=req.only_new_since_last_import,
+            folder_layout=req.folder_layout,
         )
         session.add(ts)
         await session.flush()
+
+        # Store selected_files in-memory for consumption during batch building
+        if req.selected_files:
+            _selected_files_map[ts.id] = set(req.selected_files)
+            logger.info(
+                "Session %d: %d selected file(s) stored for filtered transfer",
+                ts.id, len(req.selected_files),
+            )
+
         return _session_to_info(ts)
 
 
@@ -591,57 +945,78 @@ async def get_session_detail(session_id: int) -> SessionInfo:
 
 @router.post("/sessions/{session_id}/start", response_model=SessionActionResponse)
 async def start_session(session_id: int, background_tasks: BackgroundTasks) -> SessionActionResponse:
-    async with session_scope() as session:
-        ts = await session.get(TransferSession, session_id)
-        if ts is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        if ts.status not in (SessionStatus.CREATED.value, SessionStatus.PAUSED.value):
-            raise HTTPException(status_code=400, detail=f"Cannot start session in status: {ts.status}")
-        ts.status = SessionStatus.RUNNING.value
-        ts.started_at = datetime.now(timezone.utc)
-        ts.touch()
+    lock = _get_session_lock(session_id)
+    async with lock:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if ts.status not in (SessionStatus.CREATED.value, SessionStatus.PAUSED.value):
+                raise HTTPException(status_code=400, detail=f"Cannot start session in status: {ts.status}")
 
-    # Create or reset the cancellation event so the background task can
-    # listen for cooperative cancellation during Hop 1 / Hop 2 processing.
-    _cancellation_events[session_id] = asyncio.Event()
+            was_paused = ts.status == SessionStatus.PAUSED.value
 
-    background_tasks.add_task(_run_transfer_background, session_id)
+            ts.status = SessionStatus.RUNNING.value
 
-    await ws_events.emit_session_started(session_id)
-    return SessionActionResponse(session_id=session_id, status="running", message="Session started")
+            if was_paused:
+                # Resume — accrue pause time instead of overwriting started_at
+                if ts.paused_at:
+                    paused = ts.paused_at.replace(tzinfo=UTC) if ts.paused_at.tzinfo is None else ts.paused_at
+                    ms = (datetime.now(UTC) - paused).total_seconds() * 1000
+                    ts.total_paused_ms += int(ms)
+                    ts.paused_at = None
+            else:
+                # Fresh start
+                ts.started_at = datetime.now(UTC)
+
+            ts.touch()
+
+        # Create or reset the cancellation event so the background task can
+        # listen for cooperative cancellation during Hop 1 / Hop 2 processing.
+        _cancellation_events[session_id] = asyncio.Event()
+
+        background_tasks.add_task(_run_transfer_background, session_id)
+
+        await ws_events.emit_session_started(session_id)
+        return SessionActionResponse(session_id=session_id, status="running", message="Session started")
 
 
 @router.post("/sessions/{session_id}/pause", response_model=SessionActionResponse)
 async def pause_session(session_id: int) -> SessionActionResponse:
-    async with session_scope() as session:
-        ts = await session.get(TransferSession, session_id)
-        if ts is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        if ts.status != SessionStatus.RUNNING.value:
-            raise HTTPException(status_code=400, detail=f"Cannot pause session in status: {ts.status}")
-        ts.status = SessionStatus.PAUSED.value
-        ts.touch()
+    lock = _get_session_lock(session_id)
+    async with lock:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if ts.status != SessionStatus.RUNNING.value:
+                raise HTTPException(status_code=400, detail=f"Cannot pause session in status: {ts.status}")
+            ts.status = SessionStatus.PAUSED.value
+            ts.paused_at = datetime.now(UTC)
+            ts.touch()
 
-    await ws_events.emit_session_paused(session_id)
-    return SessionActionResponse(session_id=session_id, status="paused", message="Session paused")
+        await ws_events.emit_session_paused(session_id)
+        return SessionActionResponse(session_id=session_id, status="paused", message="Session paused")
 
 
 @router.post("/sessions/{session_id}/cancel", response_model=SessionActionResponse)
 async def cancel_session(session_id: int) -> SessionActionResponse:
-    async with session_scope() as session:
-        ts = await session.get(TransferSession, session_id)
-        if ts is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        ts.status = SessionStatus.CANCELLED.value
-        ts.completed_at = datetime.now(timezone.utc)
-        ts.touch()
+    lock = _get_session_lock(session_id)
+    async with lock:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            ts.status = SessionStatus.CANCELLED.value
+            ts.completed_at = datetime.now(UTC)
+            ts.touch()
 
-    # Signal cooperative cancellation so any in-flight Hop 1 / Hop 2
-    # item loop can stop early rather than waiting for the batch to finish.
-    if session_id in _cancellation_events:
-        _cancellation_events[session_id].set()
+        # Signal cooperative cancellation so any in-flight Hop 1 / Hop 2
+        # item loop can stop early rather than waiting for the batch to finish.
+        if session_id in _cancellation_events:
+            _cancellation_events[session_id].set()
 
-    return SessionActionResponse(session_id=session_id, status="cancelled", message="Session cancelled")
+        return SessionActionResponse(session_id=session_id, status="cancelled", message="Session cancelled")
 
 
 @router.post("/sessions/clear", response_model=ClearResponse)
@@ -658,7 +1033,7 @@ async def clear_sessions(req: ClearSessionsRequest | None = None, _: None = Depe
         # Build the session query
         q = select(TransferSession)
         if older_than_days is not None:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+            cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
             q = q.where(TransferSession.created_at < cutoff)
 
         result = await session.execute(q)
@@ -698,17 +1073,17 @@ async def clear_sessions(req: ClearSessionsRequest | None = None, _: None = Depe
 
         # Delete media items first (FK references batches and sessions)
         await session.execute(
-            MediaItem.__table__.delete().where(MediaItem.session_id.in_(session_ids))
+            delete(MediaItem).where(MediaItem.session_id.in_(session_ids))
         )
 
         # Delete batches (FK references sessions)
         await session.execute(
-            TransferBatch.__table__.delete().where(TransferBatch.session_id.in_(session_ids))
+            delete(TransferBatch).where(TransferBatch.session_id.in_(session_ids))
         )
 
         # Delete sessions
         await session.execute(
-            TransferSession.__table__.delete().where(TransferSession.id.in_(session_ids))
+            delete(TransferSession).where(TransferSession.id.in_(session_ids))
         )
 
         await session.commit()
@@ -863,6 +1238,32 @@ async def _run_transfer_background(session_id: int) -> None:
                 cutoff_datetime=cutoff_datetime,
             )
 
+            # Filter by selected_files if provided
+            selected_set = _selected_files_map.pop(session_id, None)
+            if selected_set is not None:
+                logger.info(
+                    "Session %d: filtering %d scanned items by %d selected file(s)",
+                    session_id, len(item_ids), len(selected_set),
+                )
+                # Query source_paths for scanned items and keep only selected ones
+                async with session_scope() as session:
+                    result = await session.execute(
+                        select(MediaItem.id, MediaItem.source_path).where(
+                            MediaItem.id.in_(item_ids)
+                        )
+                    )
+                    filtered_ids = [
+                        row[0] for row in result.all()
+                        if row[1] in selected_set
+                    ]
+                skipped = len(item_ids) - len(filtered_ids)
+                if skipped:
+                    logger.info(
+                        "Session %d: skipped %d items not in selected set",
+                        session_id, skipped,
+                    )
+                item_ids = filtered_ids
+
             if not item_ids:
                 logger.warning("Session %d: scan found 0 media items at %s", session_id, source_root)
                 async with session_scope() as session:
@@ -874,9 +1275,9 @@ async def _run_transfer_background(session_id: int) -> None:
                             "The preflight validator counts all files, but the scanner "
                             "only processes media files (images, video, audio, documents)."
                         )
-                        ts.completed_at = datetime.now(timezone.utc)
+                        ts.completed_at = datetime.now(UTC)
                         ts.touch()
-                await ws_events.emit_error(session_id, ts.error_message if ts else "No media files found")
+                await ws_events.emit_error(session_id, (ts.error_message if ts else None) or "No media files found")
                 try:
                     report_path = await generate_session_report(session_id)
                     async with session_scope() as session:
@@ -894,15 +1295,27 @@ async def _run_transfer_background(session_id: int) -> None:
                 ts = await session.get(TransferSession, session_id)
                 if ts:
                     ts.total_items = len(item_ids)
+                    ts.total_files = len(item_ids)
+                    ts.total_batches = len(batch_ids)
                     ts.touch()
 
             await ws_events.emit_scan_complete(session_id, len(item_ids))
-            for bid in batch_ids:
-                async with session_scope() as session:
-                    batch = await session.get(TransferBatch, bid)
-                    await ws_events.emit_batch_created(
-                        session_id, bid, batch.batch_number, batch.total_items
-                    )
+            async with session_scope() as session:
+                result = await session.execute(
+                    select(TransferBatch).where(TransferBatch.id.in_(batch_ids))
+                )
+                batches = list(result.scalars().all())
+
+            if len(batches) < len(batch_ids):
+                logger.warning(
+                    "Only retrieved %d of %d batches from database for session %d",
+                    len(batches), len(batch_ids), session_id
+                )
+
+            for batch in batches:
+                await ws_events.emit_batch_created(
+                    session_id, batch.id, batch.batch_number, batch.total_items
+                )
 
             # Re-fetch batches now that they exist
             async with session_scope() as session:
@@ -923,6 +1336,7 @@ async def _run_transfer_background(session_id: int) -> None:
         duplicate_pause_requested = False
 
         for batch in batches:
+            await set_session_field(session_id, "current_batch", batch.batch_number)
             # Guard: skip batches whose items are already fully processed on a
             # prior resume.  The query filter above already excludes terminal
             # statuses, but this provides defence-in-depth against race
@@ -933,14 +1347,22 @@ async def _run_transfer_background(session_id: int) -> None:
             ):
                 continue
 
-            # Check if session was paused/cancelled
+            # Check if session was paused, cancelled, or deleted
             async with session_scope() as session:
                 ts = await session.get(TransferSession, session_id)
-                if ts and ts.status != SessionStatus.RUNNING.value:
+                if ts is None or ts.status != SessionStatus.RUNNING.value:
                     return
 
             # --- Pre-flight duplicate check ---
-            report = await check_batch(batch.id)
+            try:
+                report = await check_batch(batch.id)
+            except ValueError:
+                logger.warning(
+                    "Batch %d not found (session may have been cleared) — aborting session %d",
+                    batch.id, session_id,
+                )
+                return
+
             if report.has_duplicates:
                 async with session_scope() as _s:
                     _ts_check = await _s.get(TransferSession, session_id)
@@ -949,11 +1371,10 @@ async def _run_transfer_background(session_id: int) -> None:
                         and _ts_check.resolved_batch_id == batch.id
                         and _ts_check.duplicate_resolutions_json is not None
                     )
-                    _db_resolutions = (
-                        json.loads(_ts_check.duplicate_resolutions_json)
-                        if _db_resolved and _ts_check.duplicate_resolutions_json
-                        else []
-                    )
+                    _db_resolutions = []
+                    if _ts_check is not None and _ts_check.resolved_batch_id == batch.id:
+                        if isinstance(_ts_check.duplicate_resolutions_json, str):
+                            _db_resolutions = json.loads(_ts_check.duplicate_resolutions_json)
                 if _db_resolved:
                     if _db_resolutions:
                         await _apply_duplicate_resolutions(batch.id, _db_resolutions)
@@ -1017,7 +1438,7 @@ async def _run_transfer_background(session_id: int) -> None:
             async def _hop1_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
                 await ws_events.emit_hop1_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
 
-            cached = await cache_batch(batch.id, cache_dir=CACHE_DIR, on_file_progress=_hop1_progress_cb, cancel_event=cancel_event)
+            cached = await cache_batch(batch.id, cache_dir=CACHE_DIR, on_file_progress=_hop1_progress_cb, cancel_event=cancel_event, session_id=session_id)
             await ws_events.emit_hop1_complete(session_id, batch.id, cached)
 
             # --- Hop 2: Cache -> Destination ---
@@ -1028,7 +1449,7 @@ async def _run_transfer_background(session_id: int) -> None:
             async def _hop2_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
                 await ws_events.emit_hop2_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
 
-            imported = await import_batch(batch.id, dest_root=dest_root, cache_dir=CACHE_DIR, on_file_progress=_hop2_progress_cb, cancel_event=cancel_event)
+            imported = await import_batch(batch.id, dest_root=dest_root, cache_dir=CACHE_DIR, on_file_progress=_hop2_progress_cb, cancel_event=cancel_event, session_id=session_id)
             await ws_events.emit_hop2_complete(session_id, batch.id, imported)
             await ws_events.emit_batch_complete(session_id, batch.id, batch.batch_number, "completed")
 
@@ -1039,12 +1460,14 @@ async def _run_transfer_background(session_id: int) -> None:
                     ts.status = SessionStatus.PAUSED.value
                     ts.touch()
             await ws_events.emit_session_paused(session_id)
+            _cancellation_events.pop(session_id, None)
             return
 
         # All batches done
         final_total = 0
         final_completed = 0
         final_failed = 0
+        final_status = SessionStatus.COMPLETED.value
         async with session_scope() as session:
             ts = await session.get(TransferSession, session_id)
             if ts:
@@ -1085,7 +1508,7 @@ async def _run_transfer_background(session_id: int) -> None:
                     ts.status = SessionStatus.FAILED.value
                     ts.error_message = "Session completed with 0 items — no media files were processed"
 
-                ts.completed_at = datetime.now(timezone.utc)
+                ts.completed_at = datetime.now(UTC)
                 ts.touch()
                 final_total = ts.total_items
                 final_completed = ts.completed_items
@@ -1093,12 +1516,29 @@ async def _run_transfer_background(session_id: int) -> None:
                 final_status = ts.status
 
 
-        await ws_events.emit_session_complete(session_id, {
-            "status": final_status if ts else SessionStatus.COMPLETED.value,
-            "total_items": final_total,
-            "completed_items": final_completed,
-            "failed_items": final_failed,
-        })
+        # Compute elapsed wall-clock seconds (excluding pause time)
+        elapsed_seconds = 0
+        if ts and ts.started_at and ts.completed_at:
+            started = ts.started_at.replace(tzinfo=UTC) if ts.started_at.tzinfo is None else ts.started_at
+            completed = ts.completed_at.replace(tzinfo=UTC) if ts.completed_at.tzinfo is None else ts.completed_at
+            raw_ms = (completed - started).total_seconds() * 1000
+            elapsed_ms = max(0, raw_ms - (ts.total_paused_ms or 0))
+            elapsed_seconds = int(elapsed_ms / 1000)
+
+        if final_status == SessionStatus.COMPLETED.value:
+            await ws_manager.broadcast(session_id, "session_completed", {
+                "session_id": session_id,
+                "imported_files": ts.imported_files if ts else 0,
+                "failed_files": ts.failed_files if ts else 0,
+                "elapsed_seconds": elapsed_seconds,
+            })
+        elif final_status == SessionStatus.COMPLETED_WITH_ERRORS.value:
+            await ws_manager.broadcast(session_id, "session_completed_with_errors", {
+                "session_id": session_id,
+                "imported_files": ts.imported_files if ts else 0,
+                "failed_files": ts.failed_files if ts else 0,
+                "elapsed_seconds": elapsed_seconds,
+            })
 
         # --- Update device import cutoff for incremental imports ---
         try:
@@ -1120,9 +1560,13 @@ async def _run_transfer_background(session_id: int) -> None:
                         device_name = None
                         try:
                             devices = await list_ios_devices()
-                            device = next((d for d in devices if d.serial == serial), None)
-                            if device:
-                                device_name = device.name
+                            devices_list = devices.devices if hasattr(devices, "devices") else devices
+                            if isinstance(devices_list, (list, tuple)):
+                                for d in devices_list:
+                                    d_serial = d.get("serial") if isinstance(d, dict) else getattr(d, "serial", None)
+                                    if d_serial == serial:
+                                        device_name = d.get("name") if isinstance(d, dict) else getattr(d, "name", None)
+                                        break
                         except Exception:
                             pass
 
@@ -1164,7 +1608,6 @@ async def _run_transfer_background(session_id: int) -> None:
                 ts.status = SessionStatus.FAILED.value
                 ts.error_message = str(exc)
                 ts.touch()
-            exc_status = ts.status if ts else SessionStatus.FAILED.value
 
         # --- Post-session report generation (failure case) ---
         try:
@@ -1184,7 +1627,10 @@ async def _run_transfer_background(session_id: int) -> None:
 # ---------------------------------------------------------------------------
 @router.post("/duplicates/check", response_model=DuplicateReportResponse)
 async def check_duplicates(req: DuplicateCheckRequest) -> DuplicateReportResponse:
-    report = await check_batch(req.batch_id)
+    try:
+        report = await check_batch(req.batch_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return DuplicateReportResponse(
         batch_id=report.batch_id,
         session_id=report.session_id,
@@ -1227,6 +1673,15 @@ async def check_duplicates(req: DuplicateCheckRequest) -> DuplicateReportRespons
     )
 
 
+@router.post("/duplicates/prescan", response_model=PrescanResponse)
+async def prescan_duplicates(req: PrescanRequest) -> PrescanResponse:
+    """Fast hash-free pre-scan: compare candidates against library by (filename, size)."""
+    result = await prescan_against_library(
+        [c.model_dump() for c in req.candidates]
+    )
+    return PrescanResponse(**result)
+
+
 @router.post("/sessions/{session_id}/duplicates/resolve", response_model=SessionActionResponse)
 async def resolve_duplicates(
     session_id: int,
@@ -1234,28 +1689,37 @@ async def resolve_duplicates(
     background_tasks: BackgroundTasks,
 ) -> SessionActionResponse:
     """Receive duplicate resolution decisions and resume the session."""
-    async with session_scope() as session:
-        ts = await session.get(TransferSession, session_id)
-        if ts is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        if ts.status != SessionStatus.PAUSED.value:
-            raise HTTPException(status_code=400, detail=f"Session is not paused (status: {ts.status})")
+    lock = _get_session_lock(session_id)
+    async with lock:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if ts.status != SessionStatus.PAUSED.value:
+                raise HTTPException(status_code=400, detail=f"Session is not paused (status: {ts.status})")
 
-        ts.status = SessionStatus.RUNNING.value
-        ts.resolved_batch_id = request.batch_id
-        ts.duplicate_resolutions_json = json.dumps([r.model_dump() for r in request.resolutions])
-        ts.touch()
+            # Accrue pause time
+            if ts.paused_at:
+                paused = ts.paused_at.replace(tzinfo=UTC) if ts.paused_at.tzinfo is None else ts.paused_at
+                ms = (datetime.now(UTC) - paused).total_seconds() * 1000
+                ts.total_paused_ms += int(ms)
+                ts.paused_at = None
 
-    # Re-trigger background processing
-    background_tasks.add_task(_run_transfer_background, session_id)
-    await ws_events.emit_session_started(session_id)
-    await ws_events.emit_duplicates_resolved(session_id, request.batch_id)
+            ts.status = SessionStatus.RUNNING.value
+            ts.resolved_batch_id = request.batch_id
+            ts.duplicate_resolutions_json = json.dumps([r.model_dump() for r in request.resolutions])
+            ts.touch()
 
-    return SessionActionResponse(
-        session_id=session_id,
-        status="running",
-        message="Duplicates resolved, transfer resumed",
-    )
+        # Re-trigger background processing
+        background_tasks.add_task(_run_transfer_background, session_id)
+        await ws_events.emit_session_started(session_id)
+        await ws_events.emit_duplicates_resolved(session_id, request.batch_id)
+
+        return SessionActionResponse(
+            session_id=session_id,
+            status="running",
+            message="Duplicates resolved, transfer resumed",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1265,12 +1729,12 @@ async def resolve_duplicates(
 async def list_media(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
-    session_id: Optional[int] = Query(None),
-    hop1_status: Optional[str] = Query(None),
-    hop2_status: Optional[str] = Query(None),
-    final_status: Optional[str] = Query(None),
-    extension: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    session_id: int | None = Query(None),
+    hop1_status: str | None = Query(None),
+    hop2_status: str | None = Query(None),
+    final_status: str | None = Query(None),
+    extension: str | None = Query(None),
+    search: str | None = Query(None),
 ) -> MediaList:
     async with session_scope() as session:
         # Build base query
@@ -1300,8 +1764,9 @@ async def list_media(
         pages = math.ceil(total / page_size) if total > 0 else 1
 
         offset = (page - 1) * page_size
+        order_col = func.coalesce(MediaItem.original_capture_time, MediaItem.created_at)
         result = await session.execute(
-            q.order_by(MediaItem.id).offset(offset).limit(page_size)
+            q.order_by(order_col.desc()).offset(offset).limit(page_size)
         )
         items = [_media_to_info(mi) for mi in result.scalars().all()]
 
@@ -1317,18 +1782,134 @@ async def list_media(
 # ---------------------------------------------------------------------------
 # Thumbnail serving
 # ---------------------------------------------------------------------------
+_PLACEHOLDER_JPEG: bytes | None = None
+
+
+def _get_placeholder_jpeg() -> bytes:
+    """Return a small grey placeholder JPEG for failed thumbnails.
+
+    Generated once with Pillow and cached at module level for reuse.
+    """
+    global _PLACEHOLDER_JPEG
+    if _PLACEHOLDER_JPEG is not None:
+        return _PLACEHOLDER_JPEG
+
+    try:
+        import io
+
+        from PIL import Image, ImageDraw
+
+        size = 120
+        img = Image.new("RGB", (size, size), (229, 231, 235))
+        draw = ImageDraw.Draw(img)
+        m = 24
+        inner = (m, m, size - m, size - m)
+        draw.rectangle(inner, outline=(156, 163, 175), width=2)
+        draw.line((m + 4, m + 4, size - m - 4, size - m - 4), fill=(156, 163, 175), width=2)
+        draw.line((size - m - 4, m + 4, m + 4, size - m - 4), fill=(156, 163, 175), width=2)
+
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70)
+        _PLACEHOLDER_JPEG = buf.getvalue()
+    except Exception:
+        _PLACEHOLDER_JPEG = b""
+
+    return _PLACEHOLDER_JPEG
+
+
 @router.get("/media/{item_id}/thumbnail")
 async def get_media_thumbnail(item_id: int):
-    """Serve a thumbnail image from the in-memory LRU cache."""
+    """Serve a thumbnail image from the in-memory LRU cache.
+
+    Returns a placeholder JPEG for items whose thumbnail generation failed
+    or whose source file is missing, eliminating 404 responses that
+    trigger endless frontend retry loops.
+
+    If the thumbnail has not been generated yet (status == "pending"),
+    generates it synchronously on this request — the "generate on demand"
+    pattern — and caches the result before responding.
+
+    Response headers include ``X-Thumbnail-Status`` (``"ready"`` or
+    ``"failed"``) so the frontend can distinguish real thumbnails from
+    placeholders if needed.
+    """
     data = thumbnail_cache.get(item_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail="Thumbnail not in memory")
+    if data is not None:
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "ETag": f'"{item_id}"',
+                "X-Thumbnail-Status": "ready",
+            },
+        )
+
+    async with session_scope() as session:
+        db_item = await session.get(MediaItem, item_id)
+
+    if db_item is None:
+        raise HTTPException(status_code=404, detail="Media item not found")
+
+    if db_item.thumbnail_status == "failed":
+        return Response(
+            content=_get_placeholder_jpeg(),
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "X-Thumbnail-Status": "failed",
+            },
+        )
+
+    file_path = Path(db_item.source_path)
+    if file_path.is_file():
+        data = generate_thumbnail_bytes(file_path)
+        if data:
+            thumbnail_cache.put(item_id, data)
+            async with session_scope() as session:
+                upd = await session.get(MediaItem, item_id)
+                if upd:
+                    upd.thumbnail_path = "memory"
+                    upd.thumbnail_status = "ready"
+            return Response(
+                content=data,
+                media_type="image/jpeg",
+                headers={
+                    "Cache-Control": "public, max-age=86400",
+                    "ETag": f'"{item_id}"',
+                    "X-Thumbnail-Status": "ready",
+                },
+            )
+        else:
+            async with session_scope() as session:
+                upd = await session.get(MediaItem, item_id)
+                if upd:
+                    upd.thumbnail_status = "failed"
 
     return Response(
-        content=data,
+        content=_get_placeholder_jpeg(),
         media_type="image/jpeg",
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "public, max-age=86400",
+            "X-Thumbnail-Status": "failed",
+        },
     )
+
+
+@router.get("/media/{item_id}/thumbnail/status")
+async def get_thumbnail_status(item_id: int):
+    """Return the thumbnail generation status for a media item.
+
+    The frontend can poll this before showing the thumbnail <img> element
+    so it knows whether to expect a real image or fallback placeholder.
+    """
+    async with session_scope() as session:
+        db_item = await session.get(MediaItem, item_id)
+    if db_item is None:
+        raise HTTPException(status_code=404, detail="Media item not found")
+    if thumbnail_cache.has(item_id):
+        return {"status": "ready"}
+    return {"status": db_item.thumbnail_status}
 
 
 @router.get("/media/thumbnail-cache-stats")
@@ -1362,15 +1943,16 @@ async def regenerate_thumbnails():
     """Kick off background thumbnail generation for all completed items
     that are missing a ``thumbnail_path``.
 
-    Returns immediately with a count of eligible items and a count of items
-    whose source files are missing (stale).  The actual generation runs in a
-    background thread so the HTTP response is fast.
+    Returns immediately with counts of eligible, succeeded, and failed items
+    (including the IDs of failed items) so the frontend can update its state.
+    The actual generation runs in a background thread so the HTTP response is fast.
     """
     async with session_scope() as session:
         q = (
             select(MediaItem)
             .options(joinedload(MediaItem.session))
             .where(MediaItem.thumbnail_path.is_(None))
+            .where(MediaItem.thumbnail_status != "failed")
             .where(MediaItem.final_status == HopStatus.COMPLETED.value)
         )
         result = await session.execute(q)
@@ -1413,6 +1995,8 @@ async def regenerate_thumbnails():
         if src_missing and dst_missing:
             stale_count += 1
 
+    failed_ids: list[int] = []
+
     def _generate_all() -> None:
         loop = asyncio.new_event_loop()
         try:
@@ -1441,6 +2025,7 @@ async def regenerate_thumbnails():
                         loop.run_until_complete(
                             _remove_orphaned_media_item(item_id)
                         )
+                        failed_ids.append(item_id)
                         continue
 
                     data = generate_thumbnail_bytes(file_path)
@@ -1451,8 +2036,15 @@ async def regenerate_thumbnails():
                         logger.info("Thumbnail regen: item %d OK (%d bytes)", item_id, len(data))
                     else:
                         logger.warning("Thumbnail regen: generation returned None for item %d", item_id)
+                        loop.run_until_complete(_mark_thumbnail_failed(item_id))
+                        failed_ids.append(item_id)
                 except Exception as exc:
                     logger.warning("Thumbnail regen: failed for item %d: %s", item_id, exc)
+                    try:
+                        loop.run_until_complete(_mark_thumbnail_failed(item_id))
+                    except Exception:
+                        pass
+                    failed_ids.append(item_id)
         finally:
             loop.close()
 
@@ -1461,7 +2053,10 @@ async def regenerate_thumbnails():
 
     return {
         "message": "Thumbnail generation started",
-        "count": len(items),
+        "total": len(items),
+        "succeeded": len(items) - len(failed_ids),
+        "failed": len(failed_ids),
+        "failed_ids": failed_ids,
         "stale_count": stale_count,
     }
 
@@ -1484,7 +2079,7 @@ async def clear_library(_: None = Depends(require_local_token)) -> ClearResponse
             select(func.count(MediaItem.id))
         )).scalar() or 0
 
-        await session.execute(MediaItem.__table__.delete())
+        await session.execute(delete(MediaItem))
         await session.commit()
 
     cache_files_removed = _clear_cache_dir()
@@ -1533,133 +2128,194 @@ async def get_session_progress(session_id: int) -> SessionProgressResponse:
     updates on top of this baseline, but polling this endpoint is the
     **only** requirement for correctness.
     """
-    async with session_scope() as session:
-        ts = await session.get(TransferSession, session_id)
-        if ts is None:
-            raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is None:
+                raise HTTPException(status_code=404, detail="Session not found")
 
-        active_batch = None
-        current_item_id = None
-        current_file_name = ""
-        current_hop = ""
-        hop1_progress = 0
-        hop2_progress = 0
-        batch_completed = 0
-        batch_total = 0
+            active_batch = None
+            current_item_id = None
+            current_file_name = ""
+            current_hop = ""
+            hop1_progress = 0
+            hop2_progress = 0
+            batch_completed = 0
+            batch_total = 0
 
-        # Find the active (in-progress) batch
-        result = await session.execute(
-            select(TransferBatch)
-            .where(
-                TransferBatch.session_id == session_id,
-                TransferBatch.status.in_([
-                    BatchStatus.PROCESSING.value,
-                    BatchStatus.LOADING.value,
-                    BatchStatus.ARCHIVED.value,
-                ]),
+            # Find the active (in-progress) batch
+            result = await session.execute(
+                select(TransferBatch)
+                .where(
+                    TransferBatch.session_id == session_id,
+                    TransferBatch.status.in_([
+                        BatchStatus.PROCESSING.value,
+                        BatchStatus.LOADING.value,
+                        BatchStatus.ARCHIVED.value,
+                    ]),
+                )
+                .order_by(TransferBatch.batch_number)
+                .limit(1)
             )
-            .order_by(TransferBatch.batch_number)
-            .limit(1)
-        )
-        active_batch = result.scalars().first()
+            active_batch = result.scalars().first()
 
-        if active_batch:
-            batch_total = active_batch.total_items
-            batch_completed = active_batch.completed_items
+            if active_batch:
+                batch_total = active_batch.total_items
+                batch_completed = active_batch.completed_items
 
-            # Get items in the active batch for hop progress calculation
-            items_result = await session.execute(
+                # Get items in the active batch for hop progress calculation
+                items_result = await session.execute(
+                    select(MediaItem)
+                    .where(MediaItem.batch_id == active_batch.id)
+                    .order_by(MediaItem.id)
+                )
+                batch_items = list(items_result.scalars().all())
+
+                # Find current item: the most recently updated non-terminal item
+                active_items = [
+                    item for item in batch_items
+                    if item.final_status not in (
+                        HopStatus.COMPLETED.value, HopStatus.FAILED.value,
+                        HopStatus.SKIPPED.value,
+                    )
+                ]
+                active_items.sort(key=lambda i: i.updated_at, reverse=True)
+
+                if active_items:
+                    current = active_items[0]
+                    current_item_id = current.id
+                    current_file_name = current.file_name
+                    if current.hop1_status == HopStatus.COMPLETED.value:
+                        current_hop = "hop2"
+                    elif current.hop1_status in (
+                        HopStatus.TRANSFERRING.value,
+                        HopStatus.HASHING.value,
+                        HopStatus.SCANNING.value,
+                        HopStatus.SCANNED.value,
+                        HopStatus.HASHED.value,
+                        HopStatus.PENDING.value,
+                        HopStatus.FAILED.value,
+                    ):
+                        current_hop = "hop1"
+                    else:
+                        current_hop = "hop1"
+
+                # Compute hop progress percentages
+                total = len(batch_items) if batch_items else 1
+                hop1_done = sum(
+                    1 for item in batch_items
+                    if item.hop1_status in (
+                        HopStatus.COMPLETED.value, HopStatus.SKIPPED.value,
+                    )
+                )
+                hop2_done = sum(
+                    1 for item in batch_items
+                    if item.hop2_status in (
+                        HopStatus.COMPLETED.value, HopStatus.SKIPPED.value,
+                    )
+                )
+                hop1_progress = round((hop1_done / total) * 100)
+                hop2_progress = round((hop2_done / total) * 100)
+
+            # Recent items with thumbnails (for the Media Preview panel).
+            # Use a generous limit (200) so that when items arrive progressively
+            # the frontend sees them arrive and can accumulate them, rather than
+            # having earlier items silently pushed out of a tight 12-item window.
+            recent_result = await session.execute(
                 select(MediaItem)
-                .where(MediaItem.batch_id == active_batch.id)
-                .order_by(MediaItem.id)
-            )
-            batch_items = list(items_result.scalars().all())
-
-            # Find current item: the most recently updated non-terminal item
-            active_items = [
-                item for item in batch_items
-                if item.final_status not in (
-                    HopStatus.COMPLETED.value, HopStatus.FAILED.value,
-                    HopStatus.SKIPPED.value,
+                .where(
+                    MediaItem.session_id == session_id,
+                    MediaItem.thumbnail_path.isnot(None),
                 )
+                .order_by(MediaItem.updated_at.desc())
+                .limit(200)
+            )
+            recent_items = [
+                RecentItemProgress(
+                    item_id=item.id,
+                    file_name=item.file_name,
+                    hop1_status=item.hop1_status,
+                    hop2_status=item.hop2_status,
+                    thumbnail_url=f"/api/media/{item.id}/thumbnail" if item.thumbnail_path else None,
+                    updated_at=item.updated_at,
+                )
+                for item in recent_result.scalars().all()
             ]
-            active_items.sort(key=lambda i: i.updated_at, reverse=True)
 
-            if active_items:
-                current = active_items[0]
-                current_item_id = current.id
-                current_file_name = current.file_name
-                if current.hop1_status == HopStatus.COMPLETED.value:
-                    current_hop = "hop2"
-                elif current.hop1_status in (
-                    HopStatus.TRANSFERRING.value, HopStatus.HASHING.value,
-                ):
-                    current_hop = "hop1"
-                else:
-                    current_hop = "hop2"
+        total_files = ts.total_files or ts.total_items
+        progress_pct = round((ts.imported_files / total_files) * 100, 1) if total_files > 0 else 0.0
 
-            # Compute hop progress percentages
-            total = len(batch_items) if batch_items else 1
-            hop1_done = sum(
-                1 for item in batch_items
-                if item.hop1_status in (
-                    HopStatus.COMPLETED.value, HopStatus.SKIPPED.value,
-                )
-            )
-            hop2_done = sum(
-                1 for item in batch_items
-                if item.hop2_status in (
-                    HopStatus.COMPLETED.value, HopStatus.SKIPPED.value,
-                )
-            )
-            hop1_progress = round((hop1_done / total) * 100)
-            hop2_progress = round((hop2_done / total) * 100)
+        # --- Server-side elapsed / ETA / speed computation ---
+        now = datetime.now(UTC)
+        elapsed_seconds = 0
+        eta_seconds: int | None = None
+        speed = 0.0
 
-        # Recent items with thumbnails (for the Media Preview panel).
-        # Use a generous limit (200) so that when items arrive progressively
-        # the frontend sees them arrive and can accumulate them, rather than
-        # having earlier items silently pushed out of a tight 12-item window.
-        recent_result = await session.execute(
-            select(MediaItem)
-            .where(
-                MediaItem.session_id == session_id,
-                MediaItem.thumbnail_path.isnot(None),
+        if ts.started_at:
+            active_pause_ms = 0
+            if ts.paused_at:
+                paused = ts.paused_at.replace(tzinfo=UTC) if ts.paused_at.tzinfo is None else ts.paused_at
+                active_pause_ms = (now - paused).total_seconds() * 1000
+            started = ts.started_at.replace(tzinfo=UTC) if ts.started_at.tzinfo is None else ts.started_at
+            elapsed_ms = max(
+                0,
+                (now - started).total_seconds() * 1000
+                - ts.total_paused_ms
+                - active_pause_ms,
             )
-            .order_by(MediaItem.updated_at.desc())
-            .limit(200)
+            elapsed_seconds = int(elapsed_ms / 1000)
+
+            # Compute rolling speed from speed_samples
+            if ts.speed_samples:
+                try:
+                    samples = json.loads(ts.speed_samples)
+                    if len(samples) >= 2:
+                        dt = samples[-1]["ts"] - samples[0]["ts"]
+                        dc = samples[-1]["count"] - samples[0]["count"]
+                        if dt > 0:
+                            speed = dc / dt
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    speed = 0.0
+
+            remaining = total_files - ts.imported_files
+            if speed > 0.05:
+                eta_seconds = int(remaining / speed)
+
+        return SessionProgressResponse(
+            session_id=session_id,
+            status=ts.status,
+            total_items=ts.total_items,
+            completed_items=ts.completed_items,
+            failed_items=ts.failed_items,
+            total_files=total_files,
+            cached_files=ts.cached_files,
+            imported_files=ts.imported_files,
+            failed_files=ts.failed_files,
+            current_batch=ts.current_batch,
+            total_batches=ts.total_batches,
+            progress_percent=progress_pct,
+            current_item_id=current_item_id,
+            current_file_name=current_file_name,
+            current_hop=current_hop,
+            active_batch_id=active_batch.id if active_batch else None,
+            active_batch_number=active_batch.batch_number if active_batch else 0,
+            active_batch_status=active_batch.status if active_batch else "",
+            active_batch_total=batch_total,
+            active_batch_completed=batch_completed,
+            active_batch_hop1_progress=hop1_progress,
+            active_batch_hop2_progress=hop2_progress,
+            recent_items=recent_items,
+            started_at=ts.started_at,
+            completed_at=ts.completed_at,
+            elapsed_seconds=elapsed_seconds,
+            eta_seconds=eta_seconds,
+            speed_files_per_sec=round(speed, 2),
         )
-        recent_items = [
-            RecentItemProgress(
-                item_id=item.id,
-                file_name=item.file_name,
-                hop1_status=item.hop1_status,
-                hop2_status=item.hop2_status,
-                thumbnail_url=f"/api/media/{item.id}/thumbnail" if item.thumbnail_path else None,
-                updated_at=item.updated_at,
-            )
-            for item in recent_result.scalars().all()
-        ]
-
-    return SessionProgressResponse(
-        session_id=session_id,
-        status=ts.status,
-        total_items=ts.total_items,
-        completed_items=ts.completed_items,
-        failed_items=ts.failed_items,
-        current_item_id=current_item_id,
-        current_file_name=current_file_name,
-        current_hop=current_hop,
-        active_batch_id=active_batch.id if active_batch else None,
-        active_batch_number=active_batch.batch_number if active_batch else 0,
-        active_batch_status=active_batch.status if active_batch else "",
-        active_batch_total=batch_total,
-        active_batch_completed=batch_completed,
-        active_batch_hop1_progress=hop1_progress,
-        active_batch_hop2_progress=hop2_progress,
-        recent_items=recent_items,
-        started_at=ts.started_at,
-        completed_at=ts.completed_at,
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.getLogger(__name__).error(f"get_session_progress error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -1896,12 +2552,6 @@ async def preflight_validate(req: PreflightValidateRequest) -> PreflightValidate
             raise HTTPException(status_code=400, detail=f"Preflight validation failed: {exc}")
     else:
         # Device source: estimate size from device path (best-effort)
-        if is_wpd_device_id(source_ref.device_id):
-            raise HTTPException(
-                status_code=400,
-                detail="Device ID looks like a Windows device path, not an iPhone UDID. "
-                       "Please re-select your iPhone from the iOS device panel.",
-            )
         reader = DeviceSourceReader(
             device_id=source_ref.device_id,
             device_path=source_ref.device_path,
@@ -2012,6 +2662,7 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
         completed_items=ts.completed_items,
         failed_items=ts.failed_items,
         only_new_mode=ts.only_new_mode,
+        folder_layout=ts.folder_layout,
         total_bytes_volume=ts.total_bytes_volume,
         session_report_path=ts.session_report_path,
         created_at=ts.created_at,
@@ -2060,6 +2711,103 @@ async def get_session_report(session_id: int, fmt: str = "html"):
     )
 
 
+@router.post("/admin/backfill-metadata")
+async def backfill_metadata(_: None = Depends(require_local_token)):
+    """
+    One-time migration: backfill ``original_capture_time`` for all existing
+    records where it is NULL.
+
+    Reads metadata from files already on the destination HDD (or falls back
+    to the Hop 1 cache) to determine the original capture date.
+
+    Runs in a background thread; returns immediately with counts.
+    """
+    async with session_scope() as session:
+        q = select(MediaItem).where(MediaItem.original_capture_time.is_(None))
+        result = await session.execute(q)
+        items = list(result.scalars().all())
+
+        item_data = []
+        for item in items:
+            dest_root = None
+            if item.session is not None:
+                dest_root = item.session.dest_root
+            item_data.append({
+                "id": item.id,
+                "dest_root": Path(dest_root) if dest_root else None,
+                "file_name": item.file_name,
+                "source_path": item.source_path,
+            })
+
+    if not items:
+        return {"message": "No items need backfill", "total": 0}
+
+    updated = 0
+    failed = 0
+    failed_ids: list[int] = []
+
+    def _backfill_all() -> None:
+        nonlocal updated, failed
+        for entry in item_data:
+            item_id = entry["id"]
+            dest_root = entry["dest_root"]
+            source_path = entry["source_path"]
+            # Try destination first, then Hop 1 cache, then source
+            candidates = []
+            if dest_root:
+                candidates.append(dest_root / entry["file_name"])
+            candidates.append(Path(source_path))
+
+            file_path = None
+            for c in candidates:
+                if c.is_file():
+                    file_path = c
+                    break
+
+            if file_path is None:
+                logger.warning("Backfill: no file found for item %d", item_id)
+                failed_ids.append(item_id)
+                failed += 1
+                continue
+
+            try:
+                capture_dt = extract_capture_datetime(file_path)
+                _backfill_sync(item_id, capture_dt)
+                updated += 1
+                logger.info("Backfill: item %d <- %s", item_id, capture_dt.isoformat())
+            except Exception as exc:
+                logger.warning("Backfill failed for item %d: %s", item_id, exc)
+                failed_ids.append(item_id)
+                failed += 1
+
+    t = threading.Thread(target=_backfill_all, daemon=True, name="backfill-metadata")
+    t.start()
+
+    return {
+        "message": "Metadata backfill started",
+        "total": len(items),
+        "updated": updated,
+        "failed": failed,
+        "failed_ids": failed_ids,
+    }
+
+
+def _backfill_sync(item_id: int, capture_dt: datetime) -> None:
+    """Synchronous DB update used from the backfill background thread."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        async def _update() -> None:
+            async with session_scope() as session:
+                db_item = await session.get(MediaItem, item_id)
+                if db_item is not None:
+                    db_item.original_capture_time = capture_dt
+                    db_item.touch()
+        loop.run_until_complete(_update())
+    finally:
+        loop.close()
+
+
 def _media_to_info(mi: MediaItem) -> MediaItemInfo:
     return MediaItemInfo(
         id=mi.id,
@@ -2072,7 +2820,8 @@ def _media_to_info(mi: MediaItem) -> MediaItemInfo:
         hop2_status=mi.hop2_status,
         final_status=mi.final_status,
         live_photo_group=mi.live_photo_group,
-        thumbnail_url=f"/api/media/{mi.id}/thumbnail" if mi.thumbnail_path else None,
+        thumbnail_url=f"/api/media/{mi.id}/thumbnail",
+        thumbnail_status=mi.thumbnail_status,
         date_taken=mi.date_taken,
         date_source=mi.date_source,
         error_message=mi.error_message,

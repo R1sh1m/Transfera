@@ -32,7 +32,7 @@ async function fetchLocalToken(): Promise<void> {
   let delay = 500
   while (!_localToken) {
     try {
-      const r = await fetch(`${API_BASE_URL}/api/config`)
+      const r = await fetch(`${API_BASE_URL}/api/local-token`)
       if (r.ok) {
         const cfg = await r.json()
         if (cfg.local_secret_token) {

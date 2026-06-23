@@ -11,11 +11,9 @@ detection — never a replacement for it.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.manager import session_scope
 from backend.database.models import (
@@ -36,7 +34,7 @@ CUTOFF_SAFETY_OVERLAP = timedelta(seconds=60)
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------
-async def get_device_state(device_id: str) -> Optional[DeviceImportState]:
+async def get_device_state(device_id: str) -> DeviceImportState | None:
     """Return the import state for a device, or None if no record exists."""
     async with session_scope() as session:
         result = await session.execute(
@@ -47,7 +45,7 @@ async def get_device_state(device_id: str) -> Optional[DeviceImportState]:
         return result.scalar_one_or_none()
 
 
-async def get_cutoff_datetime(device_id: str) -> Optional[datetime]:
+async def get_cutoff_datetime(device_id: str) -> datetime | None:
     """
     Return the effective cutoff datetime for a device (with safety overlap
     already subtracted), or None if no cutoff exists.
@@ -76,7 +74,7 @@ async def list_all_device_states() -> list[DeviceImportState]:
 # ---------------------------------------------------------------------------
 async def upsert_device_state(
     device_id: str,
-    device_name: Optional[str],
+    device_name: str | None,
     cutoff: datetime,
     session_id: int,
 ) -> DeviceImportState:
@@ -147,7 +145,7 @@ async def clear_device_state(device_id: str) -> bool:
 # ---------------------------------------------------------------------------
 async def compute_cutoff_from_session(
     session_id: int,
-) -> Optional[datetime]:
+) -> datetime | None:
     """
     Compute the new cutoff datetime after a session reaches a final state.
 

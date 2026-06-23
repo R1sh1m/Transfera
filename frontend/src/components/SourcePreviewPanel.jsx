@@ -1,34 +1,51 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, ImageOff, Upload, Image, Film, SlidersHorizontal } from 'lucide-react'
-import { CheckCircle } from 'lucide-react'
+import { CheckCircle, AlertTriangle, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import ErrorBoundary from './ErrorBoundary'
 
 const API_BASE = window.location.origin || 'http://127.0.0.1:47821'
 const THUMBNAIL_SIZE = 200
 const GRID_COLUMNS = 4
+// Raised from 6 → 12 to saturate the parallel thumbnail worker pool on the backend.
+// The backend now has up to 8 pre-scan workers + expanded uvicorn threadpool,
+// so 12 concurrent requests keep them fully occupied without overwhelming the AFC layer.
+const MAX_CONCURRENT_THUMBS = 12
 
-// --- Thumbnail request queue (module-level, shared across all cells) ---
-const _thumbQueue = []
-let _activeThumbRequests = 0
-const _MAX_CONCURRENT_THUMBS = 4
+// --- Per-panel thumbnail request queue ---
+// Created fresh each time the panel mounts / resets, so stale callbacks
+// from a previous sort/path never clog the queue of a new render.
+function createThumbQueue() {
+  let active = 0
+  const queue = []
 
-function _requestThumbSlot(onGranted) {
-  if (_activeThumbRequests < _MAX_CONCURRENT_THUMBS) {
-    _activeThumbRequests++
-    onGranted()
-  } else {
-    _thumbQueue.push(onGranted)
+  function request(onGranted) {
+    if (active < MAX_CONCURRENT_THUMBS) {
+      active++
+      onGranted()
+    } else {
+      queue.push(onGranted)
+    }
   }
-}
 
-function _releaseThumbSlot() {
-  _activeThumbRequests--
-  if (_thumbQueue.length > 0) {
-    const next = _thumbQueue.shift()
-    _activeThumbRequests++
-    next()
+  function release() {
+    // Guard against going negative (e.g. double-release)
+    if (active > 0) active--
+    if (queue.length > 0 && active < MAX_CONCURRENT_THUMBS) {
+      const next = queue.shift()
+      active++
+      next()
+    }
   }
+
+  // Drain the queue (called on sort/path change so stale callbacks are discarded)
+  function reset() {
+    queue.length = 0
+    active = 0
+  }
+
+  return { request, release, reset }
 }
 
 function formatBytes(bytes) {
@@ -56,48 +73,83 @@ function totalSelectedSize(items, selectedSet) {
   return bytes
 }
 
-function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isActive, makeThumbnailUrl }) {
+function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isFocused, cellIndex, makeThumbnailUrl, thumbQueue }) {
   const cellRef = useRef(null)
   const [loadState, setLoadState] = useState('none') // none | loading | loaded | error
   const [imgSrc, setImgSrc] = useState(null)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef(null)
+  // Track whether this particular item has been queued already
   const slotGrantedRef = useRef(false)
+  // Track whether the slot was granted but the image hasn't finished yet
+  // (so we release on unmount if needed)
+  const slotHeldRef = useRef(false)
 
-  // IntersectionObserver: request a thumbnail slot when cell enters viewport
+  // Reset state whenever the item identity changes (e.g. sort order flip reuses cells)
+  const prevItemIdRef = useRef(null)
+  if (prevItemIdRef.current !== item.id) {
+    prevItemIdRef.current = item.id
+    // Synchronously reset so the effect below sees a clean slate.
+    // We can't call setState here (would cause re-render loop), so we use refs to gate
+    // the observer, and set state only through the normal flow.
+    slotGrantedRef.current = false
+    slotHeldRef.current = false
+    retryCountRef.current = 0
+  }
+
+  // IntersectionObserver: request a thumbnail slot when the cell enters viewport.
+  // IMPORTANT: this effect does NOT depend on `loadState` — that caused a new observer
+  // to be created on every state change, leading to the observer firing multiple times.
+  // Instead we use refs to guard against double-requests.
   useEffect(() => {
     const el = cellRef.current
     if (!el) return
+
+    // If this cell already has a slot (or loaded), don't re-observe
+    if (slotGrantedRef.current) return
+
+    const scrollContainer = el.closest('.overflow-y-auto') || el.closest('.overflow-auto') || null
+
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) {
-          if (loadState === 'none' && !slotGrantedRef.current) {
-            slotGrantedRef.current = true
-            const url = makeThumbnailUrl(item)
-            _requestThumbSlot(() => {
-              setImgSrc(url)
-              setLoadState('loading')
-            })
-          }
+        if (entry.isIntersecting && !slotGrantedRef.current) {
+          slotGrantedRef.current = true
+          slotHeldRef.current = true
+          const url = makeThumbnailUrl(item)
+          thumbQueue.request(() => {
+            setImgSrc(url)
+            setLoadState('loading')
+          })
           observer.unobserve(el)
         }
       },
-      { rootMargin: '200px' },
+      // Increased to 1200px so thumbnails start loading well before the user
+      // scrolls to them, and using the nearest scrollPort ancestor as root.
+      { root: scrollContainer, rootMargin: '1200px' },
     )
     observer.observe(el)
     return () => observer.disconnect()
-  }, [item, makeThumbnailUrl, loadState])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id, makeThumbnailUrl, thumbQueue])
 
-  // Cleanup retry timer on unmount
+  // On unmount: release the slot if we're still holding it (avoids permanent queue stall)
   useEffect(() => {
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      if (slotHeldRef.current) {
+        slotHeldRef.current = false
+        thumbQueue.release()
+      }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleLoad = () => {
+    if (slotHeldRef.current) {
+      slotHeldRef.current = false
+      thumbQueue.release()
+    }
     setLoadState('loaded')
-    _releaseThumbSlot()
   }
 
   const handleError = () => {
@@ -112,8 +164,11 @@ function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isActiv
         setLoadState('loading')
       }, delay)
     } else {
+      if (slotHeldRef.current) {
+        slotHeldRef.current = false
+        thumbQueue.release()
+      }
       setLoadState('error')
-      _releaseThumbSlot()
     }
   }
 
@@ -121,18 +176,18 @@ function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isActiv
     <div
       ref={cellRef}
       role="button"
-      tabIndex={0}
       onClick={onToggle}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onToggle() }}
+      data-cell-index={cellIndex}
+      aria-label={`${item.filename}, ${isSelected ? 'selected' : 'not selected'}`}
       className={cn(
         'relative aspect-square rounded-lg overflow-hidden cursor-pointer group bg-muted',
-        isActive && 'ring-2 ring-action ring-offset-1',
+        isFocused && 'outline-2 outline-[#378ADD] outline-offset-[-2px] shadow-[0_0_0_3px_rgba(55,138,221,0.25)]',
       )}
     >
       {/* Loading shimmer */}
       {loadState === 'loading' && (
         <div className="absolute inset-0 bg-muted">
-          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent bg-[length:200%_100%] animate-[shimmer_1.5s_infinite]" />
+          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent shimmer-animate" />
         </div>
       )}
 
@@ -159,6 +214,8 @@ function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isActiv
 
       {/* Selection circle — top right */}
       <div
+        role="checkbox"
+        aria-checked={isSelected}
         className={cn(
           'absolute top-1.5 right-1.5 w-5 h-5 rounded-full flex items-center justify-center transition-all duration-150',
           isSelected
@@ -206,7 +263,7 @@ function SkeletonGrid({ count = 12 }) {
       {Array.from({ length: count }).map((_, i) => (
         <div key={i} className="aspect-square rounded-lg bg-muted relative overflow-hidden">
           <div
-            className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent bg-[length:200%_100%] animate-[shimmer_1.5s_infinite]"
+            className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent shimmer-animate"
             style={{ animationDelay: `${i * 0.05}s` }}
           />
         </div>
@@ -224,7 +281,33 @@ function EmptyState() {
   )
 }
 
-export default function SourcePreviewPanel({
+function SourcePreviewFallback({ onRetry }) {
+  return (
+    <div className="border border-border rounded-xl p-3 bg-card">
+      <div className="flex flex-col items-center justify-center py-8 text-center space-y-3">
+        <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center">
+          <AlertTriangle className="w-5 h-5 text-destructive" />
+        </div>
+        <div>
+          <p className="text-sm font-medium text-foreground">Preview unavailable</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Preview unavailable — you can still proceed with a full directory transfer.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:bg-primary/90 transition-colors"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Retry
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SourcePreviewPanelInner({
   sourcePath,
   deviceSource,
   onSelectionConfirm,
@@ -235,13 +318,21 @@ export default function SourcePreviewPanel({
   const [loading, setLoading] = useState(false)
   const [metadata, setMetadata] = useState({ total: 0, photos: 0, videos: 0, total_size_bytes: 0 })
   const [likelyDupPaths, setLikelyDupPaths] = useState(new Set())
-  const [activeIndex, setActiveIndex] = useState(0)
+  const [focusedIndex, setFocusedIndex] = useState(null)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [sortBy, setSortBy] = useState('newest')
 
   const abortRef = useRef(null)
   const mountedRef = useRef(true)
+  const gridRef = useRef(null)
+
+  // Each time source/sort changes we create a fresh queue so stale callbacks
+  // from the previous render can't corrupt the new batch of thumbnails.
+  const thumbQueueRef = useRef(null)
+  if (!thumbQueueRef.current) {
+    thumbQueueRef.current = createThumbQueue()
+  }
 
   function getPreviewUrl(page, pageSize, sortBy) {
     if (deviceSource) {
@@ -291,7 +382,7 @@ export default function SourcePreviewPanel({
     if (!sourcePath && !deviceSource) {
       setItems([])
       setSelected(new Set())
-      setActiveIndex(0)
+      setFocusedIndex(null)
       setPage(1)
       setTotalPages(1)
       setLoading(false)
@@ -304,9 +395,10 @@ export default function SourcePreviewPanel({
 
     setLoading(true)
     if (page === 1) {
+      // Reset the thumb queue so stale callbacks from the old sort/page don't fire
+      thumbQueueRef.current.reset()
       setItems([])
-      setSelected(new Set())
-      setActiveIndex(0)
+      setFocusedIndex(null)
     }
 
     const url = getPreviewUrl(page, 100, sortBy)
@@ -319,7 +411,7 @@ export default function SourcePreviewPanel({
       .then((data) => {
         if (cancelled) return
         setItems(prev => page === 1 ? (data.items || []) : [...prev, ...(data.items || [])])
-        setActiveIndex(0)
+        if (page === 1) setFocusedIndex(null)
         setMetadata({
           total: data.total || 0,
           photos: data.photos || 0,
@@ -338,6 +430,7 @@ export default function SourcePreviewPanel({
       cancelled = true
       controller.abort()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourcePath, deviceSource?.device_id, deviceSource?.device_path, page, sortBy])
 
   // Pre-scan: check items against library by (filename, size) — no hashing
@@ -386,9 +479,12 @@ export default function SourcePreviewPanel({
     return items.filter((item) => item.type === filter)
   }, [items, filter])
 
-  // Clamp activeIndex when visibleItems shrinks (e.g. filter change)
+  // Clamp focusedIndex when visibleItems shrinks (e.g. filter change)
   useEffect(() => {
-    setActiveIndex((prev) => Math.min(prev, Math.max(0, visibleItems.length - 1)))
+    setFocusedIndex((prev) => {
+      if (prev === null) return null
+      return Math.min(prev, Math.max(0, visibleItems.length - 1))
+    })
   }, [visibleItems.length])
 
   const allVisibleSelected = useMemo(() => {
@@ -412,41 +508,49 @@ export default function SourcePreviewPanel({
     }
   }, [visibleItems, allVisibleSelected])
 
-  // Keyboard navigation and global shortcuts
-  useEffect(() => {
-    if (!sourcePath && !deviceSource) return
-    const handler = (e) => {
-      if (visibleItems.length === 0) return
+  const handleKeyDown = useCallback((e) => {
+    if (visibleItems.length === 0) return
 
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
-        e.preventDefault()
-        handleSelectAll()
-        return
-      }
-
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        e.preventDefault()
-        setActiveIndex((prev) => {
-          let next = prev
-          if (e.key === 'ArrowUp') next = prev - GRID_COLUMNS
-          if (e.key === 'ArrowDown') next = prev + GRID_COLUMNS
-          if (e.key === 'ArrowLeft') next = prev - 1
-          if (e.key === 'ArrowRight') next = prev + 1
-          return Math.max(0, Math.min(next, visibleItems.length - 1))
-        })
-        return
-      }
-
-      if (e.key === ' ' || e.key === 'Enter') {
-        if (e.target?.getAttribute?.('role') === 'button') return
-        e.preventDefault()
-        const item = visibleItems[activeIndex]
-        if (item) toggleItem(item.abs_path)
-      }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+      e.preventDefault()
+      handleSelectAll()
+      return
     }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [sourcePath, deviceSource, visibleItems, handleSelectAll, toggleItem, activeIndex])
+
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      e.preventDefault()
+      setFocusedIndex((prev) => {
+        if (prev === null) return 0
+        const COLS = GRID_COLUMNS
+        if (e.key === 'ArrowRight') return (prev + 1) % visibleItems.length
+        if (e.key === 'ArrowLeft') return (prev - 1 + visibleItems.length) % visibleItems.length
+        if (e.key === 'ArrowDown') return (prev + COLS) % visibleItems.length
+        if (e.key === 'ArrowUp') return (prev - COLS + visibleItems.length) % visibleItems.length
+        return prev
+      })
+      return
+    }
+
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault()
+      if (focusedIndex === null) return
+      const item = visibleItems[focusedIndex]
+      if (item) toggleItem(item.abs_path)
+    }
+  }, [visibleItems, handleSelectAll, toggleItem, focusedIndex])
+
+  const handleGridBlur = useCallback((e) => {
+    if (gridRef.current && !gridRef.current.contains(e.relatedTarget)) {
+      setFocusedIndex(null)
+    }
+  }, [])
+
+  // Scroll focused cell into view
+  useEffect(() => {
+    if (focusedIndex === null) return
+    const cell = gridRef.current?.querySelector(`[data-cell-index="${focusedIndex}"]`)
+    if (cell) cell.scrollIntoView({ block: 'nearest' })
+  }, [focusedIndex])
 
   const selectedCount = selected.size
   const selectedBytes = totalSelectedSize(items, selected)
@@ -482,11 +586,13 @@ export default function SourcePreviewPanel({
       {/* Filter pills + sort row */}
       {!loading && items.length > 0 && (
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1" role="tablist">
             {(['all', 'photo', 'video']).map((f) => (
               <button
                 key={f}
                 type="button"
+                role="tab"
+                aria-selected={filter === f}
                 onClick={() => setFilter(f)}
                 className={cn(
                   'px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors',
@@ -515,7 +621,14 @@ export default function SourcePreviewPanel({
             <SlidersHorizontal className="w-3 h-3 shrink-0" />
             <select
               value={sortBy}
-              onChange={(e) => { setSortBy(e.target.value); setPage(1); setItems([]); }}
+              onChange={(e) => {
+                // Reset queue before switching sort so stale callbacks
+                // from the previous sort don't run in the new batch.
+                thumbQueueRef.current.reset()
+                setSortBy(e.target.value)
+                setPage(1)
+                setItems([])
+              }}
               className="bg-transparent text-xs text-muted-foreground border-none outline-none cursor-pointer hover:text-foreground transition-colors"
             >
               <option value="newest">Newest first</option>
@@ -578,19 +691,30 @@ export default function SourcePreviewPanel({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="grid grid-cols-4 gap-0.5"
           >
-            {visibleItems.map((item, index) => (
-              <MediaThumbCell
-                key={item.id}
-                item={item}
-                isSelected={selected.has(item.abs_path)}
-                onToggle={() => toggleItem(item.abs_path)}
-                isLikelyDuplicate={likelyDupPaths.has(item.abs_path)}
-                isActive={index === activeIndex}
-                makeThumbnailUrl={getThumbnailUrl}
-              />
-            ))}
+            <div
+              ref={gridRef}
+              tabIndex={0}
+              onKeyDown={handleKeyDown}
+              onBlur={handleGridBlur}
+              role="grid"
+              aria-label={`Source preview — ${items.length} files`}
+              className="grid grid-cols-4 gap-0.5 focus-visible:outline-none"
+            >
+              {visibleItems.map((item, index) => (
+                <MediaThumbCell
+                  key={item.id}
+                  item={item}
+                  isSelected={selected.has(item.abs_path)}
+                  onToggle={() => { setFocusedIndex(index); gridRef.current?.focus(); toggleItem(item.abs_path) }}
+                  isLikelyDuplicate={likelyDupPaths.has(item.abs_path)}
+                  isFocused={index === focusedIndex}
+                  cellIndex={index}
+                  makeThumbnailUrl={getThumbnailUrl}
+                  thumbQueue={thumbQueueRef.current}
+                />
+              ))}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -634,5 +758,17 @@ export default function SourcePreviewPanel({
         </button>
       </div>
     </div>
+  )
+}
+
+export default function SourcePreviewPanel(props) {
+  const [resetKey, setResetKey] = useState(0)
+  return (
+    <ErrorBoundary
+      key={resetKey}
+      fallback={<SourcePreviewFallback onRetry={() => setResetKey(k => k + 1)} />}
+    >
+      <SourcePreviewPanelInner key={resetKey} {...props} />
+    </ErrorBoundary>
   )
 }

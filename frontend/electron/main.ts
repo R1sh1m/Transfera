@@ -1,5 +1,5 @@
 import http from 'http'
-import { app, BrowserWindow, ipcMain, dialog, shell, Notification } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, nativeImage } from 'electron'
 import { spawn, execFile, type ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
@@ -20,9 +20,12 @@ const isDev = !app.isPackaged
 const GRACEFUL_SHUTDOWN_WAIT = 4000
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
 let backendProcess: ChildProcess | null = null
 let isQuitting = false
 let externalBackend = false
+let driveWatcherInterval: ReturnType<typeof setInterval> | null = null
+let knownRemovableDrives = new Set<string>()
 
 // ---------------------------------------------------------------------------
 // Backend process management
@@ -299,6 +302,88 @@ function resolveIconPath(): string {
 }
 
 // ---------------------------------------------------------------------------
+// System tray
+// ---------------------------------------------------------------------------
+function createTray(): void {
+  const icon = nativeImage.createFromPath(resolveIconPath())
+  tray = new Tray(icon)
+
+  tray.setToolTip('Transfera')
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Open Transfera',
+      click: () => {
+        if (mainWindow) {
+          if (mainWindow.isMinimized()) mainWindow.restore()
+          if (!mainWindow.isVisible()) mainWindow.show()
+          mainWindow.focus()
+        }
+      },
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true
+        shutdownBackend().finally(() => app.exit(0))
+      },
+    },
+  ])
+  tray.setContextMenu(contextMenu)
+
+  tray.on('click', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      if (!mainWindow.isVisible()) mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Removable drive watcher — polls wmic every 5 s for newly-connected drives.
+// ---------------------------------------------------------------------------
+function startDriveWatcher(): void {
+  if (process.platform !== 'win32') return
+
+  const poll = () => {
+    execFile(
+      'wmic',
+      ['logicaldisk', 'where', 'drivetype=2', 'get', 'caption,volumename', '/format:csv'],
+      { timeout: 5000 },
+      (error, stdout) => {
+        if (error || !mainWindow || mainWindow.isDestroyed()) return
+        const currentDrives = new Set<string>()
+        const lines = stdout.trim().split('\n')
+        for (let i = 1; i < lines.length; i++) {
+          const line = (lines[i] ?? '').trim()
+          if (!line) continue
+          const parts = line.split(',')
+          if (parts.length >= 2) {
+            const caption = (parts[1] ?? '').trim()
+            const volumeName = (parts[2] ?? '').trim()
+            if (caption) {
+              currentDrives.add(caption)
+              if (!knownRemovableDrives.has(caption)) {
+                mainWindow.webContents.send('device:new-removable-drive', {
+                  driveLetter: caption,
+                  volumeName: volumeName || null,
+                })
+              }
+            }
+          }
+        }
+        knownRemovableDrives = currentDrives
+      },
+    )
+  }
+
+  poll()
+  driveWatcherInterval = setInterval(poll, 5000)
+}
+
+// ---------------------------------------------------------------------------
 // Window creation
 // ---------------------------------------------------------------------------
 function createWindow(): void {
@@ -337,11 +422,24 @@ function createWindow(): void {
     if (input.key === 'F12' && input.type === 'keyDown') {
       mainWindow?.webContents.toggleDevTools()
     }
+    // Ctrl+Q to quit the app permanently
+    if ((input.control || input.meta) && input.key.toLowerCase() === 'q' && input.type === 'keyDown') {
+      isQuitting = true
+      shutdownBackend().finally(() => app.exit(0))
+    }
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Intercept close → hide to tray unless actually quitting
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault()
+      mainWindow?.hide()
+    }
   })
 
   mainWindow.on('closed', () => {
@@ -392,8 +490,8 @@ function registerIPC(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
-  // Window controls
-  ipcMain.handle('window:minimize', () => mainWindow?.minimize())
+  // Window controls — minimize to tray instead of taskbar
+  ipcMain.handle('window:minimize', () => mainWindow?.hide())
   ipcMain.handle('window:maximize', () => {
     if (mainWindow?.isMaximized()) {
       mainWindow.unmaximize()
@@ -407,6 +505,13 @@ function registerIPC(): void {
   ipcMain.handle('window:close', () => mainWindow?.close())
 
   ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
+
+  // Tray progress — updates the Windows taskbar progress overlay (0.0–1.0, null to clear)
+  ipcMain.handle('tray:set-progress', (_event, value: number | null) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(value !== null ? value : -1)
+    }
+  })
 
   ipcMain.handle('shell:showItemInFolder', (_event, fullPath: string) => {
     shell.showItemInFolder(fullPath)
@@ -689,6 +794,8 @@ app.whenReady().then(async () => {
   const envExternalBackend = process.env.TRANSFERA_EXTERNAL_BACKEND === '1'
 
   createWindow()
+  createTray()
+  startDriveWatcher()
 
   if (envExternalBackend) {
     externalBackend = true
@@ -730,6 +837,10 @@ app.on('window-all-closed', () => {
 // asynchronously first.  After cleanup, call app.exit(0) which skips the
 // quit events and terminates immediately.
 app.on('before-quit', (event) => {
+  if (driveWatcherInterval) {
+    clearInterval(driveWatcherInterval)
+    driveWatcherInterval = null
+  }
   if (isQuitting) return
   event.preventDefault()
   isQuitting = true

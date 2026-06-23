@@ -4,7 +4,7 @@ Transfera v2 — Source Reference Types
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,12 +23,12 @@ class SourceRefDevice(BaseModel):
     type: Literal["device"] = "device"
     device_id: str = Field(..., min_length=1, description="Stable device identifier (serial/UDID)")
     device_path: str = Field("/", description="Filesystem path on the device (e.g. /DCIM/100APPLE)")
-    device_name: Optional[str] = Field(None, description="Human-readable device name for display")
+    device_name: str | None = Field(None, description="Human-readable device name for display")
 
 
 # Discriminated union: tagged source reference
 SourceRef = Annotated[
-    Union[SourceRefLocal, SourceRefDevice],
+    SourceRefLocal | SourceRefDevice,
     Field(discriminator="type"),
 ]
 

@@ -6,7 +6,6 @@ Run: python -m backend.tests.test_exiftool_bootstrapper
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 import tempfile

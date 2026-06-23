@@ -17,12 +17,11 @@ import asyncio
 import json
 import logging
 import os
-import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.ios_device import IOSDevice, DeviceStatus, DeviceFileInfo
+from backend.ios_device import DeviceFileInfo, DeviceStatus, IOSDevice
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +139,7 @@ class _WpdFileReader:
                 self._proc.terminate()
                 try:
                     await asyncio.wait_for(self._proc.wait(), timeout=3.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self._proc.kill()
                     await self._proc.wait()
 
@@ -167,10 +166,10 @@ class _WpdFileReader:
                     message=err.get("message", "Unknown error"),
                     hresult=err.get("hresult"),
                 )
-        except (json.JSONDecodeError, WpdError):
-            # Re-raise WpdError as-is; JSON parse failures are silently ignored
-            # (stderr may contain non-JSON debug output from COM).
-            raise
+        except WpdError:
+            raise  # re-raise structured errors from wpd_helper
+        except (json.JSONDecodeError, Exception):
+            pass  # non-JSON stderr (COM debug output) is silently ignored
 
     async def __aenter__(self) -> _WpdFileReader:
         return await self.open()
@@ -387,7 +386,7 @@ class WpdBackend:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Kill the hung process so it doesn't block the app.
             if proc is not None:
                 try:
@@ -435,12 +434,6 @@ class WpdBackend:
         try:
             # Normalize: strip trailing 'Z', truncate fractional seconds.
             normalized = date_str.rstrip("Z")
-            if "+" in normalized[10:]:
-                # Has timezone offset like +00:00 -- keep as-is for fromisoformat.
-                pass
-            elif normalized.endswith("Z") or "+" not in normalized[10:]:
-                # No timezone info -- assume UTC.
-                pass
 
             # Handle fractional seconds (Python's fromisoformat doesn't like
             # 7-digit fractional seconds from WPD).
@@ -452,7 +445,7 @@ class WpdBackend:
 
             dt = datetime.fromisoformat(normalized)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt.timestamp()
         except (ValueError, TypeError):
             logger.debug("WpdBackend: failed to parse date %r", date_str)

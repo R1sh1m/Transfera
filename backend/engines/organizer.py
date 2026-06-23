@@ -8,12 +8,9 @@ same folder using the image component's timestamp.
 from __future__ import annotations
 
 import logging
-import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from backend.config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from backend.database.models import MediaItem
 
 logger = logging.getLogger(__name__)
@@ -157,8 +154,13 @@ def _derive_timestamp(item: MediaItem) -> datetime | None:
     """
     Extract the best available timestamp from a MediaItem.
 
-    Priority: created_at (set by the scanner from EXIF/filesystem).
+    Priority: date_taken (resolved capture date) > original_capture_time >
+    created_at (DB insert time).
     """
+    if item.date_taken is not None:
+        return item.date_taken
+    if item.original_capture_time is not None:
+        return item.original_capture_time
     if item.created_at is not None:
         return item.created_at
     return None

@@ -15,7 +15,6 @@ import logging
 
 from backend.device_backend import (
     DeviceAccessTier,
-    DeviceBackendManager,
     get_device_backend_manager,
 )
 
@@ -63,6 +62,46 @@ class UnifiedDeviceManager:
 
     def create_tier2_afc_reader(self, serial: str, path: str):
         return self._backend.create_tier2_afc_reader(serial, path)
+
+    async def auto_recover_apple_device(self) -> dict:
+        """Scan for Apple USB devices and attempt automatic attach to WSL.
+
+        Delegates to ``WSLOrchestrator.auto_recover_apple_device()``.
+
+        Returns a dict with keys ``apple_devices_found``, ``devices``,
+        ``attach_errors``, ``needs_bind``, ``needs_elevation``, ``success``.
+        See ``WSLOrchestrator.auto_recover_apple_device`` for details.
+        """
+        orchestrator = self.get_orchestrator()
+        if orchestrator is None:
+            return {
+                "apple_devices_found": 0,
+                "devices": [],
+                "attach_errors": [],
+                "needs_bind": [],
+                "needs_elevation": False,
+                "success": False,
+            }
+        return await orchestrator.auto_recover_apple_device()
+
+    async def ensure_apple_service_running(self) -> dict:
+        """Check and restart the Apple Mobile Device Service.
+
+        Delegates to ``ios_driver_installer.ensure_apple_service_running()``.
+
+        Returns a dict with keys ``state``, ``message``,
+        ``needs_elevation``, ``elevation_command``, ``exit_code``.
+        """
+        from backend.ios_driver_installer import ensure_apple_service_running as _ensure_service
+        result = await _ensure_service()
+        return {
+            "state": result.state,
+            "message": result.message,
+            "needs_elevation": result.needs_elevation,
+            "elevation_command": result.elevation_command,
+            "exit_code": result.exit_code,
+            "service_name": result.service_name,
+        }
 
 
 # ---------------------------------------------------------------------------

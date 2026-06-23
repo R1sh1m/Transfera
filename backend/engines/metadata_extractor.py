@@ -12,16 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import platform
 import shutil
 import subprocess
 import sys
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -56,12 +53,12 @@ class FileMetadata:
     file_name: str
     file_size: int
     extension: str
-    mime_type: Optional[str] = None
+    mime_type: str | None = None
 
     # Prioritised date fields (oldest -> newest preference in the scanner)
-    date_taken: Optional[datetime] = None  # EXIF DateTimeOriginal
-    date_created: Optional[datetime] = None  # EXIF CreateDate / filesystem ctime
-    date_modified: Optional[datetime] = None  # EXIF ModifyDate / filesystem mtime
+    date_taken: datetime | None = None  # EXIF DateTimeOriginal
+    date_created: datetime | None = None  # EXIF CreateDate / filesystem ctime
+    date_modified: datetime | None = None  # EXIF ModifyDate / filesystem mtime
 
     # Raw EXIF tags (if available)
     exif_tags: dict[str, str] = field(default_factory=dict)
@@ -89,7 +86,7 @@ def _parse_exif_datetime(raw: str | None) -> datetime | None:
         try:
             dt = datetime.strptime(raw, fmt)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt
         except ValueError:
             continue
@@ -98,7 +95,7 @@ def _parse_exif_datetime(raw: str | None) -> datetime | None:
 
 def _ts_to_datetime(ts: float) -> datetime:
     """Convert a POSIX timestamp to a UTC datetime."""
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
+    return datetime.fromtimestamp(ts, tz=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +194,6 @@ def _download_exiftool() -> Path | None:
     Download the official ExifTool Windows zip, extract exiftool.exe,
     and clean up the archive. Returns the path to the extracted binary.
     """
-    import re
     import tempfile
 
     version = _fetch_latest_version()
@@ -346,7 +342,7 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
             extension=file_path.suffix.lower(),
             mime_type=tags.get("MIMEType"),
             date_taken=date_taken,
-            date_created=date_created or _ts_to_datetime(stat.st_ctime),
+            date_created=date_created or _ts_to_datetime(getattr(stat, "st_birthtime", stat.st_ctime)),
             date_modified=date_modified or _ts_to_datetime(stat.st_mtime),
             exif_tags={k: str(v) for k, v in tags.items() if v},
         )
@@ -356,6 +352,185 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
             file_path, exc,
         )
         return _extract_via_filesystem(file_path)
+
+
+# ---------------------------------------------------------------------------
+# ExifTool -stay_open persistent batch session
+# ---------------------------------------------------------------------------
+import io as _io
+import threading as _threading
+
+
+class _ExifToolSession:
+    """
+    Persistent ExifTool process using ``-stay_open True -@ -``.
+
+    Instead of spawning a new ``exiftool.exe`` per file (50-200 ms overhead on
+    Windows per spawn), this keeps one process alive and sends file paths over
+    stdin, reading JSON back from stdout.  A single lock serialises calls so it
+    is safe to call from multiple threads.
+
+    The session is lazy-started on first use and transparently restarted if
+    the process dies unexpectedly.
+    """
+
+    _SENTINEL = "{ready}"
+
+    def __init__(self) -> None:
+        self._lock = _threading.Lock()
+        self._proc: subprocess.Popen | None = None
+
+    def _start(self) -> bool:
+        """Start the persistent ExifTool process. Returns False if unavailable."""
+        exe = _bootstrap_exiftool()
+        if not exe:
+            return False
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    exe,
+                    "-stay_open", "True",
+                    "-@", "-",
+                    "-common_args",
+                    "-json",
+                    "-time:all",
+                    "-s3",
+                    "-charset", "utf8",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            logger.info("ExifTool stay_open session started (PID %d)", self._proc.pid)
+            return True
+        except OSError as exc:
+            logger.warning("ExifTool stay_open failed to start: %s", exc)
+            self._proc = None
+            return False
+
+    def _ensure_running(self) -> bool:
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        return self._start()
+
+    def _send_command(self, paths: list[Path]) -> str | None:
+        """Send paths to ExifTool and return raw JSON stdout, or None on failure."""
+        if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
+            return None
+
+        # Each path on its own line, terminated by -execute\n
+        cmd_block = "\n".join(str(p) for p in paths) + "\n-execute\n"
+        try:
+            self._proc.stdin.write(cmd_block.encode("utf-8"))
+            self._proc.stdin.flush()
+        except OSError as exc:
+            logger.warning("ExifTool stay_open stdin write failed: %s", exc)
+            return None
+
+        buf = _io.BytesIO()
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                return None  # EOF — process died
+            stripped = line.decode("utf-8", errors="replace").rstrip()
+            if stripped == self._SENTINEL:
+                break
+            buf.write(line)
+
+        return buf.getvalue().decode("utf-8", errors="replace")
+
+    def extract_batch(self, paths: list[Path]) -> dict[str, "FileMetadata"]:
+        """
+        Extract metadata for all *paths* in a single ExifTool round-trip.
+
+        Returns a dict mapping resolved path str -> FileMetadata.
+        Falls back to filesystem extraction for any paths that fail.
+        """
+        if not paths:
+            return {}
+
+        with self._lock:
+            if not self._ensure_running():
+                return {str(p.resolve()): _extract_via_filesystem(p) for p in paths}
+            raw = self._send_command(paths)
+            if raw is None:
+                logger.warning("ExifTool stay_open died mid-batch; will restart on next call")
+                self._proc = None
+                return {str(p.resolve()): _extract_via_filesystem(p) for p in paths}
+
+        # Parse JSON outside the lock
+        try:
+            data = json.loads(raw) if raw.strip() else []
+            if isinstance(data, dict):
+                data = [data]
+        except json.JSONDecodeError as exc:
+            logger.warning("ExifTool batch JSON parse failed: %s", exc)
+            data = []
+
+        # ExifTool reports SourceFile for each record
+        exiftool_by_path: dict[str, dict] = {}
+        for record in data:
+            if isinstance(record, dict):
+                src = record.get("SourceFile") or ""
+                exiftool_by_path[src] = record
+
+        results: dict[str, "FileMetadata"] = {}
+        for path in paths:
+            resolved = str(path.resolve())
+            tags = (
+                exiftool_by_path.get(resolved)
+                or exiftool_by_path.get(str(path))
+                or {}
+            )
+            if not tags:
+                results[resolved] = _extract_via_filesystem(path)
+                continue
+            try:
+                stat = path.stat()
+                date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal"))
+                date_created = _parse_exif_datetime(tags.get("CreateDate"))
+                date_modified_tag = _parse_exif_datetime(tags.get("ModifyDate"))
+                results[resolved] = FileMetadata(
+                    file_path=resolved,
+                    file_name=path.name,
+                    file_size=stat.st_size,
+                    extension=path.suffix.lower(),
+                    mime_type=tags.get("MIMEType"),
+                    date_taken=date_taken,
+                    date_created=date_created or _ts_to_datetime(
+                        getattr(stat, "st_birthtime", stat.st_ctime)
+                    ),
+                    date_modified=date_modified_tag or _ts_to_datetime(stat.st_mtime),
+                    exif_tags={k: str(v) for k, v in tags.items() if v},
+                )
+            except Exception as exc:
+                logger.debug("Batch metadata parse error for %s: %s", path.name, exc)
+                results[resolved] = _extract_via_filesystem(path)
+
+        return results
+
+    def close(self) -> None:
+        """Gracefully shut down the persistent ExifTool process."""
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                try:
+                    if self._proc.stdin:
+                        self._proc.stdin.write(b"-stay_open\nFalse\n")
+                        self._proc.stdin.flush()
+                        self._proc.stdin.close()
+                    self._proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        self._proc.kill()
+                    except Exception:
+                        pass
+            self._proc = None
+            logger.info("ExifTool stay_open session closed")
+
+
+# Module-level singleton — one persistent ExifTool process per backend process
+_exiftool_session = _ExifToolSession()
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +563,8 @@ def extract_metadata(file_path: str | Path) -> FileMetadata:
     Extract metadata for a single file.
 
     Uses ExifTool when available; falls back to filesystem timestamps.
+    For bulk directory scans, prefer ``extract_metadata_batch()`` which uses
+    a persistent ExifTool session and is dramatically faster.
     """
     path = Path(file_path).resolve()
     if not path.is_file():
@@ -396,3 +573,23 @@ def extract_metadata(file_path: str | Path) -> FileMetadata:
     if _bootstrap_exiftool():
         return _extract_via_exiftool(path)
     return _extract_via_filesystem(path)
+
+
+def extract_metadata_batch(file_paths: list[Path]) -> dict[str, FileMetadata]:
+    """
+    Extract metadata for a list of files in a single ExifTool round-trip.
+
+    Uses the module-level ``_ExifToolSession`` (``-stay_open True``) to keep
+    ExifTool alive between calls, avoiding per-file subprocess creation overhead.
+
+    Returns a dict mapping resolved path string -> FileMetadata.
+    Falls back gracefully to filesystem extraction if ExifTool is unavailable.
+    """
+    if not file_paths:
+        return {}
+
+    if _bootstrap_exiftool():
+        return _exiftool_session.extract_batch(file_paths)
+
+    return {str(p.resolve()): _extract_via_filesystem(p) for p in file_paths}
+
