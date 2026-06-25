@@ -10,11 +10,24 @@ permissions:
 
 jobs:
   release:
+    name: Build & Publish Release
     runs-on: windows-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Verify Version Match
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = (Get-Content frontend/package.json | ConvertFrom-Json).version
+          $tagVersion = $tag.TrimStart('v')
+          if ($tagVersion -ne $version) {
+              Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but frontend/package.json version is '$version'."
+              exit 1
+          }
+          Write-Host "Version verification successful: tag '$tag' matches package.json version '$version'."
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -33,12 +46,14 @@ jobs:
           python -m venv .venv
           .venv\Scripts\python -m pip install --upgrade pip
           .venv\Scripts\python -m pip install -r backend/requirements.txt
-        # The virtual environment is required because the portable python builder script
-        # executes the virtual environment's python.exe to run pip install targeting python-bin.
 
       - name: Install Frontend Dependencies
         working-directory: frontend
         run: npm ci
+
+      - name: Audit Production Dependencies
+        working-directory: frontend
+        run: npm audit --omit=dev
 
       - name: Compile Native C++ WPD Helper
         working-directory: frontend
@@ -52,9 +67,56 @@ jobs:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
+      - name: Generate and Verify SHA256 Checksums
+        shell: pwsh
+        run: |
+          $releaseDir = "frontend/release"
+          $files = Get-ChildItem -Path $releaseDir -Include "Transfera-Setup-*.exe", "Transfera-Portable-*.exe" -File -Recurse
+          if ($files.Count -eq 0) {
+              Write-Error "No release executables found in $releaseDir"
+              exit 1
+          }
+          
+          Write-Host "Found binaries to hash:"
+          $files | ForEach-Object { Write-Host " - $($_.Name)" }
+          
+          # Generate hashes in standard GNU format: <hash>  <filename>
+          $hashes = $files | ForEach-Object {
+              $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
+              $name = $_.Name
+              "$hash  $name"
+          }
+          
+          $sumsPath = Join-Path $releaseDir "SHA256SUMS.txt"
+          $hashes | Out-File -FilePath $sumsPath -Encoding ascii
+          Write-Host "Generated SHA256SUMS.txt successfully."
+          
+          # Verify hashes in CI before uploading
+          Write-Host "Verifying generated checksums..."
+          Get-Content $sumsPath | ForEach-Object {
+              if ($_ -match '^([a-f0-9]{64})\s+(.+)$') {
+                  $expectedHash = $Matches[1]
+                  $file = $Matches[2]
+                  $filePath = Join-Path $releaseDir $file
+                  $actualHash = (Get-FileHash -Path $filePath -Algorithm SHA256).Hash.ToLower()
+                  if ($actualHash -eq $expectedHash) {
+                      Write-Host "Verification succeeded for $file ($actualHash)"
+                  } else {
+                      Write-Error "Hash verification failed for $file! Expected: $expectedHash, Got: $actualHash"
+                      exit 1
+                  }
+              }
+          }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: frontend/release/Transfera-Setup-*.exe
+          files: |
+            frontend/release/Transfera-Setup-*.exe
+            frontend/release/Transfera-Portable-*.exe
+            frontend/release/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

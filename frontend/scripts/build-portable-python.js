@@ -92,6 +92,34 @@ function installRequirements(destDir) {
   execSync(cmd, { stdio: 'inherit' });
 }
 
+function cleanUnnecessaryBinaries(sitePackagesDir) {
+  console.log(`[portable-python] Scanning and cleaning unnecessary binaries from ${sitePackagesDir}...`);
+  if (!fs.existsSync(sitePackagesDir)) return;
+
+  function scanAndClean(dir) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scanAndClean(fullPath);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        // Remove executable scripts, test executables or debug binaries that trigger AV
+        if (ext === '.exe' || ext === '.bat' || ext === '.cmd' || entry.name.toLowerCase() === 'test_suite') {
+          console.log(`[portable-python] Removing AV-trigger risk file: ${fullPath}`);
+          try {
+            fs.unlinkSync(fullPath);
+          } catch (err) {
+            console.warn(`[portable-python] Failed to remove ${fullPath}: ${err.message}`);
+          }
+        }
+      }
+    }
+  }
+
+  scanAndClean(sitePackagesDir);
+}
+
 async function main() {
   if (process.platform !== 'win32') {
     console.log('[portable-python] Skipping portable Python build: platform is not Windows.');
@@ -115,6 +143,7 @@ async function main() {
     extractZip(ZIP_PATH, PYTHON_DIR);
     configurePathFile(PYTHON_DIR);
     installRequirements(PYTHON_DIR);
+    cleanUnnecessaryBinaries(sitePackages);
     
     // Clean up zip
     if (fs.existsSync(ZIP_PATH)) {

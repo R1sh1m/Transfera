@@ -47,7 +47,8 @@
   "build": {
     "appId": "com.transfera.app",
     "productName": "Transfera",
-    "copyright": "Copyright 2024 Transfera Team",
+    "copyright": "Copyright © 2026 Transfera Team",
+    "asar": true,
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -80,6 +81,7 @@
     ],
     "win": {
       "icon": "build/icon.ico",
+      "publisherName": "Transfera Team",
       "signtoolOptions": {
         "publisherName": "Transfera Team"
       },
@@ -89,9 +91,14 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
-      ],
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -103,7 +110,11 @@
       "shortcutName": "Transfera",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "warningsAsErrors": false
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
     },
     "linux": {
       "target": [

@@ -58,12 +58,27 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ## Download & Installation 
 
-The easiest way to use Transfera on Windows is to download the standalone installer. Everything is completely self-contained.
+The easiest way to use Transfera on Windows is to download one of the pre-built packages or install it directly using WinGet.
 
+### Option 1: Install via WinGet (Recommended)
+You can install Transfera directly from your PowerShell or Command Prompt using the Windows Package Manager:
+```cmd
+winget install Transfera.Transfera
+```
+
+### Option 2: Standalone Installer
 1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**.
 2. Download the latest `Transfera-Setup-X.Y.Z.exe` installer.
 3. Run the installer to install the application on your computer.
 4. Launch **Transfera** from your desktop or Start Menu.
+
+### Option 3: Portable Build
+If you prefer not to install the application, download the standalone `Transfera-Portable-X.Y.Z.exe` from the releases page. Double-click it to run immediately.
+
+> [!WARNING]
+> **Windows Defender SmartScreen Warning (Unsigned Binaries)**  
+> Because Transfera is an open-source project and does not use a paid commercial code-signing certificate, Windows SmartScreen will display a blue warning banner (*"Windows protected your PC"*) when you run the installer or portable binary for the first time.  
+> **How to bypass**: Click **"More info"** on the banner, then click **"Run anyway"**. The binary is completely safe, open-source, and verified by our CI/CD pipeline.
 
 ---
 
