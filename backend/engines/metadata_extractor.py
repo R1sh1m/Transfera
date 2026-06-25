@@ -26,6 +26,17 @@ from backend.config import EXIFTOOL_DIR
 
 logger = logging.getLogger(__name__)
 
+# Register pillow-heif opener so Image.open() can decode HEIC/HEIF files
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    logger.debug("pillow-heif registered for HEIC/HEIF support")
+except ImportError:
+    logger.warning(
+        "pillow-heif not installed — HEIC files will fall back to mtime. "
+        "Install with: pip install pillow-heif"
+    )
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -78,15 +89,22 @@ _EXIF_DATETIME_FORMATS: list[str] = [
 
 
 def _parse_exif_datetime(raw: str | None) -> datetime | None:
-    """Attempt to parse an EXIF datetime string into a timezone-aware datetime."""
+    """Attempt to parse an EXIF datetime string into a timezone-aware datetime.
+
+    EXIF DateTimeOriginal is always local time at the capture location with
+    NO timezone information. Formats without an explicit timezone offset are
+    treated as local time using the system timezone. Formats with an explicit
+    offset (e.g. "+05:30") are parsed as-is.
+    """
     if not raw or not raw.strip():
         return None
     raw = raw.strip()
+
     for fmt in _EXIF_DATETIME_FORMATS:
         try:
             dt = datetime.strptime(raw, fmt)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
+                dt = dt.astimezone()
             return dt
         except ValueError:
             continue
@@ -330,11 +348,15 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
         tags = data[0] if isinstance(data, list) else data
 
         # Extract timestamps -- ExifTool returns ISO-ish strings with -time:all
-        date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal"))
+        date_taken = (
+            _parse_exif_datetime(tags.get("DateTimeOriginal"))
+            or _parse_exif_datetime(tags.get("CreateDate"))
+        )
         date_created = _parse_exif_datetime(tags.get("CreateDate"))
         date_modified = _parse_exif_datetime(tags.get("ModifyDate"))
 
         stat = file_path.stat()
+        fs_mtime = _ts_to_datetime(stat.st_mtime)
         return FileMetadata(
             file_path=str(file_path.resolve()),
             file_name=file_path.name,
@@ -342,8 +364,8 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
             extension=file_path.suffix.lower(),
             mime_type=tags.get("MIMEType"),
             date_taken=date_taken,
-            date_created=date_created or _ts_to_datetime(getattr(stat, "st_birthtime", stat.st_ctime)),
-            date_modified=date_modified or _ts_to_datetime(stat.st_mtime),
+            date_created=date_created or fs_mtime,
+            date_modified=date_modified or fs_mtime,
             exif_tags={k: str(v) for k, v in tags.items() if v},
         )
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
@@ -359,6 +381,9 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
 # ---------------------------------------------------------------------------
 import io as _io
 import threading as _threading
+
+
+import queue as _queue
 
 
 class _ExifToolSession:
@@ -379,6 +404,21 @@ class _ExifToolSession:
     def __init__(self) -> None:
         self._lock = _threading.Lock()
         self._proc: subprocess.Popen | None = None
+        self._stdout_queue: _queue.Queue[bytes] = _queue.Queue()
+        self._reader_thread: _threading.Thread | None = None
+
+    def _read_stdout_loop(self, stdout: _io.BufferedReader, q: _queue.Queue[bytes]) -> None:
+        """Daemon thread reading lines from stdout and putting them in the queue."""
+        try:
+            while True:
+                line = stdout.readline()
+                if not line:
+                    break
+                q.put(line)
+        except Exception:
+            pass
+        finally:
+            q.put(b"")  # sentinel for EOF
 
     def _start(self) -> bool:
         """Start the persistent ExifTool process. Returns False if unavailable."""
@@ -403,6 +443,17 @@ class _ExifToolSession:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             logger.info("ExifTool stay_open session started (PID %d)", self._proc.pid)
+
+            # Start the reader thread
+            self._stdout_queue = _queue.Queue()
+            self._reader_thread = _threading.Thread(
+                target=self._read_stdout_loop,
+                args=(self._proc.stdout, self._stdout_queue),
+                daemon=True,
+                name="exiftool-reader"
+            )
+            self._reader_thread.start()
+
             return True
         except OSError as exc:
             logger.warning("ExifTool stay_open failed to start: %s", exc)
@@ -416,7 +467,7 @@ class _ExifToolSession:
 
     def _send_command(self, paths: list[Path]) -> str | None:
         """Send paths to ExifTool and return raw JSON stdout, or None on failure."""
-        if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
+        if self._proc is None or self._proc.stdin is None:
             return None
 
         # Each path on its own line, terminated by -execute\n
@@ -430,9 +481,22 @@ class _ExifToolSession:
 
         buf = _io.BytesIO()
         while True:
-            line = self._proc.stdout.readline()
+            try:
+                # 10.0 seconds timeout to prevent thread deadlock
+                line = self._stdout_queue.get(timeout=10.0)
+            except _queue.Empty:
+                logger.warning("ExifTool command timed out! Terminating hung process...")
+                try:
+                    if self._proc:
+                        self._proc.kill()
+                        self._proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                self._proc = None
+                return None
+
             if not line:
-                return None  # EOF — process died
+                return None  # EOF — process died or was terminated
             stripped = line.decode("utf-8", errors="replace").rstrip()
             if stripped == self._SENTINEL:
                 break
@@ -488,9 +552,13 @@ class _ExifToolSession:
                 continue
             try:
                 stat = path.stat()
-                date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal"))
+                date_taken = (
+                    _parse_exif_datetime(tags.get("DateTimeOriginal"))
+                    or _parse_exif_datetime(tags.get("CreateDate"))
+                )
                 date_created = _parse_exif_datetime(tags.get("CreateDate"))
                 date_modified_tag = _parse_exif_datetime(tags.get("ModifyDate"))
+                fs_mtime = _ts_to_datetime(stat.st_mtime)
                 results[resolved] = FileMetadata(
                     file_path=resolved,
                     file_name=path.name,
@@ -498,10 +566,8 @@ class _ExifToolSession:
                     extension=path.suffix.lower(),
                     mime_type=tags.get("MIMEType"),
                     date_taken=date_taken,
-                    date_created=date_created or _ts_to_datetime(
-                        getattr(stat, "st_birthtime", stat.st_ctime)
-                    ),
-                    date_modified=date_modified_tag or _ts_to_datetime(stat.st_mtime),
+                    date_created=date_created or fs_mtime,
+                    date_modified=date_modified_tag or fs_mtime,
                     exif_tags={k: str(v) for k, v in tags.items() if v},
                 )
             except Exception as exc:

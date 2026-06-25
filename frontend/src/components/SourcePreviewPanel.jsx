@@ -11,7 +11,7 @@ const GRID_COLUMNS = 4
 // Raised from 6 → 12 to saturate the parallel thumbnail worker pool on the backend.
 // The backend now has up to 8 pre-scan workers + expanded uvicorn threadpool,
 // so 12 concurrent requests keep them fully occupied without overwhelming the AFC layer.
-const MAX_CONCURRENT_THUMBS = 12
+const MAX_CONCURRENT_THUMBS = 4
 
 // --- Per-panel thumbnail request queue ---
 // Created fresh each time the panel mounts / resets, so stale callbacks
@@ -311,9 +311,12 @@ function SourcePreviewPanelInner({
   sourcePath,
   deviceSource,
   onSelectionConfirm,
+  onTransferStart,
 }) {
   const [items, setItems] = useState([])
   const [selected, setSelected] = useState(new Set())
+  const selectedRef = useRef(selected)
+  useEffect(() => { selectedRef.current = selected }, [selected])
   const [filter, setFilter] = useState('all')
   const [loading, setLoading] = useState(false)
   const [metadata, setMetadata] = useState({ total: 0, photos: 0, videos: 0, total_size_bytes: 0 })
@@ -463,16 +466,13 @@ function SourcePreviewPanelInner({
   }, [items])
 
   const toggleItem = useCallback((absPath) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(absPath)) {
-        next.delete(absPath)
-      } else {
-        next.add(absPath)
-      }
-      return next
-    })
-  }, [])
+    const next = new Set(selectedRef.current)
+    if (next.has(absPath)) next.delete(absPath)
+    else next.add(absPath)
+    selectedRef.current = next
+    setSelected(next)
+    onSelectionConfirm?.(Array.from(next))
+  }, [onSelectionConfirm])
 
   const visibleItems = useMemo(() => {
     if (filter === 'all') return items
@@ -493,20 +493,16 @@ function SourcePreviewPanelInner({
   }, [visibleItems, selected])
 
   const handleSelectAll = useCallback(() => {
+    const next = new Set(selectedRef.current)
     if (allVisibleSelected) {
-      setSelected((prev) => {
-        const next = new Set(prev)
-        for (const item of visibleItems) next.delete(item.abs_path)
-        return next
-      })
+      for (const item of visibleItems) next.delete(item.abs_path)
     } else {
-      setSelected((prev) => {
-        const next = new Set(prev)
-        for (const item of visibleItems) next.add(item.abs_path)
-        return next
-      })
+      for (const item of visibleItems) next.add(item.abs_path)
     }
-  }, [visibleItems, allVisibleSelected])
+    selectedRef.current = next
+    setSelected(next)
+    onSelectionConfirm?.(Array.from(next))
+  }, [visibleItems, allVisibleSelected, onSelectionConfirm])
 
   const handleKeyDown = useCallback((e) => {
     if (visibleItems.length === 0) return
@@ -651,17 +647,17 @@ function SourcePreviewPanelInner({
           <button
             type="button"
             onClick={() => {
-              setSelected((prev) => {
-                const next = new Set(prev)
-                for (const item of visibleItems) {
-                  if (!likelyDupPaths.has(item.abs_path)) {
-                    next.add(item.abs_path)
-                  } else {
-                    next.delete(item.abs_path)
-                  }
+              const next = new Set(selectedRef.current)
+              for (const item of visibleItems) {
+                if (!likelyDupPaths.has(item.abs_path)) {
+                  next.add(item.abs_path)
+                } else {
+                  next.delete(item.abs_path)
                 }
-                return next
-              })
+              }
+              selectedRef.current = next
+              setSelected(next)
+              onSelectionConfirm?.(Array.from(next))
             }}
             className="px-2 py-1 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700 transition-colors shrink-0"
           >
@@ -744,7 +740,11 @@ function SourcePreviewPanelInner({
         </div>
         <button
           type="button"
-          onClick={() => onSelectionConfirm(Array.from(selected))}
+          onClick={() => {
+            const paths = Array.from(selected)
+            onSelectionConfirm(paths)
+            onTransferStart?.(paths)
+          }}
           disabled={selectedCount === 0}
           className={cn(
             'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
@@ -754,7 +754,7 @@ function SourcePreviewPanelInner({
           )}
         >
           <Upload className="w-3.5 h-3.5" />
-          Transfer selected
+          Start transfer
         </button>
       </div>
     </div>

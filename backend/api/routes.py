@@ -25,6 +25,7 @@ from sqlalchemy.orm import joinedload
 
 from backend.api import websocket as ws_events
 from backend.api.auth import require_local_token
+from backend.api.rate_limit import per_session_rate_limit
 from backend.api.schemas import (
     BatchInfo,
     BatchList,
@@ -124,23 +125,30 @@ from backend.engines.device_import_state import (
 )
 from backend.engines.duplicate_detector import check_batch, prescan_against_library
 from backend.engines.importer import (
-    _mark_thumbnail_failed,
-    _mark_thumbnail_ready,
     import_batch,
     purge_hop1_cache_for_completed_items,
 )
-from backend.engines.organizer import format_month_folder
+from backend.engines.thumbnail_ops import (
+    mark_thumbnail_failed,
+    mark_thumbnail_ready,
+    resolve_thumbnail_source_path,
+)
 from backend.engines.recovery import recover_interrupted_batches
 from backend.engines.reporter import generate_session_report
 from backend.engines.scanner import scan as run_scan
 from backend.engines.source_reader import DeviceSourceReader
 from backend.engines.thumbnail_cache import thumbnail_cache
 from backend.engines.thumbnailer import generate_thumbnail_bytes
+
+# Cancellation flag for regenerate_thumbnails background thread.
+# Set by clear_library or a new regeneration request to abort the prior run.
+_regen_generation = 0
+_regen_gen_lock = threading.Lock()
 from backend.ios_device import (
     DeviceStatus,
     check_driver_status,
     is_ios_support_available,
-    list_ios_devices,
+    list_ios_devices as _list_ios_devices_backend,
     parse_ios_source,
 )
 
@@ -170,19 +178,27 @@ router = APIRouter(prefix="/api")
 # background task to stop.  Checked inside cache_batch / import_batch loops.
 _cancellation_events: dict[int, asyncio.Event] = {}
 
-# In-memory selected-files map — populated during session creation and consumed
-# during the scan/batch-building phase in _run_transfer_background.  Cleared
-# after batches are created so the memory is released for completed sessions.
-_selected_files_map: dict[int, set[str]] = {}
+# selected_files are persisted to TransferSession.selected_files_json in the DB.
+# No in-memory map needed.
 
 # Thread/Task locks for session state modifications to prevent concurrent start/resume/pause races
 _session_locks: dict[int, asyncio.Lock] = {}
+
+# Registry of currently running transfer background tasks (session_id -> Task).
+# Used to detect and cancel stale tasks before starting a new one.
+_active_tasks: dict[int, asyncio.Task] = {}
 
 
 def _get_session_lock(session_id: int) -> asyncio.Lock:
     if session_id not in _session_locks:
         _session_locks[session_id] = asyncio.Lock()
     return _session_locks[session_id]
+
+
+def _cleanup_session_state(session_id: int) -> None:
+    """Remove all in-memory state for a completed/cancelled/failed session."""
+    _cancellation_events.pop(session_id, None)
+    _session_locks.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -234,11 +250,11 @@ async def api_shutdown() -> dict:
     """
     async def _do_shutdown():
         await asyncio.sleep(0.5)
-        logger.info("Shutdown requested — disposing engine and exiting")
-        await dispose_engine()
-        # Hard exit after cleanup so the Electron-side taskkill has a clean
-        # target (the Python process will already be gone).
-        os._exit(0)
+        logger.info("Shutdown requested — initiating graceful uvicorn shutdown")
+        # Signal uvicorn to stop — this triggers the FastAPI lifespan teardown
+        # (ExifTool session close, SQLAlchemy engine dispose) before process exit.
+        loop = asyncio.get_event_loop()
+        loop.stop()
     asyncio.create_task(_do_shutdown())
     return {"ok": True, "message": "Shutdown initiated"}
 
@@ -751,13 +767,20 @@ async def get_device_import_state(device_id: str) -> DeviceImportStateResponse:
     The device_id is URL-decoded by FastAPI automatically.  Device IDs
     from WPD often contain characters like \\, ?, &, #, {, } which
     must be percent-encoded in the URL by the caller.
+
+    Returns an empty state (no 404) for first-time devices that have
+    never been connected before — the frontend uses this to decide
+    whether a full scan is needed.
     """
     logger.debug("Device import state lookup: device_id=%r", device_id)
     state = await get_device_state(device_id)
     if state is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No import state found for device: {device_id!r}",
+        return DeviceImportStateResponse(
+            device_id=device_id,
+            device_name=None,
+            last_successful_cutoff=None,
+            last_import_session_id=None,
+            updated_at=None,
         )
 
     return DeviceImportStateResponse(
@@ -897,12 +920,18 @@ async def create_session(req: SessionCreate) -> SessionInfo:
         session.add(ts)
         await session.flush()
 
-        # Store selected_files in-memory for consumption during batch building
+        # Persist selected_files to DB for consumption during batch building
         if req.selected_files:
-            _selected_files_map[ts.id] = set(req.selected_files)
+            normalized = []
+            for p in req.selected_files:
+                if p.startswith("ios://"):
+                    normalized.append(p.replace("\\", "/").lower())
+                else:
+                    normalized.append(str(Path(p).resolve()).lower())
+            ts.selected_files_json = json.dumps(normalized)
             logger.info(
-                "Session %d: %d selected file(s) stored for filtered transfer",
-                ts.id, len(req.selected_files),
+                "Session %d: %d selected file(s) persisted to DB",
+                ts.id, len(normalized),
             )
 
         return _session_to_info(ts)
@@ -971,6 +1000,19 @@ async def start_session(session_id: int, background_tasks: BackgroundTasks) -> S
 
             ts.touch()
 
+        # If a previous task is still alive (e.g. it didn't see the cancel signal
+        # yet because it was mid-I/O), cancel it now and wait briefly for it to exit.
+        # This prevents two tasks from running the same session concurrently.
+        existing_task = _active_tasks.pop(session_id, None)
+        if existing_task is not None and not existing_task.done():
+            existing_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(existing_task), timeout=2.0
+                )
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass  # Task has been cancelled or timed out — proceed
+
         # Create or reset the cancellation event so the background task can
         # listen for cooperative cancellation during Hop 1 / Hop 2 processing.
         _cancellation_events[session_id] = asyncio.Event()
@@ -995,6 +1037,13 @@ async def pause_session(session_id: int) -> SessionActionResponse:
             ts.paused_at = datetime.now(UTC)
             ts.touch()
 
+        # Signal the running background task to stop after its current item.
+        # The task checks cancel_event in both Hop 1 and Hop 2 inner loops.
+        # When it sees the event AND the session status is PAUSED (not CANCELLED),
+        # it exits cleanly leaving the batch in a resumable state.
+        if session_id in _cancellation_events:
+            _cancellation_events[session_id].set()
+
         await ws_events.emit_session_paused(session_id)
         return SessionActionResponse(session_id=session_id, status="paused", message="Session paused")
 
@@ -1015,6 +1064,10 @@ async def cancel_session(session_id: int) -> SessionActionResponse:
         # item loop can stop early rather than waiting for the batch to finish.
         if session_id in _cancellation_events:
             _cancellation_events[session_id].set()
+
+        # Clean up the lock immediately on cancel — the background task will
+        # clean the rest via _cleanup_session_state when it exits.
+        _session_locks.pop(session_id, None)
 
         return SessionActionResponse(session_id=session_id, status="cancelled", message="Session cancelled")
 
@@ -1087,6 +1140,10 @@ async def clear_sessions(req: ClearSessionsRequest | None = None, _: None = Depe
         )
 
         await session.commit()
+
+    # Clean up in-memory state for deleted sessions
+    for sid in session_ids:
+        _cleanup_session_state(sid)
 
     # Clear Hop 1 cache directory contents
     cache_files_removed = _clear_cache_dir()
@@ -1169,16 +1226,83 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
         # Overwrite: delete matching archive copies to avoid library duplicates
         for item_id in overwrite_ids:
             item = await session.get(MediaItem, item_id)
-            if item and item.source_hash:
-                result = await session.execute(
-                    select(MediaItem).where(
-                        MediaItem.source_hash == item.source_hash,
-                        MediaItem.id != item_id,
-                        MediaItem.final_status == HopStatus.COMPLETED.value,
+            if item:
+                from sqlalchemy import or_
+                conditions = []
+                if item.source_hash:
+                    conditions.append(MediaItem.source_hash == item.source_hash)
+                if item.session_id:
+                    conditions.append(
+                        (func.lower(MediaItem.file_name) == func.lower(item.file_name)) &
+                        (MediaItem.session_id == item.session_id)
                     )
-                )
-                for archive_item in result.scalars().all():
-                    await session.delete(archive_item)
+
+                if conditions:
+                    result = await session.execute(
+                        select(MediaItem).where(
+                            or_(*conditions),
+                            MediaItem.id != item_id,
+                            MediaItem.final_status == HopStatus.COMPLETED.value,
+                        )
+                    )
+                    for archive_item in result.scalars().all():
+                        # Try to locate and delete physical file on disk first
+                        if archive_item.session_id:
+                            archive_session = await session.get(TransferSession, archive_item.session_id)
+                            if archive_session and archive_session.dest_root:
+                                try:
+                                    from backend.engines.organizer import derive_timestamp, build_folder
+                                    from backend.engines.importer import verify_file_hash
+                                    
+                                    dest_root_path = Path(archive_session.dest_root)
+                                    dt = derive_timestamp(archive_item)
+                                    folder = build_folder(dest_root_path, dt, archive_session.folder_layout)
+                                    
+                                    base_name = archive_item.file_name
+                                    p = Path(base_name)
+                                    stem = p.stem
+                                    suffix = p.suffix
+                                    
+                                    candidates = [folder / base_name]
+                                    for i in range(1, 1000):
+                                        candidates.append(folder / f"{stem}_{i:03d}{suffix}")
+                                        
+                                    target_file = None
+                                    for cand in candidates:
+                                        if cand.is_file():
+                                            if archive_item.source_hash:
+                                                if verify_file_hash(cand, archive_item.source_hash):
+                                                    target_file = cand
+                                                    break
+                                            elif cand.stat().st_size == archive_item.file_size:
+                                                target_file = cand
+                                                break
+                                                
+                                    if target_file:
+                                        logger.info(
+                                            "Deleting physical duplicate file before overwriting: %s",
+                                            target_file,
+                                        )
+                                        target_file.unlink(missing_ok=True)
+                                    else:
+                                        logger.warning(
+                                            "Could not locate physical file for archive item %d (%s) under %s",
+                                            archive_item.id,
+                                            archive_item.file_name,
+                                            folder,
+                                        )
+                                except Exception as file_exc:
+                                    logger.error(
+                                        "Error deleting physical file for archive item %d: %s",
+                                        archive_item.id,
+                                        file_exc,
+                                    )
+                        
+                        # Evict from thumbnail cache
+                        thumbnail_cache.evict_items([archive_item.id])
+                        
+                        # Delete database record
+                        await session.delete(archive_item)
 
         await session.commit()
 
@@ -1189,401 +1313,105 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
         )
 
 
-async def _run_transfer_background(session_id: int) -> None:
-    """Background task: process all batches through Hop 1 then Hop 2."""
-    cancel_event = _cancellation_events.get(session_id)
-    try:
-        # --- Auto-scan: if no batches exist yet, scan source and create them ---
-        async with session_scope() as session:
-            ts = await session.get(TransferSession, session_id)
-            source_root = ts.source_root if ts else None
-            only_new_mode = ts.only_new_mode if ts else False
+async def _phase_scan_and_create_batches(
+    session_id: int,
+    cancel_event: asyncio.Event | None,
+) -> list[TransferBatch] | None:
+    """Scan source, filter by selected files, create batches.
 
-            result = await session.execute(
-                select(TransferBatch)
-                .where(
-                    TransferBatch.session_id == session_id,
-                    TransferBatch.status.notin_([
-                        BatchStatus.COMPLETED.value,
-                        BatchStatus.FAILED.value,
-                        BatchStatus.PARTIAL.value,
-                    ]),
-                )
-                .order_by(TransferBatch.batch_number)
+    Returns the list of pending batches, or None if the scan found 0 media
+    items (the session is marked FAILED in that case).
+    """
+    async with session_scope() as session:
+        ts = await session.get(TransferSession, session_id)
+        source_root = ts.source_root if ts else None
+        only_new_mode = ts.only_new_mode if ts else False
+
+        result = await session.execute(
+            select(TransferBatch)
+            .where(
+                TransferBatch.session_id == session_id,
+                TransferBatch.status.notin_([
+                    BatchStatus.COMPLETED.value,
+                    BatchStatus.FAILED.value,
+                    BatchStatus.PARTIAL.value,
+                ]),
             )
-            batches = list(result.scalars().all())
+            .order_by(TransferBatch.batch_number)
+        )
+        existing_batches = list(result.scalars().all())
 
-        if not batches and source_root:
-            logger.info("Session %d has no batches — running scan on %s", session_id, source_root)
+    if existing_batches:
+        return existing_batches
 
-            # Determine cutoff for incremental import
-            cutoff_datetime = None
-            if only_new_mode and source_root.startswith("ios://"):
-                serial, _ = parse_ios_source(source_root)
-                cutoff_datetime = await get_cutoff_datetime(serial)
-                if cutoff_datetime is not None:
-                    logger.info(
-                        "Session %d: incremental mode active, cutoff=%s",
-                        session_id, cutoff_datetime.isoformat(),
-                    )
-                else:
-                    logger.info(
-                        "Session %d: incremental mode active but no prior cutoff — full scan",
-                        session_id,
-                    )
+    if not source_root:
+        return []
 
-            item_ids = await run_scan(
-                source_root,
-                session_id=session_id,
-                cutoff_datetime=cutoff_datetime,
+    logger.info("Session %d has no batches — running scan on %s", session_id, source_root)
+
+    # Load selected_files from DB (persisted at session creation)
+    selected_set: set[str] | None = None
+    async with session_scope() as session:
+        ts_sel = await session.get(TransferSession, session_id)
+        if ts_sel and ts_sel.selected_files_json:
+            raw = json.loads(ts_sel.selected_files_json)
+            selected_set = set(raw)
+            logger.info(
+                "Session %d: loaded %d selected file(s) from DB for filtered scan",
+                session_id, len(selected_set),
             )
 
-            # Filter by selected_files if provided
-            selected_set = _selected_files_map.pop(session_id, None)
-            if selected_set is not None:
-                logger.info(
-                    "Session %d: filtering %d scanned items by %d selected file(s)",
-                    session_id, len(item_ids), len(selected_set),
-                )
-                # Query source_paths for scanned items and keep only selected ones
-                async with session_scope() as session:
-                    result = await session.execute(
-                        select(MediaItem.id, MediaItem.source_path).where(
-                            MediaItem.id.in_(item_ids)
-                        )
-                    )
-                    filtered_ids = [
-                        row[0] for row in result.all()
-                        if row[1] in selected_set
-                    ]
-                skipped = len(item_ids) - len(filtered_ids)
-                if skipped:
-                    logger.info(
-                        "Session %d: skipped %d items not in selected set",
-                        session_id, skipped,
-                    )
-                item_ids = filtered_ids
+    cutoff_datetime = None
+    if only_new_mode and source_root.startswith("ios://"):
+        serial, _ = parse_ios_source(source_root)
+        cutoff_datetime = await get_cutoff_datetime(serial)
+        if cutoff_datetime is not None:
+            logger.info(
+                "Session %d: incremental mode active, cutoff=%s",
+                session_id, cutoff_datetime.isoformat(),
+            )
+        else:
+            logger.info(
+                "Session %d: incremental mode active but no prior cutoff — full scan",
+                session_id,
+            )
 
-            if not item_ids:
-                logger.warning("Session %d: scan found 0 media items at %s", session_id, source_root)
-                async with session_scope() as session:
-                    ts = await session.get(TransferSession, session_id)
-                    if ts:
-                        ts.status = SessionStatus.FAILED.value
-                        ts.error_message = (
-                            f"No media files found in source directory: {source_root}. "
-                            "The preflight validator counts all files, but the scanner "
-                            "only processes media files (images, video, audio, documents)."
-                        )
-                        ts.completed_at = datetime.now(UTC)
-                        ts.touch()
-                await ws_events.emit_error(session_id, (ts.error_message if ts else None) or "No media files found")
-                try:
-                    report_path = await generate_session_report(session_id)
-                    async with session_scope() as session:
-                        ts = await session.get(TransferSession, session_id)
-                        if ts:
-                            ts.session_report_path = str(report_path)
-                            ts.touch()
-                except Exception as report_exc:
-                    logger.error("Failed to generate report for session %d: %s", session_id, report_exc)
-                return
+    # Pass allowed_paths to scanner so it only processes selected files
+    item_ids = await run_scan(
+        source_root,
+        session_id=session_id,
+        cutoff_datetime=cutoff_datetime,
+        allowed_paths=frozenset(selected_set) if selected_set else None,
+    )
 
-            batch_ids = await create_batches(session_id, item_ids)
+    if selected_set is not None:
+        logger.info(
+            "Session %d: selective scan completed, %d items queued (was %d selected paths)",
+            session_id, len(item_ids), len(selected_set),
+        )
 
-            async with session_scope() as session:
-                ts = await session.get(TransferSession, session_id)
-                if ts:
-                    ts.total_items = len(item_ids)
-                    ts.total_files = len(item_ids)
-                    ts.total_batches = len(batch_ids)
-                    ts.touch()
-
-            await ws_events.emit_scan_complete(session_id, len(item_ids))
-            async with session_scope() as session:
-                result = await session.execute(
-                    select(TransferBatch).where(TransferBatch.id.in_(batch_ids))
-                )
-                batches = list(result.scalars().all())
-
-            if len(batches) < len(batch_ids):
-                logger.warning(
-                    "Only retrieved %d of %d batches from database for session %d",
-                    len(batches), len(batch_ids), session_id
-                )
-
-            for batch in batches:
-                await ws_events.emit_batch_created(
-                    session_id, batch.id, batch.batch_number, batch.total_items
-                )
-
-            # Re-fetch batches now that they exist
-            async with session_scope() as session:
-                result = await session.execute(
-                    select(TransferBatch)
-                    .where(
-                        TransferBatch.session_id == session_id,
-                        TransferBatch.status.notin_([
-                            BatchStatus.COMPLETED.value,
-                            BatchStatus.FAILED.value,
-                            BatchStatus.PARTIAL.value,
-                        ]),
-                    )
-                    .order_by(TransferBatch.batch_number)
-                )
-                batches = list(result.scalars().all())
-
-        duplicate_pause_requested = False
-
-        for batch in batches:
-            await set_session_field(session_id, "current_batch", batch.batch_number)
-            # Guard: skip batches whose items are already fully processed on a
-            # prior resume.  The query filter above already excludes terminal
-            # statuses, but this provides defence-in-depth against race
-            # conditions or future code paths that may leave a stale batch.
-            if batch.status in (
-                BatchStatus.COMPLETED.value,
-                BatchStatus.FAILED.value,
-            ):
-                continue
-
-            # Check if session was paused, cancelled, or deleted
-            async with session_scope() as session:
-                ts = await session.get(TransferSession, session_id)
-                if ts is None or ts.status != SessionStatus.RUNNING.value:
-                    return
-
-            # --- Pre-flight duplicate check ---
-            try:
-                report = await check_batch(batch.id)
-            except ValueError:
-                logger.warning(
-                    "Batch %d not found (session may have been cleared) — aborting session %d",
-                    batch.id, session_id,
-                )
-                return
-
-            if report.has_duplicates:
-                async with session_scope() as _s:
-                    _ts_check = await _s.get(TransferSession, session_id)
-                    _db_resolved = (
-                        _ts_check is not None
-                        and _ts_check.resolved_batch_id == batch.id
-                        and _ts_check.duplicate_resolutions_json is not None
-                    )
-                    _db_resolutions = []
-                    if _ts_check is not None and _ts_check.resolved_batch_id == batch.id:
-                        if isinstance(_ts_check.duplicate_resolutions_json, str):
-                            _db_resolutions = json.loads(_ts_check.duplicate_resolutions_json)
-                if _db_resolved:
-                    if _db_resolutions:
-                        await _apply_duplicate_resolutions(batch.id, _db_resolutions)
-                    async with session_scope() as _s:
-                        _ts_clear = await _s.get(TransferSession, session_id)
-                        if _ts_clear:
-                            _ts_clear.resolved_batch_id = None
-                            _ts_clear.duplicate_resolutions_json = None
-                            _ts_clear.touch()
-                else:
-                    # Unresolved duplicates: notify the frontend, then break
-                    # out of the batch loop.  We break (not return) so the
-                    # post-loop section below is the single point that sets
-                    # session PAUSED, eliminating the duplicate pause path
-                    # that previously caused infinite pause loops on resume.
-                    await ws_events.emit_duplicates_detected(session_id, {
-                        "batch_id": batch.id,
-                        "exact_count": len(report.exact_duplicates),
-                        "potential_count": len(report.potential_duplicates),
-                        "summary": report.summary,
-                        "exact_duplicates": [
-                            {
-                                "item_id": e.item_id,
-                                "file_name": e.file_name,
-                                "source_path": e.source_path,
-                                "source_hash": e.source_hash,
-                                "file_size": e.file_size,
-                                "match_type": e.match_type,
-                                "matched_path": e.matched_path,
-                                "matched_item_id": e.matched_item_id,
-                                "matched_file_size": e.matched_file_size,
-                                "matched_date_taken": e.matched_date_taken,
-                                "matched_thumbnail_url": e.matched_thumbnail_url,
-                            }
-                            for e in report.exact_duplicates
-                        ],
-                        "potential_duplicates": [
-                            {
-                                "item_id": e.item_id,
-                                "file_name": e.file_name,
-                                "source_path": e.source_path,
-                                "source_hash": e.source_hash,
-                                "file_size": e.file_size,
-                                "match_type": e.match_type,
-                                "matched_path": e.matched_path,
-                                "matched_item_id": e.matched_item_id,
-                                "matched_file_size": e.matched_file_size,
-                                "matched_date_taken": e.matched_date_taken,
-                                "matched_thumbnail_url": e.matched_thumbnail_url,
-                            }
-                            for e in report.potential_duplicates
-                        ],
-                        "paused_at": report.checked_at.isoformat(),
-                    })
-                    duplicate_pause_requested = True
-                    break
-
-            # --- Hop 1: Source -> Cache ---
-            await ws_events.emit_batch_processing(session_id, batch.id, batch.batch_number, batch.total_items)
-
-            async def _hop1_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
-                await ws_events.emit_hop1_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
-
-            cached = await cache_batch(batch.id, cache_dir=CACHE_DIR, on_file_progress=_hop1_progress_cb, cancel_event=cancel_event, session_id=session_id)
-            await ws_events.emit_hop1_complete(session_id, batch.id, cached)
-
-            # --- Hop 2: Cache -> Destination ---
-            async with session_scope() as session:
-                ts = await session.get(TransferSession, session_id)
-                dest_root = Path(ts.dest_root) if ts else CACHE_DIR
-
-            async def _hop2_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
-                await ws_events.emit_hop2_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
-
-            imported = await import_batch(batch.id, dest_root=dest_root, cache_dir=CACHE_DIR, on_file_progress=_hop2_progress_cb, cancel_event=cancel_event, session_id=session_id)
-            await ws_events.emit_hop2_complete(session_id, batch.id, imported)
-            await ws_events.emit_batch_complete(session_id, batch.id, batch.batch_number, "completed")
-
-        if duplicate_pause_requested:
-            async with session_scope() as session:
-                ts = await session.get(TransferSession, session_id)
-                if ts:
-                    ts.status = SessionStatus.PAUSED.value
-                    ts.touch()
-            await ws_events.emit_session_paused(session_id)
-            _cancellation_events.pop(session_id, None)
-            return
-
-        # All batches done
-        final_total = 0
-        final_completed = 0
-        final_failed = 0
-        final_status = SessionStatus.COMPLETED.value
+    if not item_ids:
+        if selected_set is not None:
+            error_msg = (
+                f"None of the {len(selected_set)} selected file(s) matched scanned media "
+                f"at '{source_root}'. This may be a path normalisation issue — "
+                "please try again by re-selecting files from the preview panel."
+            )
+        else:
+            error_msg = (
+                f"No media files found in source directory: {source_root}. "
+                "The preflight validator counts all files, but the scanner "
+                "only processes media files (images, video, audio, documents)."
+            )
+        logger.warning("Session %d: %s", session_id, error_msg)
         async with session_scope() as session:
             ts = await session.get(TransferSession, session_id)
             if ts:
-                # Query all items in this session to get their actual statuses
-                result = await session.execute(
-                    select(MediaItem).where(MediaItem.session_id == session_id)
-                )
-                items = list(result.scalars().all())
-
-                completed_count = sum(
-                    1 for item in items if item.final_status == HopStatus.COMPLETED.value
-                )
-                failed_count = len(items) - completed_count
-
-                ts.completed_items = completed_count
-                ts.failed_items = failed_count
-
-                volume_result = await session.execute(
-                    select(func.sum(MediaItem.file_size)).where(
-                        MediaItem.session_id == session_id,
-                        MediaItem.final_status == HopStatus.COMPLETED.value,
-                    )
-                )
-                ts.total_bytes_volume = volume_result.scalar() or 0
-
-                if ts.total_items > 0:
-                    if completed_count == 0:
-                        ts.status = SessionStatus.FAILED.value
-                        ts.error_message = (
-                            f"Session completed with 0 successful items out of {ts.total_items} attempted. "
-                            "All items failed. Check the manifest or error log for details."
-                        )
-                    elif completed_count < ts.total_items:
-                        ts.status = SessionStatus.COMPLETED_WITH_ERRORS.value
-                    else:
-                        ts.status = SessionStatus.COMPLETED.value
-                else:
-                    ts.status = SessionStatus.FAILED.value
-                    ts.error_message = "Session completed with 0 items — no media files were processed"
-
+                ts.status = SessionStatus.FAILED.value
+                ts.error_message = error_msg
                 ts.completed_at = datetime.now(UTC)
                 ts.touch()
-                final_total = ts.total_items
-                final_completed = ts.completed_items
-                final_failed = ts.failed_items
-                final_status = ts.status
-
-
-        # Compute elapsed wall-clock seconds (excluding pause time)
-        elapsed_seconds = 0
-        if ts and ts.started_at and ts.completed_at:
-            started = ts.started_at.replace(tzinfo=UTC) if ts.started_at.tzinfo is None else ts.started_at
-            completed = ts.completed_at.replace(tzinfo=UTC) if ts.completed_at.tzinfo is None else ts.completed_at
-            raw_ms = (completed - started).total_seconds() * 1000
-            elapsed_ms = max(0, raw_ms - (ts.total_paused_ms or 0))
-            elapsed_seconds = int(elapsed_ms / 1000)
-
-        if final_status == SessionStatus.COMPLETED.value:
-            await ws_manager.broadcast(session_id, "session_completed", {
-                "session_id": session_id,
-                "imported_files": ts.imported_files if ts else 0,
-                "failed_files": ts.failed_files if ts else 0,
-                "elapsed_seconds": elapsed_seconds,
-            })
-        elif final_status == SessionStatus.COMPLETED_WITH_ERRORS.value:
-            await ws_manager.broadcast(session_id, "session_completed_with_errors", {
-                "session_id": session_id,
-                "imported_files": ts.imported_files if ts else 0,
-                "failed_files": ts.failed_files if ts else 0,
-                "elapsed_seconds": elapsed_seconds,
-            })
-
-        # --- Update device import cutoff for incremental imports ---
-        try:
-            async with session_scope() as session:
-                ts = await session.get(TransferSession, session_id)
-                if (
-                    ts is not None
-                    and ts.only_new_mode
-                    and ts.source_root.startswith("ios://")
-                    and ts.status in {
-                        SessionStatus.COMPLETED.value,
-                        SessionStatus.COMPLETED_WITH_ERRORS.value,
-                    }
-                ):
-                    serial, _ = parse_ios_source(ts.source_root)
-                    new_cutoff = await compute_cutoff_from_session(session_id)
-                    if new_cutoff is not None:
-                        # Fetch device display name
-                        device_name = None
-                        try:
-                            devices = await list_ios_devices()
-                            devices_list = devices.devices if hasattr(devices, "devices") else devices
-                            if isinstance(devices_list, (list, tuple)):
-                                for d in devices_list:
-                                    d_serial = d.get("serial") if isinstance(d, dict) else getattr(d, "serial", None)
-                                    if d_serial == serial:
-                                        device_name = d.get("name") if isinstance(d, dict) else getattr(d, "name", None)
-                                        break
-                        except Exception:
-                            pass
-
-                        await upsert_device_state(
-                            serial, device_name, new_cutoff, session_id,
-                        )
-                        logger.info(
-                            "Session %d: device import cutoff updated to %s for %s",
-                            session_id, new_cutoff.isoformat(), serial,
-                        )
-        except Exception as cutoff_exc:
-            logger.error(
-                "Failed to update device import cutoff for session %d: %s",
-                session_id, cutoff_exc,
-            )
-
-        # --- Post-session report generation ---
+        await ws_events.emit_error(session_id, error_msg)
         try:
             report_path = await generate_session_report(session_id)
             async with session_scope() as session:
@@ -1591,15 +1419,349 @@ async def _run_transfer_background(session_id: int) -> None:
                 if ts:
                     ts.session_report_path = str(report_path)
                     ts.touch()
-            logger.info("Session %d report saved at %s", session_id, report_path)
         except Exception as report_exc:
             logger.error("Failed to generate report for session %d: %s", session_id, report_exc)
+        return None
 
-        # Clean up cancellation event now that the session is done
-        _cancellation_events.pop(session_id, None)
+    batch_ids = await create_batches(session_id, item_ids)
+
+    async with session_scope() as session:
+        ts = await session.get(TransferSession, session_id)
+        if ts:
+            ts.total_items = len(item_ids)
+            ts.total_files = len(item_ids)
+            ts.total_batches = len(batch_ids)
+            ts.touch()
+
+    await ws_events.emit_scan_complete(session_id, len(item_ids))
+    async with session_scope() as session:
+        result = await session.execute(
+            select(TransferBatch).where(TransferBatch.id.in_(batch_ids))
+        )
+        batches = list(result.scalars().all())
+
+    if len(batches) < len(batch_ids):
+        logger.warning(
+            "Only retrieved %d of %d batches from database for session %d",
+            len(batches), len(batch_ids), session_id
+        )
+
+    for batch in batches:
+        await ws_events.emit_batch_created(
+            session_id, batch.id, batch.batch_number, batch.total_items
+        )
+
+    async with session_scope() as session:
+        result = await session.execute(
+            select(TransferBatch)
+            .where(
+                TransferBatch.session_id == session_id,
+                TransferBatch.status.notin_([
+                    BatchStatus.COMPLETED.value,
+                    BatchStatus.FAILED.value,
+                    BatchStatus.PARTIAL.value,
+                ]),
+            )
+            .order_by(TransferBatch.batch_number)
+        )
+        return list(result.scalars().all())
+
+
+async def _phase_execute_batches(
+    session_id: int,
+    batches: list[TransferBatch],
+    cancel_event: asyncio.Event | None,
+) -> bool:
+    """Execute all batches through Hop 1 then Hop 2.
+
+    Returns True if all batches completed without unresolved duplicates,
+    False if duplicates paused the session.
+    """
+    duplicate_pause_requested = False
+
+    for batch in batches:
+        await set_session_field(session_id, "current_batch", batch.batch_number)
+        if batch.status in (
+            BatchStatus.COMPLETED.value,
+            BatchStatus.FAILED.value,
+        ):
+            continue
+
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is None or ts.status != SessionStatus.RUNNING.value:
+                return False
+
+        try:
+            report = await check_batch(batch.id)
+        except ValueError:
+            logger.warning(
+                "Batch %d not found (session may have been cleared) — aborting session %d",
+                batch.id, session_id,
+            )
+            return False
+
+        if report.has_duplicates:
+            async with session_scope() as _s:
+                _ts_check = await _s.get(TransferSession, session_id)
+                _db_resolved = (
+                    _ts_check is not None
+                    and _ts_check.resolved_batch_id == batch.id
+                    and _ts_check.duplicate_resolutions_json is not None
+                )
+                _db_resolutions = []
+                if _ts_check is not None and _ts_check.resolved_batch_id == batch.id:
+                    if isinstance(_ts_check.duplicate_resolutions_json, str):
+                        _db_resolutions = json.loads(_ts_check.duplicate_resolutions_json)
+            if _db_resolved:
+                if _db_resolutions:
+                    await _apply_duplicate_resolutions(batch.id, _db_resolutions)
+                async with session_scope() as _s:
+                    _ts_clear = await _s.get(TransferSession, session_id)
+                    if _ts_clear:
+                        _ts_clear.resolved_batch_id = None
+                        _ts_clear.duplicate_resolutions_json = None
+                        _ts_clear.touch()
+            else:
+                await ws_events.emit_duplicates_detected(session_id, {
+                    "batch_id": batch.id,
+                    "exact_count": len(report.exact_duplicates),
+                    "potential_count": len(report.potential_duplicates),
+                    "summary": report.summary,
+                    "exact_duplicates": [
+                        {
+                            "item_id": e.item_id,
+                            "file_name": e.file_name,
+                            "source_path": e.source_path,
+                            "source_hash": e.source_hash,
+                            "file_size": e.file_size,
+                            "match_type": e.match_type,
+                            "matched_path": e.matched_path,
+                            "matched_item_id": e.matched_item_id,
+                            "matched_file_size": e.matched_file_size,
+                            "matched_date_taken": e.matched_date_taken,
+                            "matched_thumbnail_url": e.matched_thumbnail_url,
+                        }
+                        for e in report.exact_duplicates
+                    ],
+                    "potential_duplicates": [
+                        {
+                            "item_id": e.item_id,
+                            "file_name": e.file_name,
+                            "source_path": e.source_path,
+                            "source_hash": e.source_hash,
+                            "file_size": e.file_size,
+                            "match_type": e.match_type,
+                            "matched_path": e.matched_path,
+                            "matched_item_id": e.matched_item_id,
+                            "matched_file_size": e.matched_file_size,
+                            "matched_date_taken": e.matched_date_taken,
+                            "matched_thumbnail_url": e.matched_thumbnail_url,
+                        }
+                        for e in report.potential_duplicates
+                    ],
+                    "paused_at": report.checked_at.isoformat(),
+                })
+                duplicate_pause_requested = True
+                break
+
+        # --- Hop 1: Source -> Cache ---
+        await ws_events.emit_batch_processing(session_id, batch.id, batch.batch_number, batch.total_items)
+
+        async def _hop1_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
+            await ws_events.emit_hop1_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
+
+        cached = await cache_batch(batch.id, cache_dir=CACHE_DIR, on_file_progress=_hop1_progress_cb, cancel_event=cancel_event, session_id=session_id)
+        await ws_events.emit_hop1_complete(session_id, batch.id, cached)
+
+        # --- Hop 2: Cache -> Destination ---
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            dest_root = Path(ts.dest_root) if ts else CACHE_DIR
+
+        async def _hop2_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
+            await ws_events.emit_hop2_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
+
+        imported = await import_batch(batch.id, dest_root=dest_root, cache_dir=CACHE_DIR, on_file_progress=_hop2_progress_cb, cancel_event=cancel_event, session_id=session_id)
+        await ws_events.emit_hop2_complete(session_id, batch.id, imported)
+        await ws_events.emit_batch_complete(session_id, batch.id, batch.batch_number, "completed")
+
+    if duplicate_pause_requested:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts:
+                ts.status = SessionStatus.PAUSED.value
+                ts.touch()
+        await ws_events.emit_session_paused(session_id)
+        return False
+
+    return True
+
+
+async def _phase_finalize(session_id: int) -> None:
+    """Compute final stats, broadcast completion, update device cutoff, generate report."""
+    elapsed_seconds = 0
+    ts_started_at = None
+    ts_completed_at = None
+    ts_total_paused_ms = 0
+    ts_imported_files = 0
+    ts_failed_files = 0
+    final_status = SessionStatus.COMPLETED.value
+    async with session_scope() as session:
+        ts = await session.get(TransferSession, session_id)
+        if ts:
+            # Do not overwrite an explicit CANCELLED status — the user cancelled
+            # intentionally. A lingering task should not change CANCELLED to FAILED.
+            if ts.status == SessionStatus.CANCELLED.value:
+                logger.info(
+                    "Session %d is CANCELLED — skipping final status update from background task",
+                    session_id,
+                )
+                _active_tasks.pop(session_id, None)
+                return
+
+            result = await session.execute(
+                select(MediaItem).where(MediaItem.session_id == session_id)
+            )
+            items = list(result.scalars().all())
+
+            completed_count = sum(
+                1 for item in items if item.final_status == HopStatus.COMPLETED.value
+            )
+            failed_count = len(items) - completed_count
+
+            ts.completed_items = completed_count
+            ts.failed_items = failed_count
+
+            volume_result = await session.execute(
+                select(func.sum(MediaItem.file_size)).where(
+                    MediaItem.session_id == session_id,
+                    MediaItem.final_status == HopStatus.COMPLETED.value,
+                )
+            )
+            ts.total_bytes_volume = volume_result.scalar() or 0
+
+            if ts.total_items > 0:
+                if completed_count == 0:
+                    ts.status = SessionStatus.FAILED.value
+                    ts.error_message = (
+                        f"Session completed with 0 successful items out of {ts.total_items} attempted. "
+                        "All items failed. Check the manifest or error log for details."
+                    )
+                elif completed_count < ts.total_items:
+                    ts.status = SessionStatus.COMPLETED_WITH_ERRORS.value
+                else:
+                    ts.status = SessionStatus.COMPLETED.value
+            else:
+                ts.status = SessionStatus.FAILED.value
+                ts.error_message = "Session completed with 0 items — no media files were processed"
+
+            ts.completed_at = datetime.now(UTC)
+            ts.touch()
+            final_status = ts.status
+            ts_started_at = ts.started_at
+            ts_completed_at = ts.completed_at
+            ts_total_paused_ms = ts.total_paused_ms or 0
+            ts_imported_files = ts.imported_files or 0
+            ts_failed_files = ts.failed_files or 0
+
+    if ts_started_at and ts_completed_at:
+        started = ts_started_at.replace(tzinfo=UTC) if ts_started_at.tzinfo is None else ts_started_at
+        completed = ts_completed_at.replace(tzinfo=UTC) if ts_completed_at.tzinfo is None else ts_completed_at
+        raw_ms = (completed - started).total_seconds() * 1000
+        elapsed_ms = max(0, raw_ms - ts_total_paused_ms)
+        elapsed_seconds = int(elapsed_ms / 1000)
+
+    if final_status == SessionStatus.COMPLETED.value:
+        await ws_manager.broadcast(session_id, "session_completed", {
+            "session_id": session_id,
+            "imported_files": ts_imported_files,
+            "failed_files": ts_failed_files,
+            "elapsed_seconds": elapsed_seconds,
+        })
+    elif final_status == SessionStatus.COMPLETED_WITH_ERRORS.value:
+        await ws_manager.broadcast(session_id, "session_completed_with_errors", {
+            "session_id": session_id,
+            "imported_files": ts_imported_files,
+            "failed_files": ts_failed_files,
+            "elapsed_seconds": elapsed_seconds,
+        })
+
+    try:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if (
+                ts is not None
+                and ts.only_new_mode
+                and ts.source_root.startswith("ios://")
+                and ts.status in {
+                    SessionStatus.COMPLETED.value,
+                    SessionStatus.COMPLETED_WITH_ERRORS.value,
+                }
+            ):
+                serial, _ = parse_ios_source(ts.source_root)
+                new_cutoff = await compute_cutoff_from_session(session_id)
+                if new_cutoff is not None:
+                    device_name = None
+                    try:
+                        raw_devices = await asyncio.to_thread(_list_ios_devices_backend)
+                        for d in raw_devices:
+                            if d.serial == serial:
+                                device_name = d.name
+                                break
+                    except Exception:
+                        pass
+                    await upsert_device_state(
+                        serial, device_name, new_cutoff, session_id,
+                    )
+                    logger.info(
+                        "Session %d: device import cutoff updated to %s for %s",
+                        session_id, new_cutoff.isoformat(), serial,
+                    )
+    except Exception as cutoff_exc:
+        logger.error(
+            "Failed to update device import cutoff for session %d: %s",
+            session_id, cutoff_exc,
+        )
+
+    try:
+        report_path = await generate_session_report(session_id)
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts:
+                ts.session_report_path = str(report_path)
+                ts.touch()
+        logger.info("Session %d report saved at %s", session_id, report_path)
+    except Exception as report_exc:
+        logger.error("Failed to generate report for session %d: %s", session_id, report_exc)
+
+
+async def _run_transfer_background(session_id: int) -> None:
+    """Background task: process all batches through Hop 1 then Hop 2."""
+    # Register this task so it can be cancelled if the session is paused/cancelled
+    # by a concurrent request before we exit.
+    _active_tasks[session_id] = asyncio.current_task()
+    cancel_event = _cancellation_events.get(session_id)
+    try:
+        batches = await _phase_scan_and_create_batches(session_id, cancel_event)
+        if batches is None:
+            _active_tasks.pop(session_id, None)
+            _cleanup_session_state(session_id)
+            return
+
+        completed = await _phase_execute_batches(session_id, batches, cancel_event)
+        if not completed:
+            _active_tasks.pop(session_id, None)
+            _cleanup_session_state(session_id)
+            return
+
+        await _phase_finalize(session_id)
+        _active_tasks.pop(session_id, None)
+        _cleanup_session_state(session_id)
 
     except Exception as exc:
-        _cancellation_events.pop(session_id, None)
+        _active_tasks.pop(session_id, None)
+        _cleanup_session_state(session_id)
         logger.error("Transfer background failed for session %d: %s", session_id, exc)
         await ws_events.emit_error(session_id, str(exc))
         async with session_scope() as session:
@@ -1609,7 +1771,6 @@ async def _run_transfer_background(session_id: int) -> None:
                 ts.error_message = str(exc)
                 ts.touch()
 
-        # --- Post-session report generation (failure case) ---
         try:
             report_path = await generate_session_report(session_id)
             async with session_scope() as session:
@@ -1826,12 +1987,14 @@ async def get_media_thumbnail(item_id: int):
     trigger endless frontend retry loops.
 
     If the thumbnail has not been generated yet (status == "pending"),
-    generates it synchronously on this request — the "generate on demand"
-    pattern — and caches the result before responding.
+    generates it via ``asyncio.to_thread`` so the CPU-bound decoding does
+    not block the event loop, then caches the result before responding.
 
-    Response headers include ``X-Thumbnail-Status`` (``"ready"`` or
-    ``"failed"``) so the frontend can distinguish real thumbnails from
-    placeholders if needed.
+    Response headers include ``X-Thumbnail-Status`` (``"ready"``,
+    ``"failed"``, or ``"not_found"``) so the frontend can distinguish
+    real thumbnails from placeholders if needed.  The ``"not_found"``
+    status is intentionally not persisted so thumbnails can be regenerated
+    when external drives are reconnected.
     """
     data = thumbnail_cache.get(item_id)
     if data is not None:
@@ -1861,9 +2024,44 @@ async def get_media_thumbnail(item_id: int):
             },
         )
 
-    file_path = Path(db_item.source_path)
-    if file_path.is_file():
-        data = generate_thumbnail_bytes(file_path)
+    # ---- On cache miss: try to locate the file ----
+    # Priority 1: source_path (works for copy-mode local transfers where source still exists)
+    file_path: Path | None = None
+    if not db_item.source_path.startswith("ios://"):
+        try:
+            source = Path(db_item.source_path)
+            if source.is_file():
+                file_path = source
+        except Exception:
+            pass
+
+    # Priority 1.5: check Hop 1 local cache directory
+    if file_path is None:
+        from backend.engines.cache_manager import get_cache_path
+        try:
+            candidate = get_cache_path(CACHE_DIR, db_item.source_path, db_item.file_name)
+            if candidate.is_file():
+                file_path = candidate
+        except Exception:
+            pass
+
+    # Priority 2: reconstruct from archive destination
+    if file_path is None and db_item.session_id is not None:
+        async with session_scope() as session:
+            session_obj = await session.get(TransferSession, db_item.session_id)
+        if session_obj and session_obj.dest_root:
+            from backend.engines.organizer import locate_archive_file
+
+            layout = getattr(session_obj, "folder_layout", "year/month")
+            try:
+                candidate = locate_archive_file(Path(session_obj.dest_root), db_item, layout=layout)
+                if candidate is not None:
+                    file_path = candidate
+            except Exception:
+                pass
+
+    if file_path is not None:
+        data = await asyncio.to_thread(generate_thumbnail_bytes, file_path)
         if data:
             thumbnail_cache.put(item_id, data)
             async with session_scope() as session:
@@ -1871,6 +2069,7 @@ async def get_media_thumbnail(item_id: int):
                 if upd:
                     upd.thumbnail_path = "memory"
                     upd.thumbnail_status = "ready"
+                    upd.touch()
             return Response(
                 content=data,
                 media_type="image/jpeg",
@@ -1880,18 +2079,15 @@ async def get_media_thumbnail(item_id: int):
                     "X-Thumbnail-Status": "ready",
                 },
             )
-        else:
-            async with session_scope() as session:
-                upd = await session.get(MediaItem, item_id)
-                if upd:
-                    upd.thumbnail_status = "failed"
 
+    # File not found anywhere — return placeholder but do NOT permanently mark as failed
+    # (the file may be on a disconnected external drive; marking failed prevents future regen)
     return Response(
         content=_get_placeholder_jpeg(),
         media_type="image/jpeg",
         headers={
-            "Cache-Control": "public, max-age=86400",
-            "X-Thumbnail-Status": "failed",
+            "Cache-Control": "no-store",
+            "X-Thumbnail-Status": "not_found",
         },
     )
 
@@ -1947,6 +2143,13 @@ async def regenerate_thumbnails():
     (including the IDs of failed items) so the frontend can update its state.
     The actual generation runs in a background thread so the HTTP response is fast.
     """
+    # Bump the generation counter — any prior regen thread will
+    # see a stale generation and stop.
+    global _regen_generation
+    with _regen_gen_lock:
+        _regen_generation += 1
+        current_gen = _regen_generation
+
     async with session_scope() as session:
         q = (
             select(MediaItem)
@@ -1965,8 +2168,12 @@ async def regenerate_thumbnails():
                 "source_path": item.source_path,
                 "dest_root": Path(item.session.dest_root) if item.session else None,
                 "file_name": item.file_name,
+                "file_size": item.file_size,
                 "extension": item.extension,
                 "date_taken": item.date_taken,
+                "original_capture_time": item.original_capture_time,
+                "created_at": item.created_at,
+                "folder_layout": (item.session.folder_layout if item.session else None) or "year/month",
             }
             for item in items
         ]
@@ -1974,90 +2181,58 @@ async def regenerate_thumbnails():
     if not items:
         return {"message": "No items need thumbnail generation", "count": 0, "stale_count": 0}
 
-    def _archive_path(dest_root: Path, data: dict) -> Path:
-        ext = data["extension"] or ""
-        name = data["file_name"]
-        dt = data["date_taken"]
-        if dt is not None:
-            return dest_root / str(dt.year) / format_month_folder(dt) / name
-        return dest_root / "_unsorted" / name
+    def _generate_all(gen: int) -> None:
+            from backend.engines.thread_runner import submit_and_wait
 
-    # Pre-count stale items (both source and dest missing) so the response
-    # can report it immediately without waiting for the background thread.
-    stale_count = 0
-    for entry in item_data:
-        src = Path(entry["source_path"])
-        dst_missing = True
-        if entry["dest_root"] is not None:
-            dst = _archive_path(entry["dest_root"], entry)
-            dst_missing = not dst.is_file()
-        src_missing = not src.is_file()
-        if src_missing and dst_missing:
-            stale_count += 1
-
-    failed_ids: list[int] = []
-
-    def _generate_all() -> None:
-        loop = asyncio.new_event_loop()
-        try:
             for entry in item_data:
+                with _regen_gen_lock:
+                    if gen != _regen_generation:
+                        logger.info("Thumbnail regen cancelled by a newer request")
+                        break
+
                 item_id = entry["id"]
                 source_path = entry["source_path"]
                 dest_root = entry["dest_root"]
                 try:
-                    # Try destination path first (the final organised copy)
-                    file_path = None
-                    if dest_root is not None:
-                        dst = _archive_path(dest_root, entry)
-                        if dst.is_file():
-                            file_path = dst
-                    # Fall back to source path (original file still on disk)
-                    if file_path is None:
-                        src = Path(source_path)
-                        if src.is_file():
-                            file_path = src
+                    file_path = resolve_thumbnail_source_path(entry, dest_root)
 
                     if file_path is None:
                         logger.warning(
                             "Thumbnail regen: source and dest both missing for item %d "
-                            "-- removing orphaned entry", item_id
+                            "-- skipping", item_id
                         )
-                        loop.run_until_complete(
-                            _remove_orphaned_media_item(item_id)
-                        )
-                        failed_ids.append(item_id)
+                        submit_and_wait(mark_thumbnail_failed(item_id))
                         continue
 
                     data = generate_thumbnail_bytes(file_path)
                     if data:
+                        with _regen_gen_lock:
+                            if gen != _regen_generation:
+                                break
                         thumbnail_cache.put(item_id, data)
                         time.sleep(0.02)
-                        loop.run_until_complete(_mark_thumbnail_ready(item_id))
+                        submit_and_wait(mark_thumbnail_ready(item_id))
                         logger.info("Thumbnail regen: item %d OK (%d bytes)", item_id, len(data))
                     else:
                         logger.warning("Thumbnail regen: generation returned None for item %d", item_id)
-                        loop.run_until_complete(_mark_thumbnail_failed(item_id))
-                        failed_ids.append(item_id)
+                        submit_and_wait(mark_thumbnail_failed(item_id))
                 except Exception as exc:
                     logger.warning("Thumbnail regen: failed for item %d: %s", item_id, exc)
                     try:
-                        loop.run_until_complete(_mark_thumbnail_failed(item_id))
+                        submit_and_wait(mark_thumbnail_failed(item_id))
                     except Exception:
                         pass
-                    failed_ids.append(item_id)
-        finally:
-            loop.close()
 
-    t = threading.Thread(target=_generate_all, daemon=True, name="regen-thumbnails")
+    t = threading.Thread(
+        target=_generate_all, args=(current_gen,), daemon=True, name="regen-thumbnails",
+    )
     t.start()
 
     return {
-        "message": "Thumbnail generation started",
+        "message": "Thumbnail generation started in background",
         "total": len(items),
-        "succeeded": len(items) - len(failed_ids),
-        "failed": len(failed_ids),
-        "failed_ids": failed_ids,
-        "stale_count": stale_count,
+        "queued": len(items),
+        "note": "Call GET /api/media/thumbnail-cache-stats to monitor progress.",
     }
 
 
@@ -2066,12 +2241,17 @@ async def regenerate_thumbnails():
 # ---------------------------------------------------------------------------
 @router.post("/media/clear", response_model=ClearResponse)
 async def clear_library(_: None = Depends(require_local_token)) -> ClearResponse:
-    """Clear all library entries (media items).
+    """Clear all library entries (media items, sessions, batches).
 
-    Removes every row from the media_items table and clears the in-memory
-    thumbnail cache.  Does NOT touch the user's actual files at any transfer
-    destination — this only clears app-managed records and caches.
+    Removes every row from media_items, transfer_batches, and
+    transfer_sessions tables. Clears the in-memory thumbnail cache and
+    Hop 1 cache directory contents. Does NOT touch the user's actual
+    files at any transfer destination — this only clears app-managed
+    records and caches.
     """
+    global _regen_generation
+    with _regen_gen_lock:
+        _regen_generation += 1
     thumbnail_cache.clear()
 
     async with session_scope() as session:
@@ -2079,20 +2259,37 @@ async def clear_library(_: None = Depends(require_local_token)) -> ClearResponse
             select(func.count(MediaItem.id))
         )).scalar() or 0
 
+        # Collect all session IDs before deleting them
+        session_ids_res = await session.execute(select(TransferSession.id))
+        session_ids = [row[0] for row in session_ids_res.all()]
+        batch_count = (await session.execute(
+            select(func.count(TransferBatch.id))
+        )).scalar() or 0
+
+        # Delete in correct cascade order
         await session.execute(delete(MediaItem))
+        await session.execute(delete(TransferBatch))
+        await session.execute(delete(TransferSession))
         await session.commit()
+
+    # Clean up in-memory state for deleted sessions
+    for sid in session_ids:
+        _cleanup_session_state(sid)
 
     cache_files_removed = _clear_cache_dir()
 
     logger.info(
-        "Cleared library: %d media items, %d cache files removed",
-        media_count, cache_files_removed,
+        "Cleared library: %d media items, %d sessions, %d cache files removed",
+        media_count, len(session_ids), cache_files_removed,
     )
 
     return ClearResponse(
-        message=f"Cleared {media_count} library item(s)",
+        message=f"Cleared {media_count} library item(s) and {len(session_ids)} session(s)",
+        sessions_cleared=len(session_ids),
+        batches_cleared=batch_count,
         media_items_cleared=media_count,
         thumbnails_removed=0,
+        cache_files_removed=cache_files_removed,
     )
 
 
@@ -2120,7 +2317,10 @@ async def list_batches(session_id: int) -> BatchList:
 # Session Progress (polling-based authoritative source)
 # ---------------------------------------------------------------------------
 @router.get("/sessions/{session_id}/progress", response_model=SessionProgressResponse)
-async def get_session_progress(session_id: int) -> SessionProgressResponse:
+async def get_session_progress(
+    session_id: int,
+    _: None = Depends(per_session_rate_limit()),
+) -> SessionProgressResponse:
     """Return a complete snapshot of transfer progress for the live UI.
 
     This is the authoritative data source for the Transfer Monitor and Media
@@ -2266,14 +2466,28 @@ async def get_session_progress(session_id: int) -> SessionProgressResponse:
             elapsed_seconds = int(elapsed_ms / 1000)
 
             # Compute rolling speed from speed_samples
+            # Blend a short window (last 2 samples, most reactive) with a
+            # medium window (last 5 samples, more stable) for responsiveness
+            # without jitter.
             if ts.speed_samples:
                 try:
-                    samples = json.loads(ts.speed_samples)
-                    if len(samples) >= 2:
-                        dt = samples[-1]["ts"] - samples[0]["ts"]
-                        dc = samples[-1]["count"] - samples[0]["count"]
-                        if dt > 0:
-                            speed = dc / dt
+                    all_samples = json.loads(ts.speed_samples)
+                    if len(all_samples) >= 2:
+                        short = all_samples[-2:]
+                        dt_short = short[-1]["ts"] - short[0]["ts"]
+                        dc_short = short[-1]["count"] - short[0]["count"]
+                        speed_short = dc_short / dt_short if dt_short > 0 else 0.0
+
+                        medium = all_samples[-5:]
+                        dt_med = medium[-1]["ts"] - medium[0]["ts"]
+                        dc_med = medium[-1]["count"] - medium[0]["count"]
+                        speed_med = dc_med / dt_med if dt_med > 0 else 0.0
+
+                        speed = (
+                            0.4 * speed_short + 0.6 * speed_med
+                            if speed_short > 0 and speed_med > 0
+                            else speed_short or speed_med
+                        )
                 except (json.JSONDecodeError, KeyError, IndexError):
                     speed = 0.0
 
@@ -2391,10 +2605,11 @@ async def get_disk_space(req: DiskSpaceRequest) -> DiskSpaceResponse:
     p = req.path.strip()
     if not p:
         raise HTTPException(status_code=400, detail="Path must not be empty")
-    if p.startswith("file://") or p.startswith("smb://") or p.startswith("\\\\"):
+    non_local_prefixes = ("file://", "smb://", "\\\\", "ios://", "wpd://", "afc://")
+    if any(p.startswith(prefix) for prefix in non_local_prefixes):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot query disk space for network/device path: {p}",
+            detail=f"Cannot query disk space for non-local path: {p}",
         )
     try:
         usage = shutil.disk_usage(p)
@@ -2633,6 +2848,15 @@ async def ws_transfer(websocket: WebSocket, session_id: int) -> None:
         )
 
     await ws_manager.connect(websocket, session_id)
+    # Send an immediate connected event so the client knows the WS is live
+    try:
+        await websocket.send_json({
+            "event": "connected",
+            "data": {"session_id": session_id, "status": ts.status},
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+    except Exception:
+        pass
     try:
         while True:
             data = await websocket.receive_json()
@@ -2748,37 +2972,49 @@ async def backfill_metadata(_: None = Depends(require_local_token)):
 
     def _backfill_all() -> None:
         nonlocal updated, failed
-        for entry in item_data:
-            item_id = entry["id"]
-            dest_root = entry["dest_root"]
-            source_path = entry["source_path"]
-            # Try destination first, then Hop 1 cache, then source
-            candidates = []
-            if dest_root:
-                candidates.append(dest_root / entry["file_name"])
-            candidates.append(Path(source_path))
+        loop = asyncio.new_event_loop()
+        try:
+            for entry in item_data:
+                item_id = entry["id"]
+                dest_root = entry["dest_root"]
+                source_path = entry["source_path"]
+                # Try destination first, then Hop 1 cache, then source
+                candidates = []
+                if dest_root:
+                    candidates.append(dest_root / entry["file_name"])
+                candidates.append(Path(source_path))
 
-            file_path = None
-            for c in candidates:
-                if c.is_file():
-                    file_path = c
-                    break
+                file_path = None
+                for c in candidates:
+                    if c.is_file():
+                        file_path = c
+                        break
 
-            if file_path is None:
-                logger.warning("Backfill: no file found for item %d", item_id)
-                failed_ids.append(item_id)
-                failed += 1
-                continue
+                if file_path is None:
+                    logger.warning("Backfill: no file found for item %d", item_id)
+                    failed_ids.append(item_id)
+                    failed += 1
+                    continue
 
-            try:
-                capture_dt = extract_capture_datetime(file_path)
-                _backfill_sync(item_id, capture_dt)
-                updated += 1
-                logger.info("Backfill: item %d <- %s", item_id, capture_dt.isoformat())
-            except Exception as exc:
-                logger.warning("Backfill failed for item %d: %s", item_id, exc)
-                failed_ids.append(item_id)
-                failed += 1
+                try:
+                    capture_dt = extract_capture_datetime(file_path)
+
+                    async def _update(iid: int, dt: datetime) -> None:
+                        async with session_scope() as session:
+                            db_item = await session.get(MediaItem, iid)
+                            if db_item is not None:
+                                db_item.original_capture_time = dt
+                                db_item.touch()
+
+                    loop.run_until_complete(_update(item_id, capture_dt))
+                    updated += 1
+                    logger.info("Backfill: item %d <- %s", item_id, capture_dt.isoformat())
+                except Exception as exc:
+                    logger.warning("Backfill failed for item %d: %s", item_id, exc)
+                    failed_ids.append(item_id)
+                    failed += 1
+        finally:
+            loop.close()
 
     t = threading.Thread(target=_backfill_all, daemon=True, name="backfill-metadata")
     t.start()
@@ -2790,22 +3026,6 @@ async def backfill_metadata(_: None = Depends(require_local_token)):
         "failed": failed,
         "failed_ids": failed_ids,
     }
-
-
-def _backfill_sync(item_id: int, capture_dt: datetime) -> None:
-    """Synchronous DB update used from the backfill background thread."""
-    import asyncio
-    loop = asyncio.new_event_loop()
-    try:
-        async def _update() -> None:
-            async with session_scope() as session:
-                db_item = await session.get(MediaItem, item_id)
-                if db_item is not None:
-                    db_item.original_capture_time = capture_dt
-                    db_item.touch()
-        loop.run_until_complete(_update())
-    finally:
-        loop.close()
 
 
 def _media_to_info(mi: MediaItem) -> MediaItemInfo:

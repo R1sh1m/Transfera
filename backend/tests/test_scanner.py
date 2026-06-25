@@ -75,7 +75,7 @@ def _ts(year: int, month: int, day: int) -> float:
 def test_live_photo_groups() -> None:
     print("\n=== Live Photo Group Detection ===")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
 
         # Case 1: classic Live Photo pair (HEIC + MOV, same stem)
@@ -179,7 +179,7 @@ async def test_full_scan() -> None:
         await conn.run_sync(Base.metadata.drop_all)
     await create_all_tables()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
 
         # Create files with DISTINCT dates so we can verify sort order
@@ -238,7 +238,7 @@ async def test_dedup() -> None:
         await conn.run_sync(Base.metadata.drop_all)
     await create_all_tables()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
         _touch(root / "dup.jpg", b"dup", mtime=_ts(2021, 5, 5))
 
@@ -273,7 +273,7 @@ async def test_single_file_scan() -> None:
         await conn.run_sync(Base.metadata.drop_all)
     await create_all_tables()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         f = _touch(Path(tmp) / "single.jpg", b"s", mtime=_ts(2019, 12, 31))
         ids = await scan(f)
         _check("Single file scan returns 1 ID", len(ids) == 1)
@@ -291,7 +291,7 @@ async def test_empty_dir_scan() -> None:
         await conn.run_sync(Base.metadata.drop_all)
     await create_all_tables()
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         ids = await scan(tmp)
         _check("Empty dir returns 0 IDs", len(ids) == 0)
 

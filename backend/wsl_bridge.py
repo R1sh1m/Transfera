@@ -436,7 +436,7 @@ if __name__ == "__main__":
     _ensure_usbmuxd()
 
     try:
-        uvicorn.run(app, host="0.0.0.0", port=BRIDGE_PORT, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=BRIDGE_PORT, ws="wsproto", log_level="info")
     except Exception as exc:
         logger.exception("Bridge crashed: %s", exc)
         print(f"BRIDGE_CRASHED: {exc}", flush=True)

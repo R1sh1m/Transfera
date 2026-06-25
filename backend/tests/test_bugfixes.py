@@ -225,6 +225,7 @@ class TestThumbnailBrokenFile:
 
     def test_schedule_hop1_marks_failed_on_none_return(self, db_session):
         """When generation returns None, the item is marked ``failed``."""
+        import time
         from unittest.mock import patch
 
         from backend.database.models import MediaItem
@@ -248,16 +249,21 @@ class TestThumbnailBrokenFile:
         ):
             _schedule_hop1_thumbnail(item.id, cached_path)
 
-        import time
-        time.sleep(0.3)
+        # Poll the DB until the background worker processes the update,
+        # with a generous timeout to avoid flakiness.
+        deadline = time.monotonic() + 5.0
+        status = None
+        while time.monotonic() < deadline:
+            import asyncio
+            async def _check():
+                async with __import__("backend.database.manager", fromlist=["session_scope"]).session_scope() as s:
+                    upd = await s.get(MediaItem, item.id)
+                    return upd.thumbnail_status if upd else None
+            status = asyncio.run(_check())
+            if status == "failed":
+                break
+            time.sleep(0.05)
 
-        import asyncio
-        async def _check():
-            async with __import__("backend.database.manager", fromlist=["session_scope"]).session_scope() as s:
-                upd = await s.get(MediaItem, item.id)
-                return upd.thumbnail_status if upd else None
-
-        status = asyncio.run(_check())
         assert status == "failed", f"Expected 'failed', got {status!r}"
         assert not thumbnail_cache.has(item.id)
 

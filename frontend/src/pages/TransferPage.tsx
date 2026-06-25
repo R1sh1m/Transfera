@@ -5,6 +5,9 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState, useRef, useMemo } from 'react'
+import type { ThumbQueue } from '@/lib/thumb-queue'
+import { createThumbQueue } from '@/lib/thumb-queue'
+import { fetchThumbnail } from '@/lib/thumbnail-fetch'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Play,
@@ -38,7 +41,7 @@ const startedSessions = new Set<number>()
 // ---------------------------------------------------------------------------
 function fileIcon(name: string) {
   const ext = name.split('.').pop()?.toLowerCase() ?? ''
-  if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'raw', 'tiff', 'webp', 'bmp', 'svg'].includes(ext))
+  if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'heif', 'raw', 'tiff', 'tif', 'webp', 'bmp', 'svg', 'cr2', 'cr3', 'nef', 'arw', 'dng', 'avif', 'jxl'].includes(ext))
     return <Image className="w-5 h-5 text-blue-400" />
   if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', '3gp'].includes(ext))
     return <Film className="w-5 h-5 text-purple-400" />
@@ -51,12 +54,15 @@ function fileIcon(name: string) {
 
 function formatEta(ms: number | null | 'done') {
   if (ms === 'done') return '--'
-  if (ms === null) return 'Calculating...'
-  if (ms <= 0) return 'Calculating...'
-  const sec = Math.floor(ms / 1000)
-  const min = Math.floor(sec / 60)
-  const s = sec % 60
-  return `${min}m ${s}s remaining`
+  if (ms === null || ms <= 0) return 'Calculating...'
+  const totalSec = Math.ceil(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s remaining`
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  if (min < 60) return `${min}m ${sec}s remaining`
+  const hr = Math.floor(min / 60)
+  const remMin = min % 60
+  return `${hr}h ${remMin}m remaining`
 }
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -78,20 +84,137 @@ function formatElapsed(ms: number) {
 }
 
 // ---------------------------------------------------------------------------
-// PreviewThumbnail — Reusable thumbnail component
+// PreviewThumbnail — Lazy loaded thumbnail with concurrency queue
 // ---------------------------------------------------------------------------
-function PreviewThumbnail({ itemId, name, thumbnailUrl: _ }: { itemId: number | null; name: string; thumbnailUrl?: string | null }) {
-  const MAX_RETRIES = 2
-  const [thumbState, setThumbState] = useState<'loading' | 'loaded' | 'failed'>('loading')
-  const [retryKey, setRetryKey] = useState(0)
+function PreviewThumbnail({ itemId, name, thumbQueue }: { itemId: number | null; name: string; thumbQueue: ThumbQueue }) {
+  const [imgSrc, setImgSrc] = useState<string | null>(null)
+  const [loadState, setLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [retryCount, setRetryCount] = useState(0)
-
-  const thumbUrl = itemId != null ? `/api/media/${itemId}/thumbnail?r=${retryKey}` : null
+  const [isIntersecting, setIsIntersecting] = useState(false)
+  const cellRef = useRef<HTMLDivElement>(null)
+  const slotHeld = useRef(false)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    setThumbState('loading')
+    return () => {
+      if (imgSrc) {
+        URL.revokeObjectURL(imgSrc)
+      }
+    }
+  }, [imgSrc])
+
+  useEffect(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+    if (slotHeld.current) {
+      slotHeld.current = false
+      thumbQueue.release()
+    }
+    setImgSrc(null)
+    setLoadState('idle')
     setRetryCount(0)
-  }, [itemId])
+    setIsIntersecting(false)
+  }, [itemId, thumbQueue])
+
+  useEffect(() => {
+    if (!itemId || isIntersecting) return
+    const el = cellRef.current
+    if (!el) return
+
+    const obs = new IntersectionObserver(([entry]) => {
+      if (entry?.isIntersecting) {
+        setIsIntersecting(true)
+        obs.unobserve(el)
+      }
+    }, { rootMargin: '600px' })
+
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [itemId, isIntersecting])
+
+  useEffect(() => {
+    if (!itemId || !isIntersecting || loadState === 'loaded' || loadState === 'error') return
+
+    let cancelled = false
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
+    const run = async () => {
+      slotHeld.current = true
+      thumbQueue.request(async () => {
+        if (cancelled) {
+          slotHeld.current = false
+          thumbQueue.release()
+          return
+        }
+
+        setLoadState('loading')
+        try {
+          const url = await fetchThumbnail(itemId, controller.signal)
+          if (cancelled) {
+            slotHeld.current = false
+            thumbQueue.release()
+            return
+          }
+
+          if (url) {
+            setImgSrc(url)
+            setLoadState('loaded')
+            slotHeld.current = false
+            thumbQueue.release()
+          } else {
+            slotHeld.current = false
+            thumbQueue.release()
+
+            if (retryCount < 10) {
+              timeoutRef.current = setTimeout(() => {
+                if (cancelled) return
+                setRetryCount(c => c + 1)
+              }, 2000)
+            } else {
+              setLoadState('error')
+            }
+          }
+        } catch {
+          slotHeld.current = false
+          thumbQueue.release()
+
+          if (cancelled) return
+
+          if (retryCount < 10) {
+            timeoutRef.current = setTimeout(() => {
+              if (cancelled) return
+              setRetryCount(c => c + 1)
+            }, 2000)
+          } else {
+            setLoadState('error')
+          }
+        }
+      })
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
+      }
+      if (slotHeld.current) {
+        slotHeld.current = false
+        thumbQueue.release()
+      }
+    }
+  }, [itemId, isIntersecting, retryCount, thumbQueue])
 
   if (!itemId) {
     return (
@@ -102,36 +225,23 @@ function PreviewThumbnail({ itemId, name, thumbnailUrl: _ }: { itemId: number | 
   }
 
   return (
-    <>
-      {thumbState === 'loading' && (
+    <div ref={cellRef} className="w-full h-full min-h-[80px]">
+      {loadState === 'loading' && (
         <div className="w-full h-20 animate-pulse bg-muted" />
       )}
-      {thumbState !== 'failed' && (
+      {imgSrc && loadState === 'loaded' && (
         <img
-          src={thumbUrl!}
+          src={imgSrc}
           alt={name}
-          className={cn(
-            'w-full h-auto block',
-            thumbState === 'loading' && 'hidden',
-          )}
-          onLoad={() => setThumbState('loaded')}
-          onError={() => {
-            if (retryCount < MAX_RETRIES) {
-              setRetryCount(c => c + 1)
-              setTimeout(() => setRetryKey(k => k + 1), 500 * (retryCount + 1))
-              setThumbState('loading')
-            } else {
-              setThumbState('failed')
-            }
-          }}
+          className="w-full h-auto block object-cover"
         />
       )}
-      {thumbState === 'failed' && (
-        <div className="w-full h-full flex items-center justify-center opacity-50">
+      {(loadState === 'error' || loadState === 'idle') && (
+        <div className="w-full h-20 flex items-center justify-center opacity-40 bg-muted">
           {fileIcon(name)}
         </div>
       )}
-    </>
+    </div>
   )
 }
 
@@ -145,6 +255,9 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
   const completedItems = progress?.imported_files ?? progress?.completed_items ?? 0
   const totalItems = progress?.total_files ?? progress?.total_items ?? 0
   const isRunning = status === 'running'
+
+  const thumbQueue = useMemo(() => createThumbQueue(8), [])
+  useEffect(() => () => { thumbQueue.reset() }, [thumbQueue])
 
   // Accumulate items so they stay visible once they appear.
   // Polls return the N most-recently-updated items with thumbnails,
@@ -172,7 +285,7 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
   const recentFiles = useMemo(() => {
     return [...itemMap.values()]
       .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-      .slice(0, 60)
+      .slice(0, 30)
   }, [itemMap])
 
   return (
@@ -219,7 +332,7 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
                       i === 0 ? 'bg-primary/10 ring-2 ring-primary' : 'bg-muted hover:bg-muted/80',
                     )}
                   >
-                    <PreviewThumbnail itemId={file.item_id} name={file.file_name} thumbnailUrl={file.thumbnail_url} />
+                    <PreviewThumbnail itemId={file.item_id} name={file.file_name} thumbQueue={thumbQueue} />
                     <span className="text-[10px] text-muted-foreground truncate w-full text-center px-1 py-0.5 block">
                       {file.file_name}
                     </span>
@@ -460,11 +573,13 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Speed</p>
             <p className="text-sm font-semibold text-foreground mt-0.5">
-              {speed > 0
-                ? speed >= 1.0
-                  ? `${speed.toFixed(1)} files/sec`
-                  : `${(speed * 60).toFixed(0)} files/min`
-                : '--'}
+              {transfer.status === 'running' && speed === 0
+                ? 'Calculating...'
+                : speed > 0
+                  ? speed >= 1.0
+                    ? `${speed.toFixed(1)} files/sec`
+                    : `${(speed * 60).toFixed(0)} files/min`
+                  : '--'}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
@@ -551,6 +666,8 @@ export default function TransferPage() {
   const initTransfer = useTransferStore((s) => s.initTransfer)
   const updateFromPolling = useTransferStore((s) => s.updateFromPolling)
   const resetTransfer = useTransferStore((s) => s.resetTransfer)
+  const setCompletedSnapshot = useTransferStore((s) => s.setCompletedSnapshot)
+  const completedSnapshot = useTransferStore((s) => s.ui.completedSnapshot)
   const duplicates = useTransferStore((s) => s.duplicates)
 
   const { data: session } = useSession(transfer.sessionId)
@@ -563,24 +680,16 @@ export default function TransferPage() {
   const cancelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const initialisedRef = useRef(false)
   const autoStartedRef = useRef(false)
-  const navigateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const hasNavigatedRef = useRef(false)
-
   // Connect to WS for real-time events (bonus, not required)
   useTransferWs(transfer.sessionId)
 
-  // Cleanup timers and state on unmount
+  // Cleanup timers on unmount — do NOT reset transfer state
   useEffect(() => {
     return () => {
       if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current)
-      if (navigateTimerRef.current) clearTimeout(navigateTimerRef.current)
-
-      // If the session is finished, reset transfer state so it doesn't persist
-      const state = useTransferStore.getState().transfer
-      const isFinished = ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(state.status)
-      if (isFinished) {
-        useTransferStore.getState().resetTransfer()
-      }
+      // NOTE: Intentionally NOT calling resetTransfer() here.
+      // The completed transfer state is preserved so the user can navigate back
+      // to this page and review their transfer results.
     }
   }, [])
 
@@ -602,75 +711,53 @@ export default function TransferPage() {
     }
   }, [session, transfer.sessionId, startSession])
 
-  // Navigate to Library when a transfer reaches a terminal status.
-  // Uses hasNavigatedRef to prevent double-navigation on re-renders.
+  // Capture the completed snapshot when a transfer reaches a terminal state.
+  // This freezes the final state into the store so the page shows results even
+  // after navigating away and back.
   useEffect(() => {
-    if (hasNavigatedRef.current) return
+    if (
+      transfer.status === 'completed' ||
+      transfer.status === 'completed_with_errors' ||
+      transfer.status === 'failed'
+    ) {
+      setCompletedSnapshot({ ...transfer })
 
-    if (transfer.status === 'completed' || transfer.status === 'completed_with_errors') {
-      hasNavigatedRef.current = true
-      const isError = transfer.status === 'completed_with_errors'
-      const delay = isError ? 4000 : 2000
-      const imported = transfer.importedFiles
-      const failed = transfer.failedFiles
-
-      // If no notification was already set by WS, set one now (polling fallback)
-      if (!useTransferStore.getState().ui.notification) {
-        if (isError) {
-          useTransferStore.getState().showNotification(
-            'warning',
-            `${imported} transferred, ${failed} failed. See library for details.`,
-          )
-        } else {
-          useTransferStore.getState().showNotification(
-            'success',
-            `${imported} file${imported !== 1 ? 's' : ''} transferred successfully.`,
-          )
-        }
+      if (transfer.sessionId && (transfer.status === 'completed' || transfer.status === 'completed_with_errors')) {
+        useTransferStore.getState().setLastCompletedSessionId(transfer.sessionId)
       }
 
-      navigateTimerRef.current = setTimeout(() => {
-        resetTransfer()
-        setCurrentPage('library')
-      }, delay)
+      if (!useTransferStore.getState().ui.notification) {
+        if (transfer.status === 'completed') {
+          useTransferStore.getState().showNotification(
+            'success',
+            `${transfer.importedFiles} file${transfer.importedFiles !== 1 ? 's' : ''} transferred successfully.`,
+          )
+        } else if (transfer.status === 'completed_with_errors') {
+          useTransferStore.getState().showNotification(
+            'warning',
+            `${transfer.importedFiles} transferred, ${transfer.failedFiles} failed.`,
+          )
+        } else if (transfer.status === 'failed') {
+          useTransferStore.getState().showNotification('error', 'Transfer failed. Check the details below.')
+        }
+      }
     }
-  }, [transfer.status, transfer.importedFiles, transfer.failedFiles, setCurrentPage, resetTransfer])
-
-  // Show error notification for failed transfers (no navigation — user inspects).
-  useEffect(() => {
-    if (transfer.status === 'failed') {
-      useTransferStore.getState().showNotification('error', 'Transfer failed. Check the error log.')
-    }
-  }, [transfer.status])
+  }, [transfer.status, transfer.sessionId, transfer.importedFiles, transfer.failedFiles, setCompletedSnapshot])
 
   // Sync polling data into store (authoritative source for all live fields).
-  // Also serves as polling fallback: if WS message was missed, detect completion here.
+  // No auto-navigation — the snapshot-capture effect handles terminal states.
   useEffect(() => {
     if (!progress) return
     updateFromPolling(progress)
-    if (
-      (progress.status === 'completed' || progress.status === 'completed_with_errors') &&
-      !hasNavigatedRef.current
-    ) {
-      hasNavigatedRef.current = true
-      const isError = progress.status === 'completed_with_errors'
-      const delay = isError ? 4000 : 2000
-      const imported = progress.imported_files
-      const failed = progress.failed_files
+  }, [progress, updateFromPolling])
 
-      useTransferStore.getState().showNotification(
-        isError ? 'warning' : 'success',
-        isError
-          ? `${imported} transferred, ${failed} failed. See library for details.`
-          : `${imported} file${imported !== 1 ? 's' : ''} transferred successfully.`,
-      )
-
-      navigateTimerRef.current = setTimeout(() => {
-        resetTransfer()
-        setCurrentPage('library')
-      }, delay)
+  // On mount: if there's no active session but there IS a completed snapshot,
+  // restore it so the page shows the last transfer result.
+  useEffect(() => {
+    if (!transfer.sessionId && completedSnapshot && !initialisedRef.current) {
+      initialisedRef.current = true
     }
-  }, [progress, updateFromPolling, setCurrentPage, resetTransfer])
+  }, [transfer.sessionId, completedSnapshot])
 
   // Esc key to go back (safe guard for mid-transfer)
   useEffect(() => {
@@ -688,7 +775,7 @@ export default function TransferPage() {
   }, [transfer.status])
 
   const handleBack = () => {
-    resetTransfer()
+    // Do NOT reset transfer state — user can come back to see results
     setCurrentPage('dashboard')
   }
 

@@ -79,7 +79,7 @@ class MediaItem(Base):
     __tablename__ = "media_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source_path: Mapped[str] = mapped_column(String(4096), nullable=False, unique=True)
+    source_path: Mapped[str] = mapped_column(String(4096), nullable=False)
     source_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     file_name: Mapped[str] = mapped_column(String(512), nullable=False)
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
@@ -159,6 +159,7 @@ class MediaItem(Base):
         Index("ix_media_items_session_id", "session_id"),
         Index("ix_media_items_source_hash", "source_hash"),
         Index("ix_media_items_source_path", "source_path"),
+        Index("ix_media_items_source_path_session", "source_path", "session_id"),
         Index("ix_media_items_filename_size", "file_name", "file_size"),
     )
 
@@ -231,6 +232,9 @@ class TransferSession(Base):
 
     # --- Incremental import ---
     only_new_mode: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+    # --- Selective import (persisted file selections) ---
+    selected_files_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # --- Duplicate resolution persistence ---
     resolved_batch_id: Mapped[int | None] = mapped_column(

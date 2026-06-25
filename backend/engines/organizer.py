@@ -90,14 +90,56 @@ def resolve_archive_path(
     Path
         A **non-existing** path guaranteed safe to write to.
     """
-    dt = _derive_timestamp(item)
+    dt = derive_timestamp(item)
     name = item.file_name
 
-    folder = _build_folder(dest_root, dt, layout)
+    folder = build_folder(dest_root, dt, layout)
     base = folder / name
 
     # Conflict resolution — never overwrite
     return _safe_path(base)
+
+
+def locate_archive_file(
+    dest_root: Path,
+    item: MediaItem,
+    *,
+    layout: str = "year/month/day",
+) -> Path | None:
+    """
+    Locate the existing destination path for *item* under *dest_root*.
+    Checks the base path and sequential conflict paths, verifying that
+    the file exists and matches the item's file size.
+    """
+    dt = derive_timestamp(item)
+    name = item.file_name
+    folder = build_folder(dest_root, dt, layout)
+    base = folder / name
+
+    # 1. Check if the base path is the correct file
+    if base.is_file() and base.stat().st_size == item.file_size:
+        return base
+
+    # 2. Check conflict-resolution sequential suffixes (stem_001, stem_002, etc.)
+    stem = base.stem
+    suffix = base.suffix
+    parent = base.parent
+
+    for i in range(1, _MAX_SUFFIX + 1):
+        candidate = parent / f"{stem}_{i:03d}{suffix}"
+        if candidate.is_file():
+            if candidate.stat().st_size == item.file_size:
+                return candidate
+        else:
+            # Break early as organizer._safe_path allocates suffixes sequentially.
+            break
+
+    # Fallback: if base exists but size doesn't match, return base just in case
+    if base.is_file():
+        return base
+
+    return None
+
 
 
 def resolve_live_photo_folder(
@@ -111,14 +153,14 @@ def resolve_live_photo_folder(
     Both components of a Live Photo pair must land in the same folder.
     The folder is derived from the **image** item's timestamp.
     """
-    dt = _derive_timestamp(image_item)
-    return _build_folder(dest_root, dt, layout)
+    dt = derive_timestamp(image_item)
+    return build_folder(dest_root, dt, layout)
 
 
 # ---------------------------------------------------------------------------
 # Folder construction
 # ---------------------------------------------------------------------------
-def _build_folder(
+def build_folder(
     dest_root: Path,
     dt: datetime | None,
     layout: str,
@@ -150,19 +192,18 @@ def _build_folder(
 # ---------------------------------------------------------------------------
 # Timestamp derivation
 # ---------------------------------------------------------------------------
-def _derive_timestamp(item: MediaItem) -> datetime | None:
+def derive_timestamp(item: MediaItem) -> datetime | None:
     """
     Extract the best available timestamp from a MediaItem.
 
-    Priority: date_taken (resolved capture date) > original_capture_time >
-    created_at (DB insert time).
+    Priority: date_taken (resolved capture date) > original_capture_time.
+    Do NOT fall back to created_at (DB insert time) — that is today's date,
+    not the capture date. Files without a resolvable date go to _unsorted/.
     """
     if item.date_taken is not None:
         return item.date_taken
     if item.original_capture_time is not None:
         return item.original_capture_time
-    if item.created_at is not None:
-        return item.created_at
     return None
 
 

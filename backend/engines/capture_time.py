@@ -18,6 +18,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Register pillow-heif opener so Image.open() can decode HEIC/HEIF files
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    logger.debug("pillow-heif registered for HEIC/HEIF support")
+except ImportError:
+    logger.warning(
+        "pillow-heif not installed — HEIC files will fall back to mtime. "
+        "Install with: pip install pillow-heif"
+    )
+
 _IMAGE_EXTS = {".jpg", ".jpeg", ".heic", ".png", ".webp", ".tiff", ".tif", ".bmp", ".avif", ".jxl"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp", ".webm", ".m4v", ".wmv"}
 
@@ -30,10 +41,12 @@ def _extract_image_capture_time(file_path: Path) -> datetime | None:
       2. ``img.getexif()`` — modern Pillow API (works on JPEG, TIFF, WEBP,
          and some AVIF/HEIC via format plugins).
       3. ``exifread`` — third-party library for exotic / non-Pillow EXIF.
-      4. Returns ``None`` (caller falls through to mtime).
+      4. ExifTool — handles HEIC natively even without pillow-heif.
+      5. Returns ``None`` (caller falls through to mtime).
 
     Never raises.
     """
+    # Strategy 1-3: Pillow-based extraction
     try:
         from PIL import Image
     except ImportError:
@@ -42,12 +55,23 @@ def _extract_image_capture_time(file_path: Path) -> datetime | None:
     try:
         with Image.open(file_path) as img:
             raw = _get_exif_datetime_str(img, file_path)
-            if raw is None:
-                return None
-            return _parse_exif_datetime_str(raw)
+            if raw is not None:
+                return _parse_exif_datetime_str(raw)
     except Exception as exc:
         logger.debug("Pillow open failed for %s: %s", file_path, exc)
-        return None
+
+    # Strategy 4: ExifTool fallback — handles HEIC natively even when
+    # pillow-heif is not installed or Pillow cannot decode the format.
+    try:
+        from backend.engines.metadata_extractor import extract_metadata
+
+        meta = extract_metadata(file_path)
+        if meta and meta.date_taken:
+            return meta.date_taken
+    except Exception as exc:
+        logger.debug("ExifTool fallback failed for %s: %s", file_path, exc)
+
+    return None
 
 
 def _get_exif_datetime_str(img, file_path: Path) -> str | None:
@@ -62,7 +86,7 @@ def _get_exif_datetime_str(img, file_path: Path) -> str | None:
         exif = _try_getexif_modern(img, fmt, file_path)
 
     if exif is not None:
-        raw = exif.get(36867) or exif.get(306)
+        raw = exif.get(36867) or exif.get(36868) or exif.get(306)
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
 
@@ -124,18 +148,46 @@ def _try_exifread(img, file_path: Path) -> str | None:
 
 
 def _parse_exif_datetime_str(raw: str) -> datetime | None:
-    """Parse an EXIF datetime string into a UTC-aware datetime."""
-    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    """Parse an EXIF datetime string into a timezone-aware datetime.
+
+    EXIF DateTimeOriginal is always local time at the capture location with
+    NO timezone information. We return a datetime using the local system
+    timezone so callers that need POSIX timestamps compute them correctly.
+    Formats that include an explicit timezone offset are parsed as-is.
+    """
+    tz_formats = ("%Y:%m:%d %H:%M:%S%z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z")
+    for fmt in tz_formats:
         try:
-            dt = datetime.strptime(raw, fmt)
-            return dt.replace(tzinfo=UTC)
+            return datetime.strptime(raw, fmt)
         except ValueError:
             continue
+
+    local_formats = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f")
+    for fmt in local_formats:
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return dt.astimezone()
+        except ValueError:
+            continue
+
     return None
 
 
 def _extract_video_capture_time(file_path: Path) -> datetime | None:
-    """Extract creation_time from video metadata using ffprobe."""
+    """Extract creation_time from video metadata using ExifTool then ffprobe."""
+    # 1. Try ExifTool for DateTimeOriginal or CreateDate (handles .mov, .m4v, .3gp better)
+    try:
+        from backend.engines.metadata_extractor import extract_metadata_batch
+        results = extract_metadata_batch([file_path])
+        meta = results.get(str(file_path.resolve()))
+        if meta and meta.date_taken:
+            return meta.date_taken
+        if meta and meta.date_created:
+            return meta.date_created
+    except Exception as exc:
+        logger.debug("ExifTool video fallback failed for %s: %s", file_path.name, exc)
+
+    # 2. ffprobe as secondary
     try:
         result = subprocess.run(
             [

@@ -4,7 +4,8 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from 'react'
-import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
+import { QueryClientProvider, useQueryClient } from '@tanstack/react-query'
+import { queryClient } from '@/lib/query-client'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   LayoutDashboard,
@@ -32,19 +33,6 @@ import LibraryPage from '@/pages/LibraryPage'
 import DuplicateModal from '@/components/DuplicateModal'
 import ThemeToggle from '@/components/ThemeToggle'
 import PageErrorBoundary from '@/components/PageErrorBoundary'
-
-// ---------------------------------------------------------------------------
-// React Query client
-// ---------------------------------------------------------------------------
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 5000,
-      retry: 2,
-      refetchOnWindowFocus: false,
-    },
-  },
-})
 
 // ---------------------------------------------------------------------------
 // Navigation
@@ -372,7 +360,9 @@ export default function App() {
           <PageRouter />
         </div>
       </div>
-      <DuplicateModal />
+      <PageErrorBoundary pageName="DuplicateModal">
+        <DuplicateModal />
+      </PageErrorBoundary>
       <NotificationToast />
       <BackendDownScreen />
       <BackendRecoveryWatcher />

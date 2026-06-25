@@ -5,6 +5,8 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { queryClient } from '@/lib/query-client'
+import { clearThumbFailCache } from '@/lib/thumbnail-fetch'
 import type {
   WSEvent,
   WSEventType,
@@ -100,6 +102,8 @@ export interface UIState {
   setupOnlyNewMode: boolean
   setupFolderLayout: FolderLayout
   wsError: string | null
+  lastCompletedSessionId: number | null
+  completedSnapshot: TransferSnapshot | null
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +153,12 @@ export interface TransferStore {
   setSetupOnlyNewMode: (onlyNew: boolean) => void
   setSetupFolderLayout: (layout: FolderLayout) => void
   resetSetup: () => void
+  setLastCompletedSessionId: (id: number | null) => void
+  setCompletedSnapshot: (snapshot: TransferSnapshot | null) => void
   setWsError: (error: string | null) => void
+
+  // --- Clear all (used after "Clear Library") ----------------------------
+  clearAll: () => void
 
   // --- WS actions ---------------------------------------------------------
   setWsConnected: (connected: boolean) => void
@@ -221,6 +230,8 @@ const initialUI: UIState = {
   setupOnlyNewMode: false,
   setupFolderLayout: 'year/month',
   wsError: null,
+  lastCompletedSessionId: null,
+  completedSnapshot: null,
 }
 
 // Track which sessions have already fired a completion notification to
@@ -500,11 +511,12 @@ export const useTransferStore = create<TransferStore>()(
   scan: { ...initialScan },
   library: { ...initialLibrary },
   ui: { ...initialUI },
-  wsConnected: false,
+wsConnected: false,
 
   // --- Transfer actions ---------------------------------------------------
-  initTransfer: (session) =>
-    set((state) => ({
+  initTransfer: (session) => {
+    clearThumbFailCache()
+    return set((state) => ({
       transfer: {
         ...initialTransfer,
         sessionId: session.id,
@@ -518,10 +530,16 @@ export const useTransferStore = create<TransferStore>()(
         failedItems: session.failed_items,
         startedAt: state.transfer.startedAt,
       },
-    })),
+      ui: {
+        ...state.ui,
+        completedSnapshot: null,
+      },
+    }))
+  },
 
   updateFromPolling: (progress) =>
     set((state) => {
+      const TERMINAL = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled'])
       const startedAt = progress.started_at
         ? new Date(progress.started_at).getTime()
         : null
@@ -558,7 +576,9 @@ export const useTransferStore = create<TransferStore>()(
         transfer: {
           ...state.transfer,
           sessionId: progress.session_id,
-          status: progress.status as SessionStatus,
+          status: TERMINAL.has(state.transfer.status)
+            ? state.transfer.status
+            : (progress.status as SessionStatus),
           totalItems: progress.total_items,
           completedItems: progress.completed_items,
           failedItems: progress.failed_items,
@@ -581,7 +601,10 @@ export const useTransferStore = create<TransferStore>()(
       }
     }),
 
-  resetTransfer: () => set({ transfer: { ...initialTransfer } }),
+  resetTransfer: () => set((s) => ({
+    transfer: { ...initialTransfer },
+    ui: { ...s.ui, completedSnapshot: null },
+  })),
 
   // --- Duplicate actions ---------------------------------------------------
   openDuplicates: (report) =>
@@ -626,15 +649,19 @@ export const useTransferStore = create<TransferStore>()(
 
   // --- Library actions -----------------------------------------------------
   appendLibraryItems: (items, total, pages) =>
-    set((s) => ({
-      library: {
-        items: [...s.library.items, ...items],
-        page: s.library.page + 1,
-        totalPages: pages,
-        total,
-        isLoadingMore: false,
-      },
-    })),
+    set((s) => {
+      const existingIds = new Set(s.library.items.map(i => i.id))
+      const newItems = items.filter(i => !existingIds.has(i.id))
+      return {
+        library: {
+          items: [...s.library.items, ...newItems],
+          page: s.library.page + 1,
+          totalPages: pages,
+          total,
+          isLoadingMore: false,
+        },
+      }
+    }),
 
   setLibraryPage: (page) =>
     set((s) => ({ library: { ...s.library, page } })),
@@ -697,8 +724,36 @@ export const useTransferStore = create<TransferStore>()(
       },
     })),
 
+  setLastCompletedSessionId: (id) =>
+    set((s) => ({ ui: { ...s.ui, lastCompletedSessionId: id } })),
+
+  setCompletedSnapshot: (snapshot) =>
+    set((s) => ({ ui: { ...s.ui, completedSnapshot: snapshot } })),
+
   setWsError: (error) =>
     set((s) => ({ ui: { ...s.ui, wsError: error } })),
+
+  // --- Clear all (used after "Clear Library") ----------------------------
+  clearAll: () => {
+    clearThumbFailCache()
+    return set((s) => ({
+      // Use 'cancelled' (a terminal status) instead of initialTransfer's 'created'
+      // so that useSessionBatches / useSessionProgress immediately stop polling.
+      // Leaving status as 'created' with sessionId=null causes both hooks to
+      // fire requests to /api/sessions/null/... which 404 and blank non-Library pages.
+      transfer: { ...initialTransfer, status: 'cancelled' as SessionStatus },
+      library: { ...initialLibrary },
+      scan: { ...initialScan },
+      duplicates: { ...initialDuplicates },
+      ui: {
+        ...s.ui,
+        notification: null,
+        wsError: null,
+        completedSnapshot: null,
+        lastCompletedSessionId: null,
+      },
+    }))
+  },
 
   // --- WS actions ---------------------------------------------------------
   setWsConnected: (connected) => set({ wsConnected: connected }),
@@ -706,6 +761,17 @@ export const useTransferStore = create<TransferStore>()(
   handleWsEvent: (event) => {
     // Apply the reducer to get the state patch
     set((state) => handleWsEventReducer(state, event) as TransferStore)
+    const sid = (event.data?.session_id as number) ?? useTransferStore.getState().transfer.sessionId
+
+    // When a session reaches a terminal state, cancel any in-flight polling
+    // queries so they don't continue after the WebSocket event.
+    if (event.event === 'session_completed' || event.event === 'session_completed_with_errors') {
+      if (sid != null) {
+        queryClient.cancelQueries({ queryKey: ['session-progress', sid] })
+        queryClient.cancelQueries({ queryKey: ['session', sid] })
+        queryClient.cancelQueries({ queryKey: ['batches', sid] })
+      }
+    }
 
     // Side effect: fire a native notification on session completion if the
     // window is not focused. Only fires once per session (guarded by
@@ -769,7 +835,6 @@ export const useTransferStore = create<TransferStore>()(
         const persisted = (persistedState ?? {}) as Record<string, unknown>
         return {
           ...currentState,
-          ...persisted,
           ui: {
             ...currentState.ui,
             ...((persisted.ui ?? {}) as Record<string, unknown>),

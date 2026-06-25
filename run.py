@@ -288,8 +288,47 @@ def _ensure_backend_venv(python312: Path) -> bool:
     except subprocess.CalledProcessError as exc:
         _err(f"Failed to create virtual environment: {exc}")
         return False
+    # Always delete _REQ_HASH_FILE before calling _install_backend_deps()
+    try:
+        _REQ_HASH_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
     return _install_backend_deps(venv_python)
+
+
+def _check_node() -> None:
+    """Pre-flight check to ensure npm is on PATH and Node.js version is appropriate."""
+    try:
+        result = subprocess.run(
+            ["npm", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=IS_WINDOWS,
+            creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+        
+        version_str = result.stdout.strip()
+        cleaned = version_str.lstrip("v")
+        if cleaned:
+            parts = cleaned.split(".")
+            if parts and parts[0].isdigit():
+                major_version = int(parts[0])
+                if major_version < 20:
+                    _warn("npm reports Node.js < v20. Transfera requires v20+.")
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        _err("=" * 56)
+        _err("")
+        _err("  Node.js v20+ is required")
+        _err("  Download URL: https://nodejs.org/")
+        _err("  Please restart your terminal after installing")
+        _err("")
+        _err("=" * 56)
+        sys.exit(1)
+
 
 # ---------------------------------------------------------------------------
 # STEP 2: Frontend dependencies
@@ -311,8 +350,10 @@ def _ensure_frontend_deps() -> bool:
             creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
         _ok("Frontend dependencies installed")
-    except subprocess.CalledProcessError as exc:
-        _err(f"Failed to install frontend dependencies: {exc}")
+    except subprocess.CalledProcessError:
+        _err("npm install failed. Check the output above for details.")
+        _err("Common fixes: run your terminal as Administrator, or delete")
+        _err("        frontend/node_modules and retry.")
         return False
 
     return True
@@ -617,12 +658,22 @@ def _sweep_remaining(label: str) -> bool:
     remaining = _get_transfera_processes(exclude_pid=own_pid)
     if remaining:
         # Fallback: kill by image name for known stubborn processes
-        for img in ("electron.exe", "node.exe"):
-            subprocess.run(
-                ["taskkill", "/F", "/IM", img],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
-            )
+        for img in ("electron.exe", "node.exe", "python.exe"):
+            if img == "python.exe":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/FI", f"COMMANDLINE eq *{ROOT_DIR}*", "/IM", "python.exe"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+                    )
+                except Exception:
+                    pass
+            else:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", img],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
+                )
         time.sleep(1)
         remaining = _get_transfera_processes(exclude_pid=own_pid)
 
@@ -764,6 +815,8 @@ def main() -> None:
     if not args.skip_deps:
         if start_backend and not _ensure_backend_venv(python312):
             sys.exit(1)
+        if start_frontend:
+            _check_node()
         if start_frontend and not _ensure_frontend_deps():
             sys.exit(1)
     else:
@@ -818,11 +871,14 @@ def main() -> None:
 
             if _frontend_proc and _frontend_proc.poll() is not None:
                 code = _frontend_proc.returncode
-                _err(f"Frontend exited unexpectedly (code {code})")
-                _terminate_process_tree(_backend_proc, "Backend")
-                if IS_WINDOWS:
-                    _sweep_remaining("Transfera")
-                sys.exit(code or 1)
+                if code == 0:
+                    _shutdown()
+                else:
+                    _err(f"Frontend exited unexpectedly (code {code})")
+                    _terminate_process_tree(_backend_proc, "Backend")
+                    if IS_WINDOWS:
+                        _sweep_remaining("Transfera")
+                    sys.exit(code)
 
             time.sleep(1)
     except KeyboardInterrupt:

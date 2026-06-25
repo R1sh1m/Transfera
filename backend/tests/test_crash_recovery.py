@@ -94,9 +94,16 @@ async def _reset_db() -> None:
 @pytest.mark.asyncio
 async def test_hop1_heic_crash_recovery() -> None:
     print("\n=== Hop 1 Crash Recovery: 1000 HEIC Photos ===")
+    from backend.config import DATABASE_URL as cfg_url
+    from backend.database.manager import DATABASE_URL as mgr_url
+    print("CFG DATABASE URL:", cfg_url)
+    print("MGR DATABASE URL:", mgr_url)
+
+    await _reset_db()
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src_dir = Path(tmp) / "source"
+
         cache_dir = Path(tmp) / "cache"
         dest_dir = Path(tmp) / "dest"
         src_dir.mkdir()
@@ -146,6 +153,7 @@ async def test_hop1_heic_crash_recovery() -> None:
         # Mark batch as LOADING (simulating crash)
         async with session_scope() as session:
             batch = await session.get(TransferBatch, batch_ids[0])
+            assert batch is not None
             batch.status = BatchStatus.LOADING.value
             batch.touch()
 
@@ -156,11 +164,14 @@ async def test_hop1_heic_crash_recovery() -> None:
         # Verify batch is LOADING
         async with session_scope() as session:
             batch = await session.get(TransferBatch, batch_ids[0])
+            assert batch is not None
             _check("Batch status is LOADING", batch.status == BatchStatus.LOADING.value)
 
         # Run recovery
         stats = await recover_interrupted_batches(cache_dir=cache_dir)
-        _check("Recovered 1 LOADING batch", stats["loading_recovered"] == 1)
+        loading_rec = stats.get("loading_recovered")
+        assert isinstance(loading_rec, int)
+        _check("Recovered 1 LOADING batch", loading_rec == 1)
 
         # Verify ALL .partial files cleaned up
         partials_after = list(cache_dir.rglob(f"*{PARTIAL_SUFFIX}"))
@@ -169,6 +180,7 @@ async def test_hop1_heic_crash_recovery() -> None:
         # Verify batch reset to PENDING
         async with session_scope() as session:
             batch = await session.get(TransferBatch, batch_ids[0])
+            assert batch is not None
             _check("Batch reset to PENDING", batch.status == BatchStatus.PENDING.value)
 
         # Verify ALL items reset to PENDING
@@ -241,6 +253,7 @@ async def test_hop2_archive_crash_recovery() -> None:
         # Simulate crash: mark batch as ARCHIVED
         async with session_scope() as session:
             batch = await session.get(TransferBatch, batch_ids[0])
+            assert batch is not None
             batch.status = BatchStatus.ARCHIVED.value
             batch.touch()
 
@@ -267,7 +280,9 @@ async def test_hop2_archive_crash_recovery() -> None:
 
         # Run recovery
         stats = await recover_interrupted_batches(cache_dir=cache_dir)
-        _check("Recovered 1 ARCHIVED batch", stats["archived_recovered"] == 1)
+        archived_rec = stats.get("archived_recovered")
+        assert isinstance(archived_rec, int)
+        _check("Recovered 1 ARCHIVED batch", archived_rec == 1)
 
         # Verify correct items marked COMPLETED
         async with session_scope() as session:
@@ -315,6 +330,7 @@ async def test_hop2_archive_crash_recovery() -> None:
         # Verify batch reset to PENDING for re-processing
         async with session_scope() as session:
             batch = await session.get(TransferBatch, batch_ids[0])
+            assert batch is not None
             _check("Batch reset to PENDING for re-processing", batch.status == BatchStatus.PENDING.value)
 
 
@@ -517,6 +533,7 @@ async def test_mixed_bundle_crash() -> None:
         # Simulate crash: mark batch as LOADING
         async with session_scope() as session:
             batch = await session.get(TransferBatch, batch_ids[0])
+            assert batch is not None
             batch.status = BatchStatus.LOADING.value
             batch.touch()
 
@@ -535,7 +552,9 @@ async def test_mixed_bundle_crash() -> None:
 
         # Recovery
         stats = await recover_interrupted_batches(cache_dir=cache_dir)
-        _check("Recovered LOADING batch", stats["loading_recovered"] >= 1)
+        loading_rec = stats.get("loading_recovered")
+        assert isinstance(loading_rec, int)
+        _check("Recovered LOADING batch", loading_rec >= 1)
 
         # Verify cleanup
         partials_after = list(cache_dir.rglob(f"*{PARTIAL_SUFFIX}"))

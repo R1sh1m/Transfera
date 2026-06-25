@@ -13,7 +13,7 @@
     "preview": "vite preview",
     "build:native": "cmd /c \"..\\native\\wpd_helper\\build.bat\"",
     "preelectron:dev": "npm run build:native && tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\"",
-    "electron:dev": "concurrently \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron:dev": "concurrently -k -s first \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "electron:build": "npm run build:native && tsc -b && vite build && tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\" && electron-builder --win",
     "electron:build:dir": "npm run build:native && tsc -b && vite build && tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\" && electron-builder --win --dir",
     "electron:compile": "tsc -p electron/tsconfig.json && node -e \"const fs=require('fs');['main','preload'].forEach(f=>fs.renameSync('electron/dist-electron/'+f+'.js','electron/dist-electron/'+f+'.cjs'))\" && electron-builder --win",

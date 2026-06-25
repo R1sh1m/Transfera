@@ -37,6 +37,7 @@ from backend.engines.metadata_extractor import (
 )
 from backend.ios_device import (
     IOS_SOURCE_PREFIX,
+    _get_afc_service,
     is_ios_source,
     parse_ios_source,
 )
@@ -110,6 +111,95 @@ def _sort_key(meta: FileMetadata) -> datetime:
 
 
 # ---------------------------------------------------------------------------
+# iOS EXIF date extraction via partial AFC read
+# ---------------------------------------------------------------------------
+
+# Extensions we attempt EXIF extraction for on iOS devices
+_IOS_EXIF_IMAGE_EXTS = frozenset({
+    ".jpg", ".jpeg", ".heic", ".heif", ".tiff", ".tif", ".webp", ".dng",
+})
+_IOS_EXIF_VIDEO_EXTS = frozenset({".mov", ".mp4", ".m4v", ".3gp"})
+
+
+async def _extract_ios_file_date(
+    afc,
+    device_path: str,
+    extension: str,
+) -> datetime | None:
+    """
+    Extract EXIF DateTimeOriginal from an iOS device file via partial AFC read.
+
+    Reads the first 256 KB of the file — enough for EXIF headers in HEIC, JPEG,
+    TIFF, WebP, and fast-start MOV/MP4. Uses Pillow in-process for images (fast,
+    no subprocess), then falls back to ExifTool via a temp file for videos and
+    exotic formats.
+
+    Returns the capture datetime, or None if the file is unreadable or contains
+    no EXIF metadata.
+    """
+    ext = extension.lower()
+    if ext not in _IOS_EXIF_IMAGE_EXTS and ext not in _IOS_EXIF_VIDEO_EXTS:
+        return None
+
+    import asyncio
+    import io
+    import tempfile
+    from pathlib import Path
+
+    try:
+        handle = await asyncio.to_thread(afc.fopen, device_path)
+        try:
+            data = await asyncio.to_thread(afc.fread, handle, 256 * 1024)
+        finally:
+            try:
+                await asyncio.to_thread(afc.fclose, handle)
+            except Exception:
+                pass
+
+        if not data:
+            return None
+
+        # Strategy 1 — Pillow in-process (fast, no temp file, no subprocess)
+        if ext in _IOS_EXIF_IMAGE_EXTS:
+            try:
+                from PIL import Image
+
+                with Image.open(io.BytesIO(data)) as img:
+                    exif = img.getexif()
+                    raw = exif.get(36867) or exif.get(36868) or exif.get(306)
+                    if raw and str(raw).strip():
+                        from backend.engines.metadata_extractor import _parse_exif_datetime
+                        dt = _parse_exif_datetime(str(raw).strip())
+                        if dt is not None:
+                            return dt
+            except Exception:
+                pass
+
+        # Strategy 2 — ExifTool via temp file (handles anything Pillow cannot)
+        try:
+            suffix = ext if ext.startswith(".") else f".{ext}"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+            try:
+                meta = extract_metadata(Path(tmp_path))
+                if meta and meta.date_taken:
+                    return meta.date_taken
+            finally:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return None
+    except Exception as exc:
+        logger.debug("Failed to extract EXIF from iOS %s: %s", device_path, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # iOS device scanner
 # ---------------------------------------------------------------------------
 async def _scan_ios_device(
@@ -119,6 +209,7 @@ async def _scan_ios_device(
     session_id: int | None = None,
     on_progress: ProgressCallback = None,
     cutoff_datetime: datetime | None = None,
+    allowed_paths: frozenset[str] | None = None,
 ) -> list[int]:
     """
     Walk an iOS device's DCIM directory via AFC, collecting media files.
@@ -161,37 +252,78 @@ async def _scan_ios_device(
     entries: list[FileMetadata] = []
     skipped_by_cutoff = 0
 
-    for fi in device_files:
-        if fi.is_dir:
-            continue
+    # Open a single AFC connection for EXIF extraction across all files
+    afc_service = None
+    lockdown = None
+    try:
+        from backend.ios_device import _get_afc_service
+        afc_service, lockdown = await _get_afc_service(serial)
+    except Exception:
+        logger.warning(
+            "Could not open AFC service for EXIF extraction; "
+            "iOS items will get dates from Hop 2 instead"
+        )
 
-        # Check extension
-        ext = Path(fi.name).suffix.lower()
-        if ext not in ALL_MEDIA_EXTENSIONS:
-            continue
-
-        # Apply cutoff filter: skip files with mtime at or before the cutoff
-        if cutoff_datetime is not None and fi.mtime > 0:
-            file_mtime_dt = _ts_to_datetime(fi.mtime)
-            if file_mtime_dt is not None and file_mtime_dt <= cutoff_datetime:
-                skipped_by_cutoff += 1
+    try:
+        for fi in device_files:
+            if fi.is_dir:
                 continue
 
-        # Build the ios:// source path
-        source_path = f"{IOS_SOURCE_PREFIX}{serial}{fi.path}"
+            # Check extension
+            ext = Path(fi.name).suffix.lower()
+            if ext not in ALL_MEDIA_EXTENSIONS:
+                continue
 
-        # Build FileMetadata from AFC stat info
-        file_mtime_dt = _ts_to_datetime(fi.mtime) if fi.mtime > 0 else None
+            # Apply cutoff filter: skip files with mtime at or before the cutoff
+            if cutoff_datetime is not None and fi.mtime > 0:
+                file_mtime_dt = _ts_to_datetime(fi.mtime)
+                if file_mtime_dt is not None and file_mtime_dt <= cutoff_datetime:
+                    skipped_by_cutoff += 1
+                    continue
 
-        meta = FileMetadata(
-            file_path=source_path,
-            file_name=fi.name,
-            file_size=fi.size,
-            extension=ext,
-            date_created=file_mtime_dt,
-            date_modified=file_mtime_dt,
-        )
-        entries.append(meta)
+            # Build the ios:// source path
+            source_path = f"{IOS_SOURCE_PREFIX}{serial}{fi.path}"
+
+            # Apply allowed_paths filter (selective import)
+            if allowed_paths is not None:
+                if source_path.lower() not in allowed_paths:
+                    continue
+
+            # Build FileMetadata from AFC stat info
+            file_mtime_dt = _ts_to_datetime(fi.mtime) if fi.mtime > 0 else None
+
+            meta = FileMetadata(
+                file_path=source_path,
+                file_name=fi.name,
+                file_size=fi.size,
+                extension=ext,
+                date_created=file_mtime_dt,
+                date_modified=file_mtime_dt,
+            )
+
+            # Extract real EXIF date from the device file via partial AFC read
+            if afc_service is not None:
+                try:
+                    exif_date = await _extract_ios_file_date(
+                        afc_service, fi.path, ext,
+                    )
+                    if exif_date is not None:
+                        meta.date_taken = exif_date
+                except Exception:
+                    pass
+
+            entries.append(meta)
+    finally:
+        if afc_service is not None:
+            try:
+                afc_service.close()
+            except Exception:
+                pass
+        if lockdown is not None:
+            try:
+                lockdown.close()
+            except Exception:
+                pass
 
     if skipped_by_cutoff > 0:
         logger.info(
@@ -274,6 +406,7 @@ async def _scan_local_files(
     *,
     session_id: int | None = None,
     on_progress: ProgressCallback = None,
+    allowed_paths: frozenset[str] | None = None,
 ) -> list[int]:
     """
     Walk a local directory, extract metadata, detect Live Photo pairs,
@@ -289,10 +422,22 @@ async def _scan_local_files(
             logger.info("Skipping non-media file: %s", source)
             media_files = []
     elif source.is_dir():
-        media_files = sorted(
-            p for p in source.rglob("*")
-            if p.is_file() and p.suffix.lower() in ALL_MEDIA_EXTENSIONS
-        )
+        if allowed_paths is not None:
+            # Selective mode: only process explicitly listed paths
+            media_files = sorted(
+                Path(p) for p in allowed_paths
+                if Path(p).is_file() and Path(p).suffix.lower() in ALL_MEDIA_EXTENSIONS
+            )
+            logger.info(
+                "Selective scan: %d pre-selected files (skipped rglob of %s)",
+                len(media_files), source,
+            )
+        else:
+            # Full scan
+            media_files = sorted(
+                p for p in source.rglob("*")
+                if p.is_file() and p.suffix.lower() in ALL_MEDIA_EXTENSIONS
+            )
     else:
         logger.error("Source path does not exist: %s", source)
         return []
@@ -377,7 +522,6 @@ def _schedule_local_thumbnails(
     are stored in the in-memory LRU cache (no disk writes).  DB updates are
     batched in a single async pass after all workers complete.
     """
-    import asyncio
     import os
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -406,19 +550,10 @@ def _schedule_local_thumbnails(
             logger.warning("Pre-scan thumbnail failed for item %d: %s", row_id, exc)
         return None
 
-    async def _mark_thumbs_ready_batch(ready_ids: list[int]) -> None:
-        """Batch DB update — mark all successfully thumbnailed items at once."""
-        from backend.database.manager import session_scope
-        from backend.database.models import MediaItem
-        async with session_scope() as session:
-            for item_id in ready_ids:
-                db_item = await session.get(MediaItem, item_id)
-                if db_item is not None and db_item.thumbnail_path is None:
-                    db_item.thumbnail_path = "memory"
-                    db_item.touch()
-
     def _generate_all() -> None:
-        ready_ids: list[int] = []
+        from backend.engines.cache_manager import _ensure_thumb_worker, _thumb_update_queue
+        _ensure_thumb_worker()
+
         with ThreadPoolExecutor(
             max_workers=worker_count, thread_name_prefix="prescan-thumb"
         ) as pool:
@@ -429,18 +564,13 @@ def _schedule_local_thumbnails(
             for future in as_completed(futures):
                 result = future.result()
                 if result is not None:
-                    ready_ids.append(result)
-
-        if ready_ids:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_mark_thumbs_ready_batch(ready_ids))
-            finally:
-                loop.close()
+                    _thumb_update_queue.put((result, "ready"))
+                else:
+                    _thumb_update_queue.put((futures[future], "failed"))
 
         logger.debug(
-            "Pre-scan thumbnail batch complete: %d/%d generated (%d workers)",
-            len(ready_ids), len(id_to_path), worker_count,
+            "Pre-scan thumbnail batch complete: %d total (%d workers)",
+            len(id_to_path), worker_count,
         )
 
     t = threading.Thread(target=_generate_all, daemon=True, name="pre-scan-thumbnails")
@@ -483,13 +613,14 @@ async def scan(
     session_id: int | None = None,
     on_progress: ProgressCallback = None,
     cutoff_datetime: datetime | None = None,
+    allowed_paths: frozenset[str] | None = None,
 ) -> list[int]:
     """
     Walk *source_path*, extract metadata, detect Live Photo pairs, sort
     chronologically (oldest first), and insert/update ``media_items`` rows.
 
     For iOS device sources (``ios://`` prefix), uses AFC-based DCIM browsing.
-    For local filesystem sources, uses ``Path.rglob()``.
+    For local filesystem sources, uses ``Path.rglob()`` or ``allowed_paths``.
 
     Parameters
     ----------
@@ -504,6 +635,9 @@ async def scan(
         If provided (for device sources only), files with mtime at or before
         this datetime are skipped. This is a performance optimization and
         does NOT replace hash-based duplicate detection.
+    allowed_paths : frozenset[str] | None
+        If set (selective import), only process these specific file paths
+        instead of walking the entire source tree recursively.
 
     Returns
     -------
@@ -521,6 +655,7 @@ async def scan(
             session_id=session_id,
             on_progress=on_progress,
             cutoff_datetime=cutoff_datetime,
+            allowed_paths=allowed_paths,
         )
 
     # --- Local filesystem source ---
@@ -529,6 +664,7 @@ async def scan(
         source,
         session_id=session_id,
         on_progress=on_progress,
+        allowed_paths=allowed_paths,
     )
 
 
@@ -538,6 +674,7 @@ async def scan_from_ref(
     session_id: int | None = None,
     on_progress: ProgressCallback = None,
     cutoff_datetime: datetime | None = None,
+    allowed_paths: frozenset[str] | None = None,
 ) -> list[int]:
     """
     Walk a typed SourceRef, extract metadata, detect Live Photo pairs, sort
@@ -558,6 +695,9 @@ async def scan_from_ref(
     cutoff_datetime : datetime | None
         If provided (for device sources only), files with mtime at or before
         this datetime are skipped.
+    allowed_paths : frozenset[str] | None
+        If set (selective import), only process these specific file paths
+        instead of walking the entire source tree recursively.
 
     Returns
     -------
@@ -570,6 +710,7 @@ async def scan_from_ref(
             source,
             session_id=session_id,
             on_progress=on_progress,
+            allowed_paths=allowed_paths,
         )
     elif isinstance(source_ref, SourceRefDevice):
         return await _scan_ios_device(
@@ -578,6 +719,7 @@ async def scan_from_ref(
             session_id=session_id,
             on_progress=on_progress,
             cutoff_datetime=cutoff_datetime,
+            allowed_paths=allowed_paths,
         )
     else:
         raise ValueError(f"Unknown source ref type: {type(source_ref)}")
@@ -600,11 +742,12 @@ async def _upsert_media_item(
     Resolves the item's date using the shared fallback chain and stores it
     along with provenance (date_source).
     """
-    result = await session.execute(
-        select(MediaItem.id, MediaItem.final_status).where(
-            MediaItem.source_path == meta.file_path
-        )
+    lookup = select(MediaItem.id, MediaItem.final_status).where(
+        MediaItem.source_path == meta.file_path
     )
+    if session_id is not None:
+        lookup = lookup.where(MediaItem.session_id == session_id)
+    result = await session.execute(lookup)
     existing = result.first()
 
     if existing is not None:
@@ -626,10 +769,17 @@ async def _upsert_media_item(
         # Existing item with final_status=FAILED — reset it for retry
         # rather than trying to INSERT a duplicate (which would violate
         # the UNIQUE constraint on source_path).
-        resolved_date, date_source = resolve_item_date(
-            date_taken=meta.date_taken,
-            date_modified=meta.date_modified,
-        )
+        is_ios = meta.file_path.startswith("ios://")
+        if is_ios and meta.date_taken is None:
+            # iOS device and EXIF was not available at scan time;
+            # leave date_taken as None so Hop 2's extraction fills it in.
+            resolved_date = None
+            date_source = None
+        else:
+            resolved_date, date_source = resolve_item_date(
+                date_taken=meta.date_taken,
+                date_modified=meta.date_modified,
+            )
         stmt = (
             update(MediaItem)
             .where(MediaItem.id == existing_id)
@@ -650,10 +800,17 @@ async def _upsert_media_item(
         return existing_id
 
     # Resolve date using shared fallback chain
-    resolved_date, date_source = resolve_item_date(
-        date_taken=meta.date_taken,
-        date_modified=meta.date_modified,
-    )
+    is_ios = meta.file_path.startswith("ios://")
+    if is_ios and meta.date_taken is None:
+        # iOS device and EXIF was not available at scan time;
+        # leave date_taken as None so Hop 2's extraction fills it in.
+        resolved_date = None
+        date_source = None
+    else:
+        resolved_date, date_source = resolve_item_date(
+            date_taken=meta.date_taken,
+            date_modified=meta.date_modified,
+        )
 
     item = MediaItem(
         source_path=meta.file_path,

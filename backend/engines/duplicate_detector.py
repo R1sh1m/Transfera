@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from backend.database.manager import session_scope
 from backend.database.models import HopStatus, MediaItem, TransferBatch
@@ -129,26 +129,43 @@ async def scan_batch_duplicates(
                 session_id=batch.session_id,
             )
 
-        # Build lookup of ALL items in this session (archive = completed items)
-        archive_result = await session.execute(
-            select(MediaItem)
-            .where(
-                MediaItem.session_id == batch.session_id,
-                MediaItem.id.notin_([i.id for i in items]),
-                MediaItem.final_status == HopStatus.COMPLETED.value,
-            )
-        )
-        archive_items = list(archive_result.scalars().all())
+        # Extract batch hashes and filenames for indexed, filtered queries
+        batch_hashes = {i.source_hash for i in items if i.source_hash}
+        batch_names = {i.file_name.lower() for i in items if i.file_name}
 
-        # Also fetch all items across the entire DB for cross-session dedup
-        all_items_result = await session.execute(
-            select(MediaItem)
-            .where(
-                MediaItem.id.notin_([i.id for i in items]),
-                MediaItem.source_hash.isnot(None),
+        if not batch_hashes and not batch_names:
+            archive_items = []
+            all_archived = []
+        else:
+            # Build query conditions using matching hashes or names
+            conditions = []
+            if batch_hashes:
+                conditions.append(MediaItem.source_hash.in_(batch_hashes))
+            if batch_names:
+                conditions.append(func.lower(MediaItem.file_name).in_(batch_names))
+
+            # Build lookup of matching items in this session (archive = completed items)
+            archive_result = await session.execute(
+                select(MediaItem)
+                .where(
+                    MediaItem.session_id == batch.session_id,
+                    MediaItem.id.notin_([i.id for i in items]),
+                    MediaItem.final_status == HopStatus.COMPLETED.value,
+                    or_(*conditions),
+                )
             )
-        )
-        all_archived = list(all_items_result.scalars().all())
+            archive_items = list(archive_result.scalars().all())
+
+            # Also fetch matching items across the entire DB for cross-session dedup
+            all_items_result = await session.execute(
+                select(MediaItem)
+                .where(
+                    MediaItem.id.notin_([i.id for i in items]),
+                    MediaItem.source_hash.isnot(None),
+                    or_(*conditions),
+                )
+            )
+            all_archived = list(all_items_result.scalars().all())
 
     # Run detection (outside session to avoid long-lived connections)
     report = _detect_duplicates(

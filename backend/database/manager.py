@@ -110,90 +110,9 @@ async def create_all_tables() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
 
-        # SQLite migrations: add columns if they don't exist yet.
-        migrations = [
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='total_files'",
-                "ALTER TABLE transfer_sessions ADD COLUMN total_files INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='cached_files'",
-                "ALTER TABLE transfer_sessions ADD COLUMN cached_files INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='imported_files'",
-                "ALTER TABLE transfer_sessions ADD COLUMN imported_files INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='failed_files'",
-                "ALTER TABLE transfer_sessions ADD COLUMN failed_files INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='current_batch'",
-                "ALTER TABLE transfer_sessions ADD COLUMN current_batch INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='total_batches'",
-                "ALTER TABLE transfer_sessions ADD COLUMN total_batches INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('media_items') WHERE name='original_capture_time'",
-                "ALTER TABLE media_items ADD COLUMN original_capture_time DATETIME DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('media_items') WHERE name='thumbnail_status'",
-                "ALTER TABLE media_items ADD COLUMN thumbnail_status VARCHAR(16) NOT NULL DEFAULT 'pending'",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('media_items') WHERE name='thumbnail_path'",
-                "ALTER TABLE media_items ADD COLUMN thumbnail_path VARCHAR(4096) DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('media_items') WHERE name='date_taken'",
-                "ALTER TABLE media_items ADD COLUMN date_taken DATETIME DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('media_items') WHERE name='date_source'",
-                "ALTER TABLE media_items ADD COLUMN date_source VARCHAR(32) DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='only_new_mode'",
-                "ALTER TABLE transfer_sessions ADD COLUMN only_new_mode BOOLEAN NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='resolved_batch_id'",
-                "ALTER TABLE transfer_sessions ADD COLUMN resolved_batch_id INTEGER DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='duplicate_resolutions_json'",
-                "ALTER TABLE transfer_sessions ADD COLUMN duplicate_resolutions_json TEXT DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='paused_at'",
-                "ALTER TABLE transfer_sessions ADD COLUMN paused_at DATETIME DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='total_paused_ms'",
-                "ALTER TABLE transfer_sessions ADD COLUMN total_paused_ms INTEGER NOT NULL DEFAULT 0",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='speed_samples'",
-                "ALTER TABLE transfer_sessions ADD COLUMN speed_samples TEXT DEFAULT NULL",
-            ),
-            (
-                "SELECT name FROM pragma_table_info('transfer_sessions') WHERE name='folder_layout'",
-                "ALTER TABLE transfer_sessions ADD COLUMN folder_layout VARCHAR(32) NOT NULL DEFAULT 'year/month'",
-            ),
-            (
-                "SELECT name FROM pragma_index_list('media_items') WHERE name='ix_media_items_filename_size'",
-                "CREATE INDEX IF NOT EXISTS ix_media_items_filename_size ON media_items (file_name, file_size)",
-            ),
-        ]
-        for check_sql, alter_sql in migrations:
-            result = await conn.execute(text(check_sql))
-            if result.fetchone() is None:
-                await conn.execute(text(alter_sql))
-                logger.info("Migration applied: %s", alter_sql[:60])
+        # Run numbered migrations (if any) via the separate migrations module.
+        from backend.database.migrations import run_pending_migrations
+        await run_pending_migrations(conn)
 
     logger.info("All tables created.")
 

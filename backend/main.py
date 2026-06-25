@@ -58,11 +58,27 @@ class SPAStaticFiles(StaticFiles):
     so they reach explicitly registered endpoints instead of being swallowed."""
 
     async def __call__(self, scope, receive, send):
+        # Non-HTTP scopes (WebSocket handshake, lifespan) must pass through
+        # to the handlers registered BEFORE this mount — just return.
         if scope["type"] != "http":
             return
+
         path = scope.get("path", "")
+
+        # API and WS paths should have been matched by registered routes above
+        # this mount. If they reach here, no route matched — send a 404 so the
+        # connection is properly closed rather than left hanging.
         if path.startswith("/api/") or path.startswith("/ws/"):
+            from starlette.responses import JSONResponse
+            response = JSONResponse(
+                {"detail": f"Not found: {path}"},
+                status_code=404,
+            )
+            await response(scope, receive, send)
             return
+
+        # For all other paths, try to serve a static file.
+        # Falls back to index.html via get_response override below.
         await super().__call__(scope, receive, send)
 
     async def get_response(self, path: str, scope):
@@ -172,6 +188,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Pre-warm ExifTool so it's ready for the first transfer
+    try:
+        from backend.engines.metadata_extractor import _bootstrap_exiftool, _exiftool_session
+        exiftool_path = _bootstrap_exiftool()
+        if exiftool_path:
+            _exiftool_session._ensure_running()
+            logger.info("ExifTool stay_open session pre-warmed at startup")
+        else:
+            logger.warning("ExifTool not available — metadata extraction limited to filesystem timestamps")
+    except Exception as exc:
+        logger.warning("Failed to pre-warm ExifTool: %s", exc)
+
     # Fire up device manager in background — don't block server startup
     from backend.tier2_manager import get_device_manager
     manager = get_device_manager()
@@ -213,7 +241,12 @@ def create_app() -> FastAPI:
     # CORS for Electron renderer and same-origin dev
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "http://127.0.0.1:5173",   # Vite dev server
+            "http://localhost:5173",
+            f"http://127.0.0.1:{PORT}",
+            f"http://localhost:{PORT}",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -263,6 +296,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host=HOST,
         port=PORT,
+        ws="wsproto",
         reload=False,
         log_level="info",
     )

@@ -429,7 +429,7 @@ export interface DeviceImportState {
   device_name?: string
   last_successful_cutoff?: string
   last_import_session_id?: number
-  updated_at: string
+  updated_at?: string | null
 }
 
 export interface DeviceImportStateListResponse {

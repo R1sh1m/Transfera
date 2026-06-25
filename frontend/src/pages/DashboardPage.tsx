@@ -168,7 +168,7 @@ function ResumeAlert() {
   const recovery = useRecovery()
   const [expanded, setExpanded] = useState(false)
   const [dismissed, setDismissed] = useState(false)
-  const pausedSessions = sessionList?.sessions.filter(
+  const pausedSessions = sessionList?.sessions?.filter(
     (s) => s.status === 'paused' || s.status === 'created',
   ) ?? []
 
@@ -829,7 +829,7 @@ export default function DashboardPage() {
   const showBridgeCard = backendStatus?.bridge_auto_started && !dismissedCards.includes('bridge-started')
   const showAnySetupCard = showAppleCard || showPymobileCard || showWslCard || showBridgeCard
 
-  const latestSession = sessionList?.sessions[0]
+  const latestSession = sessionList?.sessions?.[0]
   const activeSource = sourceRoot || latestSession?.source_root || null
   const activeDest = destRoot || latestSession?.dest_root || null
   const activeSessionName = latestSession?.session_name
@@ -940,7 +940,7 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
-        ) : sessionList?.sessions.length === 0 ? (
+        ) : (sessionList?.sessions?.length ?? 0) === 0 ? (
           <div className="bg-card border border-border rounded-lg p-8 text-center">
             <HardDrive className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
             <p className="text-sm text-muted-foreground">No sessions yet. Start your first backup!</p>
@@ -960,7 +960,7 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {sessionList?.sessions.map((s) => (
+                {sessionList?.sessions?.map((s) => (
                   <SessionRow key={s.id} session={s} />
                 ))}
               </tbody>

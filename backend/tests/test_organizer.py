@@ -147,14 +147,14 @@ def test_organizer_year_month() -> None:
 
 def test_organizer_derive_timestamp_priority() -> None:
     """
-    Verify _derive_timestamp prefers date_taken over original_capture_time
+    Verify derive_timestamp prefers date_taken over original_capture_time
     over created_at.
     """
     print("\n=== Organizer: Timestamp Priority ===")
 
     from datetime import datetime
 
-    from backend.engines.organizer import _derive_timestamp
+    from backend.engines.organizer import derive_timestamp
 
     dt_taken = datetime(2023, 1, 1, tzinfo=UTC)
     dt_capture = datetime(2022, 6, 15, tzinfo=UTC)
@@ -168,20 +168,20 @@ def test_organizer_derive_timestamp_priority() -> None:
         date_taken=dt_taken,
         original_capture_time=dt_capture,
     )
-    result = _derive_timestamp(item)
+    result = derive_timestamp(item)
     _check("Prioritize date_taken", result == dt_taken, f"got: {result}")
 
     item.date_taken = None
-    result = _derive_timestamp(item)
+    result = derive_timestamp(item)
     _check("Fallback to original_capture_time", result == dt_capture, f"got: {result}")
 
     item.original_capture_time = None
-    result = _derive_timestamp(item)
-    _check("Fallback to created_at", result == dt_created, f"got: {result}")
+    result = derive_timestamp(item)
+    _check("No date returns None", result is None)
 
     item.created_at = None
-    result = _derive_timestamp(item)
-    _check("No timestamps returns None", result is None)
+    result = derive_timestamp(item)
+    _check("Still None without timestamps", result is None)
 
 
 # ======================================================================

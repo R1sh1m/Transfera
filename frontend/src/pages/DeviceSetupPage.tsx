@@ -1292,11 +1292,15 @@ function PreflightMetrics({
   sourceRef: SourceRef | null
   destPath: string
 }) {
+  const transferActive = useTransferStore((s) =>
+    ['running', 'paused'].includes(s.transfer.status)
+  )
   const sourcePath = sourceRef?.type === 'local_folder' ? sourceRef.path : null
   const { data, isLoading, isError, error } = usePreflightValidate(
     sourcePath,
     destPath || null,
     sourceRef?.type === 'device' ? sourceRef : null,
+    { enabled: !transferActive },
   )
 
   const hasSource = sourceRef !== null
@@ -1557,6 +1561,14 @@ export default function DeviceSetupPage() {
   const onlyNewMode = useTransferStore((s) => s.ui.setupOnlyNewMode)
   const folderLayout = useTransferStore((s) => s.ui.setupFolderLayout)
 
+  // Validate persisted paths on mount (they may be stale from a prior session)
+  const { data: sourcePathValid } = useValidatePath(
+    sourcePath && !sourcePath.startsWith('ios://') && !sourcePath.startsWith('wpd://') ? sourcePath : null,
+  )
+  const { data: destPathValid } = useValidatePath(destPath || null)
+  const sourcePathStale = sourcePath && !sourcePath.startsWith('ios://') && !sourcePath.startsWith('wpd://') && sourcePathValid && !sourcePathValid.exists
+  const destPathStale = destPath && destPathValid && !destPathValid.exists
+
   const setSourcePath = useTransferStore((s) => s.setSetupSourcePath)
   const setDestPath = useTransferStore((s) => s.setSetupDestPath)
   const setSessionName = useTransferStore((s) => s.setSetupSessionName)
@@ -1577,6 +1589,8 @@ export default function DeviceSetupPage() {
   const showNotification = useTransferStore((s) => s.showNotification)
 
   const [selectedFiles, setSelectedFiles] = useState<string[]>([])
+  const selectedFilesRef = useRef(selectedFiles)
+  selectedFilesRef.current = selectedFiles
   const [startError, setStartError] = useState<string | null>(null)
   const [pendingDrive, setPendingDrive] = useState<{ driveLetter: string; volumeName: string | null } | null>(null)
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1608,11 +1622,15 @@ export default function DeviceSetupPage() {
   const isIOSDevice = sourceRef?.type === 'device'
 
   // Preflight validation
+  const transferActive = useTransferStore((s) =>
+    ['running', 'paused'].includes(s.transfer.status)
+  )
   const sourcePathForPreflight = sourceRef?.type === 'local_folder' ? sourceRef.path : null
   const { data: preflight } = usePreflightValidate(
     sourcePathForPreflight,
     destPath || null,
     sourceRef?.type === 'device' ? sourceRef : null,
+    { enabled: !transferActive },
   )
 
   // Derive the effective source path string for display and legacy compat
@@ -1642,19 +1660,18 @@ export default function DeviceSetupPage() {
 
   const handleSelectionConfirm = useCallback((paths: string[]) => {
     setSelectedFiles(paths)
-    if (paths.length > 0) {
-      showNotification('success', `${paths.length} file(s) selected for transfer.`)
-    } else {
-      showNotification('info', 'Selection cleared. All files will be transferred.')
+    if (paths.length === 0) {
+      showNotification('info', 'Selection cleared — all files will be transferred.')
     }
   }, [showNotification])
 
-  const handleStart = useCallback(async () => {
+  const handleStart = useCallback(async (confirmedPaths?: string[]) => {
     setStartError(null)
-    if (import.meta.env.DEV && selectedFiles.length > 0) {
+    const files = confirmedPaths ?? selectedFilesRef.current
+    if (import.meta.env.DEV && files.length > 0) {
       console.log(
-        `[Transfer] Starting session with ${selectedFiles.length} selected file(s). First 3:`,
-        selectedFiles.slice(0, 3),
+        `[Transfer] Starting session with ${files.length} selected file(s). First 3:`,
+        files.slice(0, 3),
       )
     }
     const name = sessionName.trim() || `backup-${Date.now()}`
@@ -1667,7 +1684,7 @@ export default function DeviceSetupPage() {
         transfer_mode: transferMode,
         only_new_since_last_import: isIOSDevice && onlyNewMode,
         folder_layout: folderLayout,
-        selected_files: selectedFiles.length > 0 ? selectedFiles : null,
+        selected_files: files.length > 0 ? files : null,
       })
       initTransfer(session)
       resetSetup()
@@ -1676,7 +1693,15 @@ export default function DeviceSetupPage() {
     } catch (err) {
       setStartError(extractErrorMessage(err))
     }
-  }, [sessionName, effectiveSourcePath, sourceRef, destPath, transferMode, isIOSDevice, onlyNewMode, selectedFiles, folderLayout, createSession, initTransfer, resetSetup, setCurrentPage])
+  }, [sessionName, effectiveSourcePath, sourceRef, destPath, transferMode, isIOSDevice, onlyNewMode, folderLayout, createSession, initTransfer, resetSetup, setCurrentPage])
+
+  const handleTransferStart = useCallback((confirmedPaths?: string[]) => {
+    if (canStart && !createSession.isPending) {
+      handleStart(confirmedPaths)
+    } else {
+      showNotification('info', 'Selection saved. Set a destination folder to start the transfer.')
+    }
+  }, [canStart, createSession.isPending, handleStart, showNotification])
 
   // Reset only-new-mode when source changes away from iOS device
   useEffect(() => {
@@ -1805,6 +1830,12 @@ export default function DeviceSetupPage() {
           sourceRef={sourceRef}
           onSourceChange={setSourceRef}
         />
+        {sourcePathStale && (
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>Previously used source path is no longer accessible: <code className="font-mono text-[10px]">{sourcePath}</code></span>
+          </div>
+        )}
 
         {/* Source preview panel — inline media picker */}
         {sourceRef?.type === 'local_folder' && sourceRef.path && (
@@ -1813,6 +1844,7 @@ export default function DeviceSetupPage() {
               sourcePath={sourceRef.path}
               deviceSource={null}
               onSelectionConfirm={handleSelectionConfirm}
+              onTransferStart={handleTransferStart}
             />
           </div>
         )}
@@ -1826,6 +1858,7 @@ export default function DeviceSetupPage() {
                 device_path: sourceRef.device_path,
               }}
               onSelectionConfirm={handleSelectionConfirm}
+              onTransferStart={handleTransferStart}
             />
           </div>
         )}
@@ -1867,6 +1900,12 @@ export default function DeviceSetupPage() {
               Browse
             </button>
           </div>
+          {destPathStale && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>Previously used destination path is no longer accessible: <code className="font-mono text-[10px]">{destPath}</code></span>
+            </div>
+          )}
         </div>
 
         {/* Folder layout */}
@@ -2117,7 +2156,7 @@ export default function DeviceSetupPage() {
           whileHover={canStart ? { scale: 1.01 } : undefined}
           whileTap={canStart ? { scale: 0.95 } : undefined}
           disabled={!canStart || createSession.isPending}
-          onClick={handleStart}
+          onClick={() => handleStart()}
           title={
             canStart
               ? undefined

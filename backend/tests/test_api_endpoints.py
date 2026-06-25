@@ -69,3 +69,28 @@ class TestDeviceEndpoints:
         assert "available" in data
         assert "devices" in data
         assert "driver_status" in data
+
+
+class TestDevicePreview:
+    def test_preview_flat(self, client: TestClient, tmp_path):
+        (tmp_path / "img1.jpg").write_bytes(b"data")
+        (tmp_path / "video.mp4").write_bytes(b"data")
+        (tmp_path / "other.txt").write_bytes(b"data")
+
+        resp = client.get(f"/api/device/preview?path={tmp_path}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert {item["filename"] for item in data["items"]} == {"img1.jpg", "video.mp4"}
+
+    def test_preview_recursive(self, client: TestClient, tmp_path):
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (tmp_path / "img1.jpg").write_bytes(b"data")
+        (sub / "nested.png").write_bytes(b"data")
+
+        resp = client.get(f"/api/device/preview?path={tmp_path}&recursive=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert {item["filename"] for item in data["items"]} == {"img1.jpg", "nested.png"}

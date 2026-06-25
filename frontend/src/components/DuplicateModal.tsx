@@ -5,7 +5,7 @@
 // per-item resolution actions, progress tracking, and bulk "apply to remaining".
 // ---------------------------------------------------------------------------
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X,
@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import { useTransferStore } from '@/store/transfer'
 import { useResolveDuplicates } from '@/lib/queries'
+import { fetchThumbnail } from '@/lib/thumbnail-fetch'
 import { cn } from '@/lib/utils'
 import type { DuplicateAction, DuplicateEntry } from '@/types/api'
 
@@ -120,18 +121,51 @@ function ActionButton({
 // ThumbnailImage — renders thumbnail or placeholder icon
 // ---------------------------------------------------------------------------
 function ThumbnailImage({
-  thumbnailUrl,
+  mediaId,
   fileName,
   size = 'md',
 }: {
-  thumbnailUrl?: string | null
+  mediaId?: number | null
   fileName: string
   size?: 'md' | 'lg'
 }) {
   const dim = size === 'lg' ? 'w-36 h-36' : 'w-28 h-28'
   const iconSize = size === 'lg' ? 'w-8 h-8' : 'w-6 h-6'
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null)
+  const [noThumb, setNoThumb] = useState(false)
 
-  if (!thumbnailUrl) {
+  useEffect(() => {
+    setThumbUrl(null)
+    setNoThumb(false)
+    if (!mediaId) return
+
+    let cancelled = false
+    const controller = new AbortController()
+
+    fetchThumbnail(mediaId, controller.signal).then((url) => {
+      if (cancelled) return
+      if (url) {
+        setThumbUrl(url)
+      } else {
+        setNoThumb(true)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [mediaId])
+
+  useEffect(() => {
+    return () => {
+      if (thumbUrl) {
+        URL.revokeObjectURL(thumbUrl)
+      }
+    }
+  }, [thumbUrl])
+
+  if (noThumb || !thumbUrl || !mediaId) {
     return (
       <div className={cn(dim, 'rounded-lg bg-muted flex items-center justify-center shrink-0')}>
         <FileImage className={cn(iconSize, 'text-muted-foreground/50')} />
@@ -142,21 +176,9 @@ function ThumbnailImage({
   return (
     <div className={cn(dim, 'rounded-lg bg-muted shrink-0 overflow-hidden relative')}>
       <img
-        src={thumbnailUrl}
+        src={thumbUrl}
         alt={fileName}
         className="w-full h-full object-cover"
-        onError={(e) => {
-          // Fallback to icon on image load error
-          const target = e.currentTarget
-          target.style.display = 'none'
-          const parent = target.parentElement
-          if (parent) {
-            const fallback = document.createElement('div')
-            fallback.className = 'w-full h-full flex items-center justify-center'
-            fallback.innerHTML = `<svg class="${iconSize} text-muted-foreground/50" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`
-            parent.appendChild(fallback)
-          }
-        }}
       />
     </div>
   )
@@ -235,7 +257,7 @@ function DuplicatePairCard({
           </p>
           <div className="flex gap-3">
             <ThumbnailImage
-              thumbnailUrl={`/api/media/${entry.item_id}/thumbnail`}
+              mediaId={entry.item_id}
               fileName={entry.file_name}
             />
             <div className="flex-1 min-w-0 space-y-1">
@@ -269,7 +291,7 @@ function DuplicatePairCard({
           </p>
           <div className="flex gap-3">
             <ThumbnailImage
-              thumbnailUrl={entry.matched_thumbnail_url}
+              mediaId={entry.matched_item_id}
               fileName={entry.file_name}
             />
             <div className="flex-1 min-w-0 space-y-1">
@@ -330,8 +352,10 @@ export default function DuplicateModal() {
 
   if (!isOpen || !report) return null
 
+  const resolutionsMap = resolutions instanceof Map ? resolutions : new Map<number, DuplicateAction>()
+
   const allEntries = [...report.exact_duplicates, ...report.potential_duplicates]
-  const resolvedCount = resolutions.size
+  const resolvedCount = resolutionsMap.size
   const totalCount = allEntries.length
   const allResolved = resolvedCount === totalCount && totalCount > 0
 
@@ -351,7 +375,7 @@ export default function DuplicateModal() {
     if (!activeBulkAction) return
     for (let i = currentViewIdx; i < allEntries.length; i++) {
       const entry = allEntries[i]
-      if (entry && !resolutions.has(entry.item_id)) {
+      if (entry && !resolutionsMap.has(entry.item_id)) {
         setResolution(entry.item_id, activeBulkAction)
       }
     }
@@ -361,7 +385,7 @@ export default function DuplicateModal() {
     if (!report) return
     const resolutionList = allEntries.map((entry) => ({
       item_id: entry.item_id,
-      action: resolutions.get(entry.item_id) ?? applyToAll ?? ('skip' as DuplicateAction),
+      action: resolutionsMap.get(entry.item_id) ?? applyToAll ?? ('skip' as DuplicateAction),
     }))
     await resolveDuplicates.mutateAsync({
       sessionId: report.session_id,
@@ -381,8 +405,8 @@ export default function DuplicateModal() {
 
   // Compute remaining unreviewed count
   const remainingCount = useMemo(() => {
-    return allEntries.filter((e) => !resolutions.has(e.item_id)).length
-  }, [allEntries, resolutions])
+    return allEntries.filter((e) => !resolutionsMap.has(e.item_id)).length
+  }, [allEntries, resolutionsMap])
 
   return (
     <AnimatePresence>
@@ -393,83 +417,65 @@ export default function DuplicateModal() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={closeDuplicates}
-            className="fixed inset-0 z-50 bg-black/50"
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
           />
 
-          {/* Modal */}
+          {/* Modal Container */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            initial={{ opacity: 0, scale: 0.97, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 20 }}
-            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+            className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
           >
-            <div className="bg-card border border-border rounded-lg shadow-xl w-full max-w-4xl max-h-[85vh] flex flex-col">
+            <div className="bg-card border border-border w-full max-w-4xl h-[640px] rounded-xl shadow-2xl flex flex-col overflow-hidden pointer-events-auto">
               {/* Header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-amber-100 dark:bg-amber-900 flex items-center justify-center">
-                    <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-                  </div>
+              <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-muted/30">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
                   <div>
-                    <h2 className="text-base font-semibold text-foreground">Review Duplicates</h2>
-                    <p className="text-xs text-muted-foreground">{report.summary}</p>
+                    <h2 className="text-base font-semibold text-foreground leading-none">Review Duplicate Items</h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {report.summary}
+                    </p>
                   </div>
                 </div>
                 <button
                   onClick={closeDuplicates}
-                  className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors"
+                  className="no-drag p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
-              {/* Progress + Bulk Actions Bar */}
-              <div className="px-5 py-3 border-b border-border bg-muted/30">
-                <div className="flex items-center justify-between">
-                  {/* Progress indicator */}
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm font-medium text-foreground">
-                      {resolvedCount} / {totalCount} reviewed
-                    </span>
-                    <div className="w-32 h-1.5 rounded-full bg-muted overflow-hidden">
-                      <motion.div
-                        className="h-full rounded-full bg-primary"
-                        initial={{ width: 0 }}
-                        animate={{ width: `${totalCount > 0 ? (resolvedCount / totalCount) * 100 : 0}%` }}
-                        transition={{ duration: 0.3 }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Bulk actions */}
-                  <div className="flex items-center gap-2">
-                    <Layers className="w-3.5 h-3.5 text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Bulk:</span>
-                    {(['skip', 'overwrite', 'keep_both'] as const).map((action) => (
-                      <button
-                        key={action}
-                        onClick={() => setActiveBulkAction(action)}
-                        className={cn(
-                          'no-drag px-2 py-0.5 rounded text-[11px] font-medium border transition-colors',
-                          activeBulkAction === action
-                            ? 'bg-primary text-primary-foreground border-primary'
-                            : 'bg-background text-muted-foreground border-border hover:bg-muted',
-                        )}
-                      >
-                        {actionConfig[action].label}
-                      </button>
-                    ))}
+              {/* Bulk Actions */}
+              <div className="px-5 py-3 border-b border-border bg-muted/10 flex items-center gap-3">
+                <span className="text-xs font-medium text-muted-foreground shrink-0">Bulk Action:</span>
+                <div className="flex items-center gap-1.5">
+                  {(['skip', 'overwrite', 'keep_both'] as DuplicateAction[]).map((action) => (
                     <button
-                      onClick={handleBulkApply}
-                      disabled={!activeBulkAction}
-                      className="no-drag px-2.5 py-0.5 bg-primary text-primary-foreground rounded text-[11px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      key={action}
+                      onClick={() => setActiveBulkAction(action)}
+                      className={cn(
+                        'no-drag px-2.5 py-1.5 rounded-md text-xs font-medium border transition-all flex items-center gap-1.5',
+                        activeBulkAction === action
+                          ? cn(actionConfig[action].bg, actionConfig[action].border, actionConfig[action].color)
+                          : 'border-input hover:bg-muted text-muted-foreground hover:text-foreground',
+                      )}
                     >
-                      Apply to All
+                      {actionConfig[action].icon}
+                      {actionConfig[action].label}
                     </button>
-                  </div>
+                  ))}
                 </div>
+
+                {activeBulkAction && (
+                  <button
+                    onClick={handleBulkApply}
+                    className="no-drag ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:bg-primary/90 transition-colors shadow-xs"
+                  >
+                    Apply to All
+                  </button>
+                )}
               </div>
 
               {/* Content: Side-by-side comparison */}
@@ -491,9 +497,9 @@ export default function DuplicateModal() {
                       <DuplicatePairCard
                         key={currentEntry.item_id}
                         entry={currentEntry}
-                        resolution={resolutions.get(currentEntry.item_id) ?? applyToAll ?? undefined}
+                        resolution={resolutionsMap.get(currentEntry.item_id) ?? applyToAll ?? undefined}
                         onSetResolution={(action) => setResolution(currentEntry.item_id, action)}
-                        isReviewed={resolutions.has(currentEntry.item_id)}
+                        isReviewed={resolutionsMap.has(currentEntry.item_id)}
                       />
                     )}
 
@@ -507,11 +513,11 @@ export default function DuplicateModal() {
                             'w-2 h-2 rounded-full transition-colors',
                             idx === currentViewIdx
                               ? 'bg-primary'
-                              : resolutions.has(entry.item_id)
+                              : resolutionsMap.has(entry.item_id)
                                 ? 'bg-green-400 dark:bg-green-600'
                                 : 'bg-muted-foreground/30 hover:bg-muted-foreground/50',
                           )}
-                          title={`Item ${idx + 1}${resolutions.has(entry.item_id) ? ' (reviewed)' : ''}`}
+                          title={`Item ${idx + 1}${resolutionsMap.has(entry.item_id) ? ' (reviewed)' : ''}`}
                         />
                       ))}
                     </div>

@@ -17,6 +17,7 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ try:
     _PILLOW_READY = True
 
     # Pillow 10+ moved Resampling to Image.Resampling.LANCZOS
-    _LANCZOS = getattr(Image, "Resampling", Image).LANCZOS  # type: ignore[union-attr]
+    _LANCZOS: Any = getattr(Image, "Resampling", Image).LANCZOS  # type: ignore
 
     try:
         import pillow_heif
@@ -47,7 +48,7 @@ try:
     except ImportError:
         pass
 except ImportError:
-    _LANCZOS = None  # type: ignore[assignment]
+    _LANCZOS: Any = 1  # Fallback for typing
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ def _find_ffmpeg() -> str | None:
 # ---------------------------------------------------------------------------
 _RAWPY_READY = False
 try:
-    import rawpy  # noqa: F401
+    import rawpy  # type: ignore # noqa: F401
     _RAWPY_READY = True
 except ImportError:
     pass
@@ -191,69 +192,82 @@ def _generate_image_thumbnail(file_path: Path) -> bytes | None:
 # ---------------------------------------------------------------------------
 # Video thumbnail via ffmpeg (pipe to stdout, no temp files)
 # ---------------------------------------------------------------------------
+import threading as _threading
+
+_video_thumb_semaphore = _threading.BoundedSemaphore(3)
+
+
 def _generate_video_thumbnail(file_path: Path) -> bytes | None:
     """
     Extract a single frame from a video file using ffmpeg piped to stdout.
     Uses 10 % of duration as seek point. Returns JPEG bytes or None.
     """
+    # The caller (generate_thumbnail_bytes) already checked is_file(), but
+    # the file may be deleted between that check and this function running
+    # (e.g. a background thread racing with test teardown).  Re-check here
+    # to avoid spurious ffmpeg error logs for files that vanished.
+    if not file_path.is_file():
+        return None
+
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         return None
 
-    try:
-        duration_result = subprocess.run(
-            [
-                ffmpeg,
-                "-i", str(file_path),
-                "-f", "null",
-                "-",
-            ],
-            capture_output=True,
-            timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        stderr = duration_result.stderr.decode("utf-8", errors="replace")
-        duration_sec = None
-        for line in stderr.splitlines():
-            if "Duration:" in line:
-                parts = line.split("Duration:")[1].split(",")[0].strip().split(":")
-                if len(parts) == 3:
-                    duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                break
+    with _video_thumb_semaphore:
+        try:
+            duration_result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-i", str(file_path),
+                    "-f", "null",
+                    "-",
+                ],
+                capture_output=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            stderr = duration_result.stderr.decode("utf-8", errors="replace")
+            duration_sec = None
+            for line in stderr.splitlines():
+                if "Duration:" in line:
+                    parts = line.split("Duration:")[1].split(",")[0].strip().split(":")
+                    if len(parts) == 3:
+                        duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    break
 
-        seek_time = "0.5"
-        if duration_sec and duration_sec > 0:
-            seek_time = str(max(0.5, duration_sec * 0.1))
+            seek_time = "0.5"
+            if duration_sec and duration_sec > 0:
+                seek_time = str(max(0.5, duration_sec * 0.1))
 
-        result = subprocess.run(
-            [
-                ffmpeg,
-                "-ss", seek_time,
-                "-i", str(file_path),
-                "-vframes", "1",
-                "-vf", f"scale={THUMBNAIL_MAX_SIZE}:{THUMBNAIL_MAX_SIZE}:force_original_aspect_ratio=decrease",
-                "-f", "mjpeg",
-                "-q:v", "3",
-                "-",
-            ],
-            capture_output=True,
-            timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
-            return result.stdout
+            result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-ss", seek_time,
+                    "-i", str(file_path),
+                    "-vframes", "1",
+                    "-vf", f"scale={THUMBNAIL_MAX_SIZE}:{THUMBNAIL_MAX_SIZE}:force_original_aspect_ratio=decrease",
+                    "-f", "mjpeg",
+                    "-q:v", "3",
+                    "-",
+                ],
+                capture_output=True,
+                timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
+                return result.stdout
 
-        stderr = result.stderr.decode("utf-8", errors="replace")[:2000]
-        logger.error(
-            "ffmpeg thumbnail failed for %s (returncode=%d, stdout=%d bytes): %s",
-            file_path, result.returncode, len(result.stdout or b""), stderr,
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("ffmpeg thumbnail timed out for %s", file_path)
-    except OSError as exc:
-        logger.error("ffmpeg thumbnail OS error for %s: %s", file_path, exc)
+            stderr = result.stderr.decode("utf-8", errors="replace")[:2000]
+            logger.error(
+                "ffmpeg thumbnail failed for %s (returncode=%d, stdout=%d bytes): %s",
+                file_path, result.returncode, len(result.stdout or b""), stderr,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg thumbnail timed out for %s", file_path)
+        except OSError as exc:
+            logger.error("ffmpeg thumbnail OS error for %s: %s", file_path, exc)
 
-    return None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +279,7 @@ def _generate_raw_thumbnail(file_path: Path) -> bytes | None:
         return None
 
     try:
-        import rawpy
+        import rawpy  # type: ignore
         with rawpy.imread(str(file_path)) as raw:
             rgb = raw.postprocess(
                 use_camera_wb=True,

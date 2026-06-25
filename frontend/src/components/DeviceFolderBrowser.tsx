@@ -35,7 +35,7 @@ import type { IOSDeviceInfo, IOSDeviceFileEntry } from '@/types/api'
 function fileIcon(entry: IOSDeviceFileEntry) {
   if (entry.is_dir) return <Folder className="w-5 h-5 text-blue-400" />
   const ext = entry.name.split('.').pop()?.toLowerCase() ?? ''
-  if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'raw', 'tiff', 'webp', 'bmp'].includes(ext))
+  if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'heif', 'raw', 'tiff', 'tif', 'webp', 'bmp', 'svg', 'cr2', 'cr3', 'nef', 'arw', 'dng', 'avif', 'jxl'].includes(ext))
     return <Image className="w-5 h-5 text-blue-400" />
   if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', '3gp'].includes(ext))
     return <Film className="w-5 h-5 text-purple-400" />

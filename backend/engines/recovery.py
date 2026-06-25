@@ -23,7 +23,7 @@ from backend.database.models import (
     TransferSession,
 )
 from backend.engines.cache_manager import _partial_path, get_cache_path
-from backend.engines.importer import _cleanup_cache_file, compute_archive_path
+from backend.engines.importer import cleanup_cache_file, compute_archive_path
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ async def _recover_archived_batch(
             if dst.is_file() and item.source_hash:
                 if _verify_hash(dst, item.source_hash):
                     # Destination verified — clean up cache, mark complete
-                    await _cleanup_cache_file(cache_dir, item)
+                    await cleanup_cache_file(cache_dir, item)
                     item.hop2_status = HopStatus.COMPLETED.value
                     item.final_status = HopStatus.COMPLETED.value
                     item.error_message = None

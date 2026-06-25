@@ -306,14 +306,11 @@ async def preview_directory(
 
         if recursive:
             # Recursive walk — collect first, then process
-            all_entries: list[os.DirEntry] = []
+            all_entries: list[str] = []
             for root, dirs, files in os.walk(abs_path):
                 for fname in files:
                     fpath = os.path.join(root, fname)
-                    try:
-                        all_entries.append(os.DirEntry(fpath))
-                    except Exception:
-                        continue
+                    all_entries.append(fpath)
 
             for entry in all_entries:
                 ext = os.path.splitext(entry.name)[1].lower() if hasattr(entry, "name") else os.path.splitext(entry)[1].lower()

@@ -6,6 +6,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import apiClient from './api-client'
 import { extractErrorMessage } from './utils'
+import { clearThumbFailCache } from './thumbnail-fetch'
 import { useTransferStore } from '@/store/transfer'
 import type {
   ClearResponse,
@@ -147,7 +148,13 @@ export function useSession(id: number | null) {
       return data
     },
     enabled: id !== null,
-    refetchInterval: 3000,
+    refetchInterval: (query) => {
+      const d = query.state.data
+      if (!d) return 3000
+      const terminal = ['completed','completed_with_errors','failed','cancelled']
+      if (terminal.includes(d.status)) return false
+      return 3000
+    },
   })
 }
 
@@ -274,9 +281,28 @@ export function useClearSessions() {
       const { data } = await apiClient.post<ClearResponse>('/sessions/clear', req ?? {})
       return data
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
+      const store = useTransferStore.getState()
+      const prevSessionId = store.transfer.sessionId
+
+      if (prevSessionId !== null) {
+        await qc.cancelQueries({ queryKey: ['session-progress', prevSessionId] })
+        await qc.cancelQueries({ queryKey: ['session', prevSessionId] })
+        await qc.cancelQueries({ queryKey: ['batches', prevSessionId] })
+      }
+
+      store.clearAll()
+
+      qc.removeQueries({ queryKey: ['media'] })
+      qc.removeQueries({ queryKey: ['session-progress'] })
+      qc.removeQueries({ queryKey: ['batches'] })
+      if (prevSessionId !== null) {
+        qc.removeQueries({ queryKey: ['session', prevSessionId] })
+      }
+
       qc.invalidateQueries({ queryKey: ['sessions'] })
-      useTransferStore.getState().showNotification('success', data.message)
+      store.setCurrentPage('dashboard')
+      store.showNotification('success', data.message)
     },
     onError: (error) => {
       useTransferStore.getState().showNotification('error', extractErrorMessage(error))
@@ -291,10 +317,37 @@ export function useClearLibrary() {
       const { data } = await apiClient.post<ClearResponse>('/media/clear')
       return data
     },
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ['media'] })
-      useTransferStore.getState().resetLibrary()
-      useTransferStore.getState().showNotification('success', data.message)
+    onSuccess: async (data) => {
+      const store = useTransferStore.getState()
+      const prevSessionId = store.transfer.sessionId
+
+      // 1. Cancel any in-flight queries that reference the current session
+      //    BEFORE we reset the store, so they don't fire 404s after sessionId
+      //    becomes null.
+      if (prevSessionId !== null) {
+        await qc.cancelQueries({ queryKey: ['session-progress', prevSessionId] })
+        await qc.cancelQueries({ queryKey: ['session', prevSessionId] })
+        await qc.cancelQueries({ queryKey: ['batches', prevSessionId] })
+      }
+
+      // 2. Reset all client-side transfer state (sets sessionId→null,
+      //    status→'created', clears snapshot, etc.).
+      clearThumbFailCache()
+      store.clearAll()
+
+      // 3. Remove stale cached data so nothing re-fires against old IDs.
+      qc.removeQueries({ queryKey: ['media'] })
+      qc.removeQueries({ queryKey: ['session-progress'] })
+      qc.removeQueries({ queryKey: ['batches'] })
+      if (prevSessionId !== null) {
+        qc.removeQueries({ queryKey: ['session', prevSessionId] })
+      }
+      // Invalidate the sessions list so Dashboard shows empty state.
+      qc.invalidateQueries({ queryKey: ['sessions'] })
+
+      // 4. Navigate to dashboard and show confirmation.
+      store.setCurrentPage('dashboard')
+      store.showNotification('success', data.message)
     },
     onError: (error) => {
       useTransferStore.getState().showNotification('error', extractErrorMessage(error))
@@ -306,6 +359,11 @@ export function useClearLibrary() {
 // Batches
 // ---------------------------------------------------------------------------
 export function useSessionBatches(sessionId: number | null) {
+  const isTerminal = (s: string) =>
+    ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(s)
+  const status = useTransferStore((s) => s.transfer.status)
+  const shouldPoll = sessionId !== null && !isTerminal(status)
+
   return useQuery({
     queryKey: ['batches', sessionId],
     queryFn: async () => {
@@ -314,8 +372,8 @@ export function useSessionBatches(sessionId: number | null) {
       )
       return data
     },
-    enabled: sessionId !== null,
-    refetchInterval: 3000,
+    enabled: shouldPoll,
+    refetchInterval: shouldPoll ? 3000 : false,
   })
 }
 
@@ -327,6 +385,7 @@ export function useSessionProgress(sessionId: number | null) {
     ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(s)
   const status = useTransferStore((s) => s.transfer.status)
   const shouldPoll = sessionId !== null && !isTerminal(status)
+  const isRunning = status === 'running'
 
   return useQuery({
     queryKey: ['session-progress', sessionId],
@@ -337,8 +396,8 @@ export function useSessionProgress(sessionId: number | null) {
       return data
     },
     enabled: shouldPoll,
-    refetchInterval: shouldPoll ? 750 : false,
-    staleTime: 500,
+    refetchInterval: isRunning ? 500 : 2000,
+    staleTime: 0,
   })
 }
 
@@ -404,10 +463,11 @@ export function useDiskSpace(path: string | null) {
   return useQuery({
     queryKey: ['disk-space', path],
     queryFn: async () => {
+      if (!path || !path.trim()) throw new Error('No path')
       const { data } = await apiClient.post<DiskSpaceResponse>('/utils/disk-space', { path })
       return data
     },
-    enabled: !!path && path.trim().length > 0,
+    enabled: !!path && path.trim().length > 0 && !path.startsWith('ios://') && !path.startsWith('wpd://'),
     refetchInterval: 60000,
     retry: 1,
     staleTime: 30000,
@@ -452,7 +512,12 @@ export function useCheckDuplicates() {
 // ---------------------------------------------------------------------------
 // Preflight Disk Validation
 // ---------------------------------------------------------------------------
-export function usePreflightValidate(sourcePath: string | null, destPath: string | null, sourceRef?: SourceRef | null) {
+export function usePreflightValidate(
+  sourcePath: string | null,
+  destPath: string | null,
+  sourceRef?: SourceRef | null,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
     queryKey: ['preflight', sourcePath, destPath, sourceRef],
     queryFn: async () => {
@@ -465,6 +530,7 @@ export function usePreflightValidate(sourcePath: string | null, destPath: string
       return data
     },
     enabled:
+      (options?.enabled ?? true) &&
       (!!sourcePath || !!sourceRef) &&
       !!destPath &&
       destPath.trim().length > 0,

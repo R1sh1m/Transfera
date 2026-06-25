@@ -22,6 +22,7 @@ def _run_server() -> None:
         create_app(),
         host=HOST,
         port=PORT,
+        ws="wsproto",
         log_level="error",
         access_log=False,
     )
@@ -57,14 +58,15 @@ def client() -> httpx.Client:
 # In-memory database fixture
 # ---------------------------------------------------------------------------
 @pytest.fixture
-async def db_session():
-    """Create an in-memory SQLite database and yield an async session.
+async def db_session(tmp_path):
+    """Create an in-memory SQLite database (via a temp file for multi-connection support) and yield an async session.
 
-    Overrides ``DATABASE_URL`` so the engine points at ``:memory:`` instead
+    Overrides ``DATABASE_URL`` so the engine points at a temporary database file instead
     of the on-disk database.  Tables are created before the test and the
     engine is disposed afterward.
     """
-    mem_url = "sqlite+aiosqlite://"
+    db_file = tmp_path / "test_temp.db"
+    mem_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
 
     with (
         patch("backend.config.DATABASE_URL", mem_url),
@@ -84,6 +86,12 @@ async def db_session():
             yield session
 
         await dispose_engine()
+
+        try:
+            if db_file.exists():
+                db_file.unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

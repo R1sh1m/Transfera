@@ -23,6 +23,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { useMediaList, useClearLibrary } from '@/lib/queries'
+import { useQueryClient } from '@tanstack/react-query'
 import TransferHistoryTable from '@/components/TransferHistoryTable'
 import apiClient from '@/lib/api-client'
 import { useTransferStore } from '@/store/transfer'
@@ -39,15 +40,33 @@ const extIconMap: Record<string, React.ReactNode> = {
   '.png': <Image className="w-5 h-5" />,
   '.gif': <Image className="w-5 h-5" />,
   '.heic': <Image className="w-5 h-5" />,
+  '.heif': <Image className="w-5 h-5" />,
   '.webp': <Image className="w-5 h-5" />,
   '.raw': <Image className="w-5 h-5" />,
+  '.bmp': <Image className="w-5 h-5" />,
+  '.tiff': <Image className="w-5 h-5" />,
+  '.tif': <Image className="w-5 h-5" />,
+  '.cr2': <Image className="w-5 h-5" />,
+  '.cr3': <Image className="w-5 h-5" />,
+  '.nef': <Image className="w-5 h-5" />,
+  '.arw': <Image className="w-5 h-5" />,
+  '.dng': <Image className="w-5 h-5" />,
+  '.avif': <Image className="w-5 h-5" />,
+  '.jxl': <Image className="w-5 h-5" />,
   '.mp4': <Film className="w-5 h-5" />,
   '.mkv': <Film className="w-5 h-5" />,
   '.mov': <Film className="w-5 h-5" />,
   '.avi': <Film className="w-5 h-5" />,
+  '.webm': <Film className="w-5 h-5" />,
+  '.m4v': <Film className="w-5 h-5" />,
+  '.3gp': <Film className="w-5 h-5" />,
   '.mp3': <Music className="w-5 h-5" />,
   '.flac': <Music className="w-5 h-5" />,
   '.wav': <Music className="w-5 h-5" />,
+  '.aac': <Music className="w-5 h-5" />,
+  '.ogg': <Music className="w-5 h-5" />,
+  '.m4a': <Music className="w-5 h-5" />,
+  '.wma': <Music className="w-5 h-5" />,
   '.pdf': <FileText className="w-5 h-5" />,
 }
 
@@ -110,13 +129,15 @@ function useMasonryColumns(items: MediaItemInfo[], containerWidth: number, gap =
 // ---------------------------------------------------------------------------
 function LibraryCard({ item }: { item: MediaItemInfo }) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null)
-  const isImage = item.extension && ['.jpg', '.jpeg', '.png', '.gif', '.heic', '.webp', '.raw', '.bmp', '.tiff', '.tif', '.avif', '.jxl'].includes(item.extension)
-  const isVideo = item.extension && ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.3gp'].includes(item.extension)
-  const isAudio = item.extension && ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma'].includes(item.extension)
+  const [noThumb, setNoThumb] = useState(false)
+  const extLower = item.extension?.toLowerCase()
+  const isImage = extLower && ['.jpg', '.jpeg', '.png', '.gif', '.heic', '.heif', '.webp', '.raw', '.bmp', '.tiff', '.tif', '.cr2', '.cr3', '.nef', '.arw', '.dng', '.avif', '.jxl'].includes(extLower)
+  const isVideo = extLower && ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.3gp'].includes(extLower)
+  const isAudio = extLower && ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma'].includes(extLower)
   const isFailed = item.thumbnail_status === 'failed'
 
   useEffect(() => {
-    if (isFailed) return
+    if (isFailed || noThumb) return
     // Allow fetching if thumbnail_status is 'ready' OR 'pending' (endpoint generates on demand)
     if (item.thumbnail_status !== 'ready' && item.thumbnail_status !== 'pending') return
 
@@ -124,8 +145,11 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
     let cancelled = false
 
     fetchThumbnail(item.id, controller.signal).then((url) => {
-      if (!cancelled && url) {
+      if (cancelled) return
+      if (url) {
         setThumbUrl(url)
+      } else {
+        setNoThumb(true)
       }
     })
 
@@ -133,7 +157,7 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
       cancelled = true
       controller.abort()
     }
-  }, [item.id, item.thumbnail_status, isFailed])
+  }, [item.id, item.thumbnail_status, isFailed, noThumb])
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
@@ -164,6 +188,7 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
             src={thumbUrl}
             alt={item.file_name}
             className="w-full h-full object-cover"
+            onError={() => { setThumbUrl(null); setNoThumb(true) }}
           />
         ) : (
           <div className={cn(
@@ -302,7 +327,7 @@ class MediaGridBoundary extends Component<
 export default function LibraryPage() {
   const [search, setSearch] = useState('')
   const [extension, setExtension] = useState('')
-  const [finalStatus, setFinalStatus] = useState('')
+  const [finalStatus, setFinalStatus] = useState('completed')
   const [viewMode, setViewMode] = useState<'masonry' | 'list' | 'history'>('masonry')
   const [regenStatus, setRegenStatus] = useState<'idle' | 'loading' | 'done'>('idle')
   const [showClearDialog, setShowClearDialog] = useState(false)
@@ -312,10 +337,31 @@ export default function LibraryPage() {
   const appendLibraryItems = useTransferStore((s) => s.appendLibraryItems)
   const resetLibrary = useTransferStore((s) => s.resetLibrary)
   const setLoadingMore = useTransferStore((s) => s.setLoadingMore)
+  const queryClient = useQueryClient()
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const { data, isLoading } = useMediaList({
-    page: 1,
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    }
+  }, [])
+
+  const lastSessionId = useTransferStore((s) => s.ui.lastCompletedSessionId)
+  const [showingRecent, setShowingRecent] = useState(true)
+
+  useEffect(() => {
+    if (lastSessionId) {
+      setShowingRecent(true)
+    }
+  }, [lastSessionId])
+
+  const sessionFilter = showingRecent && lastSessionId ? lastSessionId : undefined
+  const [fetchPage, setFetchPage] = useState(1)
+
+  const { data, isLoading, isFetching } = useMediaList({
+    page: fetchPage,
     pageSize: 50,
+    sessionId: sessionFilter,
     extension: extension || undefined,
     finalStatus: finalStatus || undefined,
     search: search || undefined,
@@ -324,26 +370,27 @@ export default function LibraryPage() {
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [containerWidth, setContainerWidth] = useState(800)
+  const filterKeyRef = useRef(0)
+  const loadedPages = useRef<Set<number>>(new Set())
 
-  // Abort controller for in-flight requests on page unmount
-  useEffect(() => {
-    const ac = new AbortController()
-    return () => {
-      ac.abort()
-    }
-  }, [])
+  const [filterKey, setFilterKey] = useState(0)
 
-  // Reset library on filter change
   useEffect(() => {
+    filterKeyRef.current += 1
+    const myKey = filterKeyRef.current
+    loadedPages.current = new Set()
     resetLibrary()
-  }, [search, extension, finalStatus, resetLibrary])
+    setFetchPage(1)
+    setFilterKey(myKey)
+  }, [search, extension, finalStatus, sessionFilter, resetLibrary])
 
-  // Load initial data into store
   useEffect(() => {
-    if (data && data.items.length > 0 && library.items.length === 0) {
-      appendLibraryItems(data.items, data.total, data.pages)
-    }
-  }, [data, library.items.length, appendLibraryItems])
+    if (!data || data.items.length === 0) return
+    if (filterKey !== filterKeyRef.current) return
+    if (loadedPages.current.has(fetchPage)) return
+    loadedPages.current.add(fetchPage)
+    appendLibraryItems(data.items, data.total, data.pages)
+  }, [data, filterKey, fetchPage, appendLibraryItems])
 
   // Measure container
   useEffect(() => {
@@ -360,12 +407,12 @@ export default function LibraryPage() {
   const columns = useMasonryColumns(library.items, containerWidth)
 
   // Infinite scroll observer
-  const loadMore = useCallback(async () => {
-    if (library.isLoadingMore || library.page >= library.totalPages) return
+  const loadMore = useCallback(() => {
+    if (library.isLoadingMore || isFetching) return
+    if (library.total === 0 || library.page > library.totalPages) return
     setLoadingMore(true)
-    // In production this would fetch the next page
-    setLoadingMore(false)
-  }, [library.isLoadingMore, library.page, library.totalPages, setLoadingMore])
+    setFetchPage(p => p + 1)
+  }, [library.isLoadingMore, library.page, library.totalPages, isFetching, setLoadingMore])
 
   useEffect(() => {
     if (!sentinelRef.current) return
@@ -384,53 +431,26 @@ export default function LibraryPage() {
   const allExtensions = ['.jpg', '.png', '.mp4', '.mov', '.mp3', '.pdf', '.raw', '.heic']
 
   const handleRegenThumbnails = async () => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    setRegenStatus('loading')
     try {
-      setRegenStatus('loading')
       const res = await apiClient.post('/media/regenerate-thumbnails')
-      const data = res.data as {
-        count?: number
-        total?: number
-        succeeded?: number
-        failed?: number
-        failed_ids?: number[]
-      }
+      const data = res.data as { total?: number; count?: number }
       const total = data.total ?? data.count ?? 0
       if (total === 0) {
         setRegenStatus('done')
-      } else {
-        // Update local state for failed items immediately
-        const failedIds = data.failed_ids
-        if (failedIds && failedIds.length > 0) {
-          const updated = library.items.map((item) => ({
-            ...item,
-            thumbnail_status: failedIds.includes(item.id)
-              ? ('failed' as const)
-              : ('pending' as const),
-          }))
-          resetLibrary()
-          appendLibraryItems(updated, library.total, library.totalPages)
-        } else {
-          // Mark all items as pending to trigger a fresh fetch
-          const updated = library.items.map((item) => ({
-            ...item,
-            thumbnail_status: 'pending' as const,
-          }))
-          resetLibrary()
-          appendLibraryItems(updated, library.total, library.totalPages)
-        }
-
-        // Poll: check periodically for thumbnail_url to appear
-        let attempts = 0
-        const poll = setInterval(async () => {
-          attempts++
-          // Refresh first page to pick up new thumbnails
-          resetLibrary()
-          if (attempts >= 20) {
-            clearInterval(poll)
-            setRegenStatus('done')
-          }
-        }, 3000)
+        return
       }
+      let attempts = 0
+      pollIntervalRef.current = setInterval(() => {
+        attempts++
+        queryClient.invalidateQueries({ queryKey: ['media'] })
+        if (attempts >= 15) {
+          clearInterval(pollIntervalRef.current!)
+          pollIntervalRef.current = null
+          setRegenStatus('done')
+        }
+      }, 3000)
     } catch {
       setRegenStatus('idle')
     }
@@ -476,7 +496,7 @@ export default function LibraryPage() {
           className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
         >
           <option value="">All statuses</option>
-          <option value="completed">Completed</option>
+          <option value="completed">Completed (default)</option>
           <option value="failed">Failed</option>
           <option value="pending">Pending</option>
         </select>
@@ -547,12 +567,35 @@ export default function LibraryPage() {
         </button>
       </div>
 
+      {/* Session filter banner */}
+      {lastSessionId && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg text-xs">
+          <span className="flex-1 text-blue-700 dark:text-blue-300">
+            {showingRecent
+              ? `Showing recent transfer (Session #${lastSessionId})`
+              : `Showing all transfers`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowingRecent(r => !r)}
+            className="px-2.5 py-1 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700 transition-colors shrink-0"
+          >
+            {showingRecent ? 'Show all' : 'Show recent'}
+          </button>
+        </div>
+      )}
+
       <ConfirmDialog
         open={showClearDialog}
         title="Clear Library"
         description={`This will permanently remove all ${library.total} library item(s), their database records, and generated thumbnails from the app.\n\nThis only clears app-managed records and cached thumbnails — your actual photos and videos at the transfer destination are NOT affected and will not be deleted.\n\nThis action cannot be undone.`}
         confirmLabel="Clear Library"
         onConfirm={() => {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          setRegenStatus('idle')
           clearLibrary.mutate(undefined, {
             onSettled: () => setShowClearDialog(false),
           })
@@ -621,13 +664,18 @@ export default function LibraryPage() {
         )}
 
         {/* Infinite scroll sentinel — only for non-history views */}
-        {viewMode !== 'history' && (
+        {viewMode !== 'history' && library.page <= library.totalPages && (
           <>
             <div ref={sentinelRef} className="h-10" />
-            {library.isLoadingMore && (
+            {(library.isLoadingMore || isFetching) && (
               <div className="flex justify-center py-4">
                 <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
               </div>
+            )}
+            {library.total > library.items.length && !library.isLoadingMore && !isFetching && (
+              <p className="text-center text-xs text-muted-foreground py-2">
+                {library.items.length} of {library.total} items shown
+              </p>
             )}
           </>
         )}

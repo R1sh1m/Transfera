@@ -450,7 +450,7 @@ class DeviceImportStateResponse(BaseModel):
     device_name: str | None = None
     last_successful_cutoff: datetime | None = None
     last_import_session_id: int | None = None
-    updated_at: datetime
+    updated_at: datetime | None = None
 
 
 class DeviceImportStateListResponse(BaseModel):

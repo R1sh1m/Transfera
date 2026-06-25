@@ -61,6 +61,7 @@ async def _start_server() -> None:
         app,
         host=HOST,
         port=PORT,
+        ws="wsproto",
         log_level="error",
         access_log=False,
     )

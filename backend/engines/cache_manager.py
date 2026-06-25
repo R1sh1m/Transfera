@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import queue as _queue
+import threading as _threading
 from asyncio import Event
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -24,6 +27,65 @@ from backend.database.manager import increment_session_counter, session_scope
 from backend.database.models import BatchStatus, HopStatus, MediaItem, TransferBatch
 from backend.engines.batch_manager import get_batch_items, mark_batch_status
 from backend.ios_device import is_ios_source, parse_ios_source
+
+# Module-level queue for thumbnail DB updates (avoids per-file event loops)
+_thumb_update_queue: _queue.Queue[tuple[int, str] | None] = _queue.Queue()
+_thumb_worker_started = False
+_thumb_worker_lock = _threading.Lock()
+
+THUMB_CONCURRENCY = min(8, max(1, (os.cpu_count() or 2)))
+
+
+def _ensure_thumb_worker() -> None:
+    """Start the singleton thumbnail DB update worker thread if not running."""
+    global _thumb_worker_started
+    with _thumb_worker_lock:
+        if _thumb_worker_started:
+            return
+        _thumb_worker_started = True
+        t = _threading.Thread(target=_thumb_worker_loop, daemon=True, name="thumb-db-worker")
+        t.start()
+
+
+def _thumb_worker_loop() -> None:
+    """Drain the thumbnail update queue in a single persistent event loop."""
+    from backend.engines.thread_runner import submit_and_wait
+    batch: list[tuple[int, str]] = []
+
+    async def _flush(items: list[tuple[int, str]]) -> None:
+        from backend.database.manager import session_scope
+        from backend.database.models import MediaItem
+        try:
+            async with session_scope() as session:
+                for item_id, status in items:
+                    db_item = await session.get(MediaItem, item_id)
+                    if db_item is not None:
+                        db_item.thumbnail_path = "memory" if status == "ready" else db_item.thumbnail_path
+                        db_item.thumbnail_status = status
+                        db_item.touch()
+        except Exception as exc:
+            logger.error("DB thumbnail worker flush failed for batch %s: %s", items, exc, exc_info=True)
+            # Sleep briefly in case it's a transient lock/connection error
+            await asyncio.sleep(1.0)
+
+    while True:
+        try:
+            item = _thumb_update_queue.get(timeout=0.1)
+        except _queue.Empty:
+            if batch:
+                submit_and_wait(_flush(batch))
+                batch.clear()
+            continue
+
+        if item is None:  # poison pill
+            break
+        batch.append(item)
+        if len(batch) >= 20:  # flush in batches of 20
+            submit_and_wait(_flush(batch))
+            batch.clear()
+
+    if batch:
+        submit_and_wait(_flush(batch))
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +260,45 @@ def _partial_path(clean: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Parallel thumbnail generation
+# ---------------------------------------------------------------------------
+async def _generate_batch_thumbnails(
+    thumbnail_tasks: list[tuple[int, Path]],
+    session_id: int | None = None,
+) -> None:
+    """Generate thumbnails for a batch of items in parallel using asyncio.gather."""
+    if not thumbnail_tasks:
+        return
+    _ensure_thumb_worker()
+    sem = asyncio.Semaphore(THUMB_CONCURRENCY)
+
+    async def _gen(item_id: int, cached_path: Path) -> tuple[int, str]:
+        async with sem:
+            try:
+                from backend.engines.thumbnail_cache import thumbnail_cache
+                from backend.engines.thumbnailer import generate_thumbnail_bytes
+                data = await asyncio.to_thread(generate_thumbnail_bytes, cached_path)
+                if data:
+                    thumbnail_cache.put(item_id, data)
+                    _thumb_update_queue.put((item_id, "ready"))
+                    return item_id, "ready"
+            except Exception as exc:
+                logger.warning("Thumbnail failed for item %d: %s", item_id, exc)
+                _thumb_update_queue.put((item_id, "failed"))
+            return item_id, "failed"
+
+    tasks = [_gen(item_id, path) for item_id, path in thumbnail_tasks]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    ready_ids = [r[0] for r in results if isinstance(r, tuple) and r[1] == "ready"]
+    failed_ids = [r[0] for r in results if isinstance(r, tuple) and r[1] == "failed"]
+    logger.debug(
+        "Batch thumbnails: %d ready, %d failed out of %d",
+        len(ready_ids), len(failed_ids), len(thumbnail_tasks),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main hop-1 entry point
 # ---------------------------------------------------------------------------
 async def cache_batch(
@@ -232,15 +333,20 @@ async def cache_batch(
 
     cached_count = 0
     total = len(items)
+    pending_thumbnails: list[tuple[int, Path]] = []
 
     for idx, item in enumerate(items):
         if cancel_event is not None and cancel_event.is_set():
-            logger.info("Batch %d cancelled at item %d/%d", batch_id, idx + 1, total)
+            logger.info(
+                "Batch %d interrupted (pause or cancel) at item %d/%d",
+                batch_id, idx + 1, total,
+            )
             break
 
+        was_already_completed = item.hop1_status == HopStatus.COMPLETED.value
         success = False
         try:
-            success = await _cache_single_item(
+            success, cached_path = await _cache_single_item(
                 item,
                 cache_dir=cache_dir,
                 on_progress=on_progress,
@@ -249,15 +355,22 @@ async def cache_batch(
             )
             if success:
                 cached_count += 1
+                if cached_path is not None:
+                    pending_thumbnails.append((item.id, cached_path))
         except Exception as exc:
             logger.error("Cache failed for item %d (%s): %s", item.id, item.source_path, exc)
             await _mark_item_hop1(item, HopStatus.FAILED, str(exc))
 
-        if session_id is not None and success:
+        # Only count toward cached_files if this is a *new* cache (not a
+        # resume where the item was already cached and counted in a prior run).
+        if session_id is not None and success and not was_already_completed:
             await increment_session_counter(session_id, "cached_files", 1)
 
         if on_file_progress is not None:
             await on_file_progress(idx + 1, total, item.file_name, item.id)
+
+    # Generate thumbnails in parallel for all successfully cached items
+    await _generate_batch_thumbnails(pending_thumbnails, session_id)
 
     async with session_scope() as session:
         db_batch = await session.get(TransferBatch, batch_id)
@@ -287,9 +400,9 @@ async def _cache_single_item(
     on_progress: ProgressCallback,
     file_index: int,
     file_total: int,
-) -> bool:
+) -> tuple[bool, Path | None]:
     """
-    Cache a single media item. Returns True on success.
+    Cache a single media item. Returns (True, cached_path) on success.
 
     - Skips if clean cache already matches source_hash.
     - Writes .partial, verifies hash, renames on match.
@@ -311,7 +424,7 @@ async def _cache_single_item(
             if _verify_cached_hash(dst, item.source_hash):
                 logger.debug("Cache hit (hash match): %s", dst.name)
                 await _mark_item_hop1(item, HopStatus.COMPLETED)
-                return True
+                return (True, dst)
             else:
                 logger.info("Cache hash mismatch for %s — re-caching", dst.name)
                 dst.unlink(missing_ok=True)
@@ -345,7 +458,7 @@ async def _cache_single_item(
                     )
                     await _mark_item_hop1(item, HopStatus.FAILED,
                                           f"iOS device read failed: {exc}")
-                    return False
+                    return (False, None)
                 delay = HOP1_RETRY_BASE_DELAY * attempt
                 logger.warning(
                     "Transient iOS read error for %s (attempt %d/%d) — "
@@ -369,14 +482,14 @@ async def _cache_single_item(
                 )
                 await _mark_item_hop1(item, HopStatus.FAILED,
                                       f"iOS device read failed: {last_exc}")
-            return False
+            return (False, None)
     else:
         # Local file path
         src = Path(source_path).resolve()
         if not src.is_file():
             logger.warning("Source missing: %s — skipping item %d", src, item.id)
             await _mark_item_hop1(item, HopStatus.FAILED, f"Source missing: {src}")
-            return False
+            return (False, None)
 
         dst = get_cache_path(cache_dir, source_path, item.file_name)
         partial = _partial_path(dst)
@@ -387,7 +500,7 @@ async def _cache_single_item(
             if _verify_cached_hash(dst, item.source_hash):
                 logger.debug("Cache hit (hash match): %s", dst.name)
                 await _mark_item_hop1(item, HopStatus.COMPLETED)
-                return True
+                return (True, dst)
             else:
                 logger.info("Cache hash mismatch for %s — re-caching", dst.name)
                 dst.unlink(missing_ok=True)
@@ -415,7 +528,7 @@ async def _cache_single_item(
                         source_path, attempt, exc,
                     )
                     await _mark_item_hop1(item, HopStatus.FAILED, str(exc))
-                    return False
+                    return (False, None)
                 delay = HOP1_RETRY_BASE_DELAY * attempt
                 logger.warning(
                     "Transient local read error for %s (attempt %d/%d) — "
@@ -426,7 +539,7 @@ async def _cache_single_item(
         if last_exc is not None:
             await _mark_item_hop1(item, HopStatus.FAILED,
                                   f"Read failed after all retries: {last_exc}")
-            return False
+            return (False, None)
 
     # --- Verify hash against recorded source_hash ---
     if item.source_hash and computed_hash != item.source_hash.lower():
@@ -436,7 +549,7 @@ async def _cache_single_item(
         )
         partial.unlink(missing_ok=True)
         await _mark_item_hop1(item, HopStatus.FAILED, "Source hash mismatch")
-        return False
+        return (False, None)
 
     # --- Hash match (or no prior hash) — commit ---
     import os
@@ -451,95 +564,34 @@ async def _cache_single_item(
 
     await _mark_item_hop1(item, HopStatus.COMPLETED)
 
-    # Schedule thumbnail generation from the cached copy in a background
-    # thread so it doesn't slow down the Hop 1 copy loop.  This is the
-    # earliest realistic point for device-sourced items (the file was
-    # remote until now).
-    _schedule_hop1_thumbnail(item.id, dst)
-
-    return True
+    return (True, dst)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _schedule_hop1_thumbnail(item_id: int, cached_path: Path) -> None:
-    """Fire-and-forget thumbnail generation from a freshly-cached file.
-
-    Runs in a daemon thread so it never blocks the Hop 1 copy loop.
-    Stores result in the in-memory LRU cache (no disk write).
-    On failure, marks the item as ``failed`` in DB so the frontend
-    stops retrying and receives the placeholder instead.
-    """
-    import asyncio
-    import threading
+    """Fire-and-forget thumbnail generation. Enqueues the DB update to a
+    shared worker thread instead of creating per-file event loops."""
+    _ensure_thumb_worker()
 
     from backend.engines.thumbnail_cache import thumbnail_cache
     from backend.engines.thumbnailer import generate_thumbnail_bytes
 
     def _generate() -> None:
-        succeeded = False
         try:
             data = generate_thumbnail_bytes(cached_path)
             if data:
                 thumbnail_cache.put(item_id, data)
-                import time as _time
-                _time.sleep(0.05)
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(_mark_thumbnail_ready(item_id))
-                finally:
-                    loop.close()
-                succeeded = True
+                _thumb_update_queue.put((item_id, "ready"))
             else:
-                logger.error(
-                    "Thumbnail generation returned None for item %d (%s)",
-                    item_id, cached_path,
-                )
-        except (ImportError, AttributeError) as exc:
-            logger.error(
-                "Thumbnail generator unavailable for item %d (%s): %s",
-                item_id, cached_path, exc,
-            )
+                _thumb_update_queue.put((item_id, "failed"))
         except Exception as exc:
-            exc_name = type(exc).__name__
-            logger.error(
-                "Thumbnail generation failed for item %d (%s): %s: %s",
-                item_id, cached_path, exc_name, exc,
-            )
+            logger.error("Thumbnail generation failed for item %d: %s", item_id, exc)
+            _thumb_update_queue.put((item_id, "failed"))
 
-        if not succeeded:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_mark_thumbnail_failed(item_id))
-            finally:
-                loop.close()
-
-    t = threading.Thread(target=_generate, daemon=True, name=f"thumb-h1-{item_id}")
+    t = _threading.Thread(target=_generate, daemon=True, name=f"thumb-h1-{item_id}")
     t.start()
-
-
-async def _mark_thumbnail_ready(item_id: int) -> None:
-    """Set thumbnail_path sentinel so frontend knows the thumbnail is in cache."""
-    from backend.database.manager import session_scope
-    from backend.database.models import MediaItem
-    async with session_scope() as session:
-        item = await session.get(MediaItem, item_id)
-        if item is not None:
-            item.thumbnail_path = "memory"  # sentinel: available in cache
-            item.thumbnail_status = "ready"
-            item.touch()
-
-
-async def _mark_thumbnail_failed(item_id: int) -> None:
-    """Mark a media item's thumbnail as failed so the frontend stops retrying."""
-    from backend.database.manager import session_scope
-    from backend.database.models import MediaItem
-    async with session_scope() as session:
-        item = await session.get(MediaItem, item_id)
-        if item is not None:
-            item.thumbnail_status = "failed"
-            item.touch()
 
 
 def _verify_cached_hash(file_path: Path, expected: str) -> bool:
