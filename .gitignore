@@ -28,6 +28,10 @@ frontend/release/
 frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js
+frontend/python-bin/
+frontend/python-embed.zip
+*.pfx
+
 
 # --- Environment ---
 .env
@@ -108,3 +112,4 @@ test_source/
 opencode.json
 .pytest_cache/
 .ruff_cache/
+WINDOWS_RELEASE_GUIDE.md

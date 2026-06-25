@@ -56,7 +56,22 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ---
 
-## Prerequisites
+## Download & Installation 
+
+The easiest way to use Transfera on Windows is to download the standalone installer. Everything is completely self-contained.
+
+1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**.
+2. Download the latest `Transfera-Setup-X.Y.Z.exe` installer.
+3. Run the installer to install the application on your computer.
+4. Launch **Transfera** from your desktop or Start Menu.
+
+---
+
+## Development & Building from Source
+
+If you want to run the developer stack or compile the standalone installer yourself, follow the instructions below.
+
+### Prerequisites
 
 Only **two tools** need to be on the system before running Transfera. Everything else like Python virtual environment, pip packages, npm packages, native build tools, ExifTool, etc is handled automatically on first launch.
 
@@ -169,6 +184,24 @@ The full dev stack runs two processes:
 |---------|-----|-------------|
 | FastAPI backend | `http://127.0.0.1:47821` | REST API + WebSocket + static frontend server |
 | Electron (Vite HMR) | `http://127.0.0.1:5173` | Dev shell with hot-module reload |
+
+---
+
+### Building the Standalone Installer
+
+To produce a self-contained, signed or unsigned Windows installer (`.exe`) that packages the Python backend, React frontend, and Electron shell:
+
+1. Ensure the development virtual environment has been created (run `python run.py` at least once first).
+2. Run the build script in the `frontend` folder:
+   ```powershell
+   cd frontend
+   npm run electron:build
+   ```
+3. The packaged results will be written to:
+   - `frontend/release/Transfera-Setup-[version].exe` (NSIS installer)
+   - `frontend/release/win-unpacked/` (Portable build directory)
+
+For detailed information on configuring Windows Authenticode code-signing, exporting certificates, and whitelisting the app with Microsoft SmartScreen, refer to [WINDOWS_RELEASE_GUIDE.md](WINDOWS_RELEASE_GUIDE.md).
 
 ---
 

@@ -28,12 +28,19 @@ TEMP_SUFFIX: str = ".tmp"
 # Paths
 # ---------------------------------------------------------------------------
 BACKEND_ROOT: Path = Path(__file__).resolve().parent
-DATA_DIR: Path = BACKEND_ROOT / "data"
+
+# Support overriding the runtime data directory via environment variable (useful in production packaged app)
+_env_data_dir = os.environ.get("TRANSFERA_DATA_DIR")
+if _env_data_dir:
+    DATA_DIR: Path = Path(_env_data_dir)
+else:
+    DATA_DIR: Path = BACKEND_ROOT / "data"
+
 DB_DIR: Path = DATA_DIR / "db"
 CACHE_DIR: Path = DATA_DIR / "cache"
 LOG_DIR: Path = DATA_DIR / "logs"
 EXPORT_DIR: Path = DATA_DIR / "exports"
-EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
+EXIFTOOL_DIR: Path = DATA_DIR / "bin" / "exiftool"
 WPD_HELPER: Path = BACKEND_ROOT / "bin" / "wpd_helper.exe"
 
 # Ensure runtime directories exist at import time.

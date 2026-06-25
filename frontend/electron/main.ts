@@ -40,8 +40,10 @@ function getBackendCommand(): { cmd: string; args: string[] } {
     }
   }
   const backendDir = path.join(process.resourcesPath, 'backend')
+  const bundledPython = path.join(backendDir, 'python', 'python.exe')
+  const cmd = fs.existsSync(bundledPython) ? bundledPython : path.join(backendDir, 'venv', 'Scripts', 'python.exe')
   return {
-    cmd: path.join(backendDir, 'venv', 'Scripts', 'python.exe'),
+    cmd,
     args: ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
   }
 }
@@ -214,10 +216,18 @@ async function startBackend(): Promise<void> {
   const { cmd, args } = getBackendCommand()
   console.log(`[lifecycle] Starting backend: ${cmd} ${args.join(' ')}`)
 
+  const env = {
+    ...process.env,
+    TRANSFERA_DATA_DIR: isDev
+      ? path.resolve(__dirname, '..', '..', '..', 'backend', 'data')
+      : path.join(app.getPath('userData'), 'data'),
+  }
+
   backendProcess = spawn(cmd, args, {
     cwd: isDev ? path.resolve(__dirname, '..', '..', '..') : process.resourcesPath,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
+    env,
   })
 
   backendProcess.stdout?.on('data', (data: Buffer) => {
