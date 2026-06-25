@@ -12,314 +12,303 @@
 =============================================================================================
 ```
 
-> **Two-Stage Verified Media Vaulting Engine** &mdash; FastAPI + Electron + React
+**Two-Stage Verified Media Vaulting Engine** — FastAPI · Electron · React · SQLite
+
+[![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-green.svg)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-lightgrey.svg)](#)
 
 ---
 
-## Project Overview
+## What is Transfera?
 
-Transfera is a local desktop media backup application built around a **high-throughput Two-Stage Verified pipeline**. Rather than blindly copying files, every byte passes through two distinct hops with cryptographic verification at each stage.
+Transfera is a local desktop application for **cryptographically verified media backup**. It transfers photos, videos, and audio from any source — local folders, iPhone, iPad, or USB-attached cameras — to an organised archive destination, verifying every byte in transit before committing the file.
+
+Unlike a plain copy, Transfera's **Two-Stage Verified Pipeline** ensures no silent corruption ever reaches your archive:
 
 ```
 Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verified Backup
+                  BLAKE3 hash            re-verify
+                  .partial write         atomic rename
 ```
 
-| Hop | Source | Destination | Mechanism |
-|-----|--------|-------------|-----------|
-| 1 | Original media files | Local cache (`.partial` &rarr; rename) | Stream-copy with on-the-fly BLAKE3 hash |
-| 2 | Verified cache copy | Final archive directory | Hash re-verification before atomic placement |
-
-**Core design pillars:**
-
-- **BLAKE3 hashing** (SHA-256 fallback) computed _during_ the copy, not after&mdash;eliminating double-reads.
-- **Atomic writes** via a `.partial` suffix that is renamed only on a verified hash match.
-- **SQLite WAL mode** for concurrent reads during active writes.
-- **Crash recovery** that handles interrupted `LOADING` and `ARCHIVED` batch states on restart.
-- **Live Photo detection** that groups HEIC+MOV pairs by matching filenames (case-insensitive).
-- **Duplicate detection** with exact (hash-based) and potential (metadata-similarity) resolution.
+| Hop | From | To | Guarantee |
+|-----|------|----|-----------|
+| **Hop 1** | Original source files | Local staging cache | Stream-copied with concurrent BLAKE3 hash; only renamed from `.partial` on hash match |
+| **Hop 2** | Verified cache copy | Final archive directory | Hash re-verified before atomic placement into organised `YYYY/MM/DD` folder structure |
 
 ---
 
-## Screenshots
+## Key Features
 
-> ![Transfera Dashboard](docs/screenshots/dashboard.png)
-> *Dashboard view — Recent Sessions list and device status.*
->
-> ![Transfer Progress](docs/screenshots/transfer.png)
-> *Active transfer with batch progress, media preview, and real-time ETA.*
-
-*(Screenshots to be added — this section will be populated once the UI is finalized.)*
+- **BLAKE3 hashing** (SHA-256 fallback) computed *during* the copy stream — no second read required
+- **Atomic writes** via `.partial` staging — a corrupt or interrupted file never lands in your archive
+- **iPhone & iPad support** via native WPD driver integration and optional WSL2 bridge (Tier 2)
+- **Live Photo detection** — pairs HEIC + MOV files by matching filename, preserving them together
+- **Duplicate detection** — exact (hash-based) and near-duplicate (metadata similarity) resolution with per-file controls
+- **Crash recovery** — interrupted `LOADING` and `ARCHIVED` batch states are automatically resumed on next launch
+- **Real-time transfer monitor** — WebSocket-driven progress with per-hop bars, ETA, speed, and media thumbnail preview
+- **Media library** — masonry/list/history views of every archived file, with infinite scroll and thumbnail regeneration
+- **SQLite WAL mode** — safe concurrent reads during active writes; no database lock contention
+- **ExifTool auto-bootstrap** — downloads and manages ExifTool automatically; no manual installation needed
 
 ---
 
-## Core Prerequisites
+## Prerequisites
 
-Transfera targets **Windows 11** as its primary platform. Ensure the following are installed before proceeding.
+Only **two tools** need to be on your system before running Transfera. Everything else — Python virtual environment, pip packages, npm packages, native build tools, ExifTool — is handled automatically on first launch.
 
-### Python 3.12
+### 1. Python 3.12
 
-Transfera enforces Python **3.12.x** for stable pre-compiled wheel availability (`pillow-heif`, `blake3`).
+Transfera requires Python **3.12.x** specifically. This version is enforced because several core dependencies (`blake3`, `pillow-heif`) only ship pre-compiled wheels for 3.12, avoiding any need for local compilation.
 
-1. Download from <https://www.python.org/downloads/>
-2. During installation, **check "Add python.exe to PATH"**.
-3. Verify:
+Download the installer from [python.org/downloads](https://www.python.org/downloads/) and during setup check **"Add python.exe to PATH"**.
 
-```bash
+Verify after installation:
+
+```powershell
 python --version
-# Expected: Python 3.12.x
+# Python 3.12.x
 ```
 
-### Node.js v20+
+> If you have multiple Python versions installed, the `py` launcher (`py -3.12`) is also supported — the run script probes for it automatically.
 
-The Electron shell and Vite build pipeline require Node.js **v20 or later**.
+### 2. Node.js v20 or later
 
-1. Download the LTS release from <https://nodejs.org/>
-2. Verify:
+The Electron shell and Vite build pipeline require Node **v20 LTS** or newer.
 
-```bash
+Download from [nodejs.org](https://nodejs.org/) (choose the LTS release). Verify:
+
+```powershell
 node --version
-# Expected: v20.x.x or higher
-npm --version
+# v20.x.x or higher
 ```
 
-### Git
+### That's it
 
-```bash
-git --version
-```
-
-### MSVC Build Tools (for native WPD helper)
-
-Transfera's iPhone/iPad device support is powered by a native C++ helper (`native/wpd_helper/wpd_helper.cpp`) that must be compiled with the Microsoft Visual C++ compiler. You need one of:
-
-- **Visual Studio 2022** (any edition) with the **Desktop development with C++** workload, **or**
-- **Visual Studio 2022 Build Tools** (smaller, no IDE) from <https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022>
-
-The build script (`npm run build:native` or `native/wpd_helper/build.bat`) locates the compiler via `vswhere.exe` automatically — no manual PATH setup needed.
-
-> This step is **optional** if you only plan to back up from local folders. The app runs fine without it; iPhone/WPD device detection simply won't be available.
-
-### ExifTool (isolated environment)
-
-Transfera bundles an **automated ExifTool manager** that bootstraps the binary on first launch into `backend/bin/exiftool/`. No manual installation is required.
-
-If you prefer a system-wide installation instead:
-
-1. Download the Windows build from <https://exiftool.org/>
-2. Extract `exiftool.exe` and rename it to `exiftool.exe` (if zipped).
-3. Add its directory to your system `PATH` environment variable.
-4. Verify:
-
-```bash
-exiftool -ver
-# Expected: 12.x or higher
-```
-
-> **Note:** The bundled bootstrapper (`backend/bin/exiftool/`) takes precedence over any system-wide installation.
+Everything else — the `.venv`, pip packages, `node_modules`, the React build, ExifTool, and the native WPD device helper — is set up automatically the first time you run `python run.py`.
 
 ---
 
-## Developer Installation &amp; Local Boot Loop
+## Quickstart
 
-Transfera ships with a single-command orchestrator that handles the entire dev environment lifecycle.
-
-### 1. Clone the Repository
-
-```bash
+```powershell
 git clone https://github.com/your-username/Transfera.git
 cd Transfera
-```
-
-### 2. Launch Everything
-
-```bash
 python run.py
 ```
 
-That is the only command you need to remember. On first run the orchestrator automatically:
+The orchestrator runs through a self-bootstrapping sequence on first launch (takes 2–4 minutes on a clean machine):
 
-1. **Locates Python 3.12** on your system (probes common install paths, then the `py` launcher).
-2. **Creates a virtual environment** at `.venv/` using the discovered interpreter.
-3. **Installs backend dependencies** from `backend/requirements.txt` via pip.
-4. **Installs frontend npm packages** (`npm install` in `frontend/`).
-5. **Compiles the React frontend** into `frontend/dist/` (`npm run build`).
-6. **Spins up the FastAPI backend** on `http://127.0.0.1:47821` (uvicorn).
-7. **Launches the Electron dev shell** (Vite HMR on `:5173` + Electron wrapper).
-
-Press **Ctrl+C** at any time to gracefully tear down all processes.
-
-> **iPhone / WPD device support** requires the native C++ helper to be compiled first. The orchestrator does NOT build this automatically. Run:
-> ```bash
-> cd frontend
-> npm run build:native
-> ```
-> See the [MSVC Build Tools](#msvc-build-tools-for-native-wpd-helper) prerequisite above.
-
-### Runner Flags
-
-```bash
-python run.py                  # Full stack (backend + frontend)
-python run.py --backend        # Backend only
-python run.py --frontend       # Frontend dev server only
-python run.py --skip-deps      # Skip dependency checks / venv creation
+```
+[PYTHON]   Locating Python 3.12 interpreter
+[STEP 1]   Creating .venv and installing backend dependencies
+[STEP 2]   Installing frontend npm packages
+[STEP 2.5] Compiling React frontend (Vite)
+[STEP 2.6] Building native WPD device helper (requires MSVC — see below)
+[STEP 3]   Launching FastAPI backend on :47821
+[STEP 3]   Launching Electron + Vite dev shell
 ```
 
-### Troubleshooting
+Subsequent launches skip all setup steps automatically (only runs again when `requirements.txt` or `package.json` change).
 
-| Symptom | Fix |
-|---------|-----|
-| `Port 47821 already in use` | Kill the process occupying the port, or reboot. |
-| `npm install` permission errors | Run your terminal as Administrator. |
-| Python version mismatch | Ensure `python --version` reports `3.12.x`. The runner enforces this strictly. |
+Press **Ctrl+C** at any time for a clean teardown of all processes.
 
 ---
 
-## Production Compilation
+## iPhone & iPad Support — Native Helper
 
-To bundle the full multi-process system (Electron + FastAPI backend + Python runtime) into a standalone Windows installer:
+Transfera's iOS device support is powered by a native C++ helper compiled against the Windows Portable Devices (WPD) API. The run script builds it automatically, but **requires Microsoft's C++ compiler (MSVC)** to be present on the system.
 
-```bash
+Install one of:
+
+- **Visual Studio 2022** (any edition, free Community edition works) with the **"Desktop development with C++"** workload, **or**
+- **Visual Studio 2022 Build Tools** (smaller, no IDE) — [download here](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+
+The build script locates the compiler via `vswhere.exe` automatically — no PATH configuration needed.
+
+> **If you skip this step**, Transfera still runs fully. Local folder and network path backups work without the native helper. iPhone/iPad detection simply won't be available until MSVC is installed and the helper is built.
+
+To build it manually at any time:
+
+```powershell
 cd frontend
-npm install
+npm run build:native
+```
+
+---
+
+## Runner Reference
+
+```powershell
+python run.py               # Start everything (recommended)
+python run.py --backend     # Backend API only (no Electron window)
+python run.py --frontend    # Electron + Vite dev shell only
+python run.py --skip-deps   # Skip all setup checks (fast relaunch)
+```
+
+The full dev stack runs two processes:
+
+| Process | URL | Description |
+|---------|-----|-------------|
+| FastAPI backend | `http://127.0.0.1:47821` | REST API + WebSocket + static frontend server |
+| Electron (Vite HMR) | `http://127.0.0.1:5173` | Dev shell with hot-module reload |
+
+---
+
+## Building a Standalone Installer
+
+To produce a distributable Windows installer (`.exe`) that bundles the Python backend, the React frontend, and Electron into a self-contained package:
+
+```powershell
+cd frontend
 npm run electron:build
 ```
 
-This executes the following pipeline under the hood:
-
-1. `tsc -b` &mdash; compiles TypeScript (`electron/main.ts`, `electron/preload.ts`).
-2. `vite build` &mdash; bundles the React SPA into `frontend/dist/`.
-3. `electron-builder --win` &mdash; packages everything into an NSIS installer with the bundled Python backend.
-
-The output artifact is written to:
+Output is written to:
 
 ```
-frontend/release/Transfera-Setup-2.0.0.exe
+frontend/release/Transfera-Setup-2.0.0.exe    ← NSIS installer
+frontend/release/win-unpacked/                ← Portable build
 ```
 
-The `win-unpacked/` directory alongside it contains the portable (non-installer) build.
+Build pipeline: TypeScript compile → Vite bundle → Electron Builder NSIS packaging.
 
-### Build Prerequisites
-
-- Python 3.12 must be installed and on PATH (the builder bundles the venv into `resources/backend/venv/`).
-- Node.js v20+ with `npm`.
-- The backend's `.venv` must already exist (run `python run.py` once, or `cd backend && python -m venv .venv && .venv\Scripts\pip install -r requirements.txt`).
+**Prerequisites for building:** the `.venv` must already exist (run `python run.py` once first), and MSVC must be installed for the native WPD helper.
 
 ---
 
-## Repository Map Layout
+## Project Structure
 
 ```
 Transfera/
 │
-├── backend/                          # Python FastAPI backend
-│   ├── main.py                       # FastAPI app entrypoint + lifespan
-│   ├── config.py                     # Central config (ports, paths, extensions)
+├── run.py                            # ← Start here. One-command orchestrator.
+│
+├── backend/                          # Python 3.12 · FastAPI · SQLAlchemy · SQLite
+│   ├── main.py                       # App entrypoint, lifespan, startup hooks
+│   ├── config.py                     # Ports, paths, media extensions
 │   ├── requirements.txt              # Python dependencies
 │   │
 │   ├── api/
-│   │   ├── routes.py                 # HTTP endpoints (health, scan, sessions, media)
+│   │   ├── routes.py                 # All HTTP endpoints (health, sessions, media, thumbnails)
 │   │   ├── schemas.py                # Pydantic request/response models
-│   │   └── websocket.py              # WebSocket manager with 30s keepalive
+│   │   ├── websocket.py              # WebSocket manager with 15-event protocol + keepalive
+│   │   ├── device_preview.py         # Source folder browsing endpoint
+│   │   └── tier2_routes.py           # WSL2 bridge routes (Tier 2 iOS backend)
 │   │
 │   ├── database/
-│   │   ├── manager.py                # Async SQLAlchemy engine (WAL + FK pragmas)
-│   │   └── models.py                 # MediaItem, TransferSession, TransferBatch
+│   │   ├── manager.py                # Async SQLAlchemy engine (WAL mode, FK pragmas)
+│   │   ├── models.py                 # MediaItem, TransferSession, TransferBatch ORM models
+│   │   └── migrations.py             # Schema migration runner (21 migrations)
 │   │
 │   ├── engines/
-│   │   ├── scanner.py                # Recursive walker + Live Photo grouping
-│   │   ├── cache_manager.py          # Hop 1: source -> cache (streaming hash)
-│   │   ├── importer.py               # Hop 2: cache -> archive (.partial writes)
-│   │   ├── duplicate_detector.py     # Exact + potential duplicate detection
-│   │   ├── metadata_extractor.py     # ExifTool integration + filesystem fallback
-│   │   ├── organizer.py              # YYYY/MM/DD path resolution
-│   │   ├── batch_manager.py          # 100-file batch chunking & status tracking
-│   │   ├── recovery.py               # Crash recovery for interrupted batches
-│   │   └── reporter.py               # Transfer reports and summaries
+│   │   ├── scanner.py                # Recursive walker + Live Photo HEIC/MOV grouping
+│   │   ├── cache_manager.py          # Hop 1: source → cache (streaming BLAKE3, .partial)
+│   │   ├── importer.py               # Hop 2: cache → archive (re-verify, atomic rename)
+│   │   ├── batch_manager.py          # 100-file batch chunking and status tracking
+│   │   ├── duplicate_detector.py     # Exact (hash) + potential (metadata) duplicate detection
+│   │   ├── metadata_extractor.py     # ExifTool stay-open session + filesystem fallback
+│   │   ├── organizer.py              # Archive path resolution (YYYY/MM/DD layouts)
+│   │   ├── recovery.py               # Crash recovery for interrupted LOADING/ARCHIVED batches
+│   │   ├── reporter.py               # JSON + HTML transfer reports
+│   │   ├── thumbnailer.py            # JPEG thumbnail generation (ExifTool/Pillow/ffmpeg)
+│   │   ├── thumbnail_cache.py        # Bounded in-memory LRU thumbnail cache (50 MB cap)
+│   │   └── thumbnail_ops.py          # Thumbnail DB status helpers
 │   │
 │   ├── utils/
-│   │   └── hashing.py                # BLAKE3 / SHA-256 streaming hash
+│   │   └── hashing.py                # BLAKE3 / SHA-256 streaming hash implementation
 │   │
-│   ├── bin/
-│   │   └── exiftool/                 # Auto-bootstrapped ExifTool binary
+│   ├── bin/                          # Auto-managed binaries (git-ignored)
+│   │   ├── exiftool/                 # ExifTool binary (auto-downloaded on first run)
+│   │   └── wpd_helper.exe            # Native WPD device helper (auto-built if MSVC present)
 │   │
 │   ├── data/                         # Runtime data (git-ignored)
-│   │   ├── db/                       # SQLite database files
-│   │   ├── cache/                    # Hop 1 cache staging area
-│   │   ├── exports/                  # Generated reports
+│   │   ├── db/                       # transfera.db — SQLite database
+│   │   ├── cache/                    # Hop 1 staging area (.partial files)
+│   │   ├── exports/                  # Generated session reports (JSON + HTML)
 │   │   └── logs/                     # Application logs
 │   │
-    │   └── tests/                        # Test suite (pytest + smoke tests)
-    │       ├── test_crash_recovery.py
-    │       ├── test_db_core.py
-    │       ├── test_device_backend_closures.py
-    │       ├── test_exiftool_bootstrapper.py
-    │       ├── test_integration.py
-    │       ├── test_organizer.py
-    │       ├── test_pipeline.py
-    │       ├── test_scanner.py
-    │       ├── test_smoke.py
-    │       └── test_wpd.py
+│   └── tests/                        # pytest suite (16 modules, ~200 tests)
 │
-├── frontend/                         # Electron + React + Vite
-│   ├── package.json                  # npm scripts & electron-builder config
-│   │
+├── frontend/                         # Electron · React 18 · Vite · TypeScript · Tailwind
 │   ├── electron/
-│   │   ├── main.ts                   # Electron main process (NativeImage, IPC)
-│   │   ├── preload.ts                # Secure contextBridge IPC
-│   │   └── tsconfig.json
+│   │   ├── main.ts                   # Electron main process (IPC, tray, native notifications)
+│   │   └── preload.ts                # Secure contextBridge IPC surface
 │   │
-│   ├── src/                          # React SPA
-│   │   ├── main.tsx                  # React root mount
-│   │   ├── App.tsx                   # Router + layout shell
-│   │   ├── index.css                 # Tailwind base styles
-│   │   │
-│   │   ├── pages/
-│   │   │   ├── DashboardPage.tsx     # Session overview & statistics
-│   │   │   ├── DeviceSetupPage.tsx   # Source / destination picker
-│   │   │   ├── TransferPage.tsx      # Active transfer progress
-│   │   │   └── LibraryPage.tsx       # Archived media browser
-│   │   │
-│   │   ├── components/
-│   │   │   ├── DuplicateModal.tsx    # Duplicate resolution dialog
-│   │   │   ├── ErrorBoundary.tsx     # React error boundary
-│   │   │   ├── ModeSelector.tsx      # Transfer mode toggle
-│   │   │   └── ThemeToggle.tsx       # Light / dark switch
-│   │   │
-│   │   ├── hooks/
-│   │   │   ├── use-transfer-ws.ts    # WebSocket connection hook
-│   │   │   └── use-theme.ts          # Theme persistence hook
-│   │   │
-│   │   ├── store/
-│   │   │   └── transfer.ts           # Zustand store (15-event WS reducer)
-│   │   │
-│   │   ├── lib/
-│   │   │   ├── api-client.ts         # Axios instance configuration
-│   │   │   ├── queries.ts            # React Query hooks
-│   │   │   └── utils.ts              # Shared helpers
-│   │   │
-│   │   ├── types/
-│   │   │   ├── api.ts                # TypeScript types mirroring backend schemas
-│   │   │   └── electron.d.ts         # Electron IPC type declarations
-│   │   │
-│   │   └── assets/
-│   │       └── icon.png              # App icon source asset
-│   │
-│   ├── build/
-│   │   └── icon.png                  # Electron window / taskbar icon
-│   │
-│   ├── public/                       # Static assets (favicons, manifest)
-│   └── dist/                         # Compiled Vite output (git-ignored)
+│   └── src/
+│       ├── App.tsx                   # App shell: sidebar, router, toast, error boundaries
+│       ├── pages/
+│       │   ├── DashboardPage.tsx     # Session history, statistics, device status
+│       │   ├── DeviceSetupPage.tsx   # Source/destination picker, preflight validation
+│       │   ├── TransferPage.tsx      # Live transfer monitor with WebSocket + polling
+│       │   └── LibraryPage.tsx       # Masonry/list/history browser with infinite scroll
+│       ├── store/
+│       │   └── transfer.ts           # Zustand store — 15-event WebSocket reducer
+│       ├── lib/
+│       │   ├── queries.ts            # TanStack Query hooks for all API endpoints
+│       │   ├── api-client.ts         # Axios instance with local auth token
+│       │   └── thumbnail-fetch.ts    # Thumbnail fetch with negative-cache deduplication
+│       └── hooks/
+│           └── use-transfer-ws.ts    # WebSocket connection lifecycle hook
 │
-├── run.py                            # One-command dev stack orchestrator
-├── DESIGN.md                         # Design system tokens & guidelines
-├── LICENSE                           # MIT License
-└── README.md                         # This file
+├── native/
+│   └── wpd_helper/
+│       ├── wpd_helper.cpp            # WPD COM API device driver (Windows Portable Devices)
+│       └── build.bat                 # MSVC build script (vswhere auto-discovery)
+│
+└── .github/
+    └── workflows/ci.yml              # CI: backend pytest + frontend typecheck + lint
 ```
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Desktop shell | Electron 33 |
+| Frontend | React 18, TypeScript, Vite 6, Tailwind CSS 4 |
+| State management | Zustand 5 (persisted preferences), TanStack Query 5 |
+| Backend | Python 3.12, FastAPI, Uvicorn |
+| Database | SQLite (via SQLAlchemy 2 async + aiosqlite), WAL mode |
+| Hashing | BLAKE3 (primary), SHA-256 (fallback) |
+| Metadata | ExifTool (stay-open session), Pillow, pillow-heif |
+| iOS/WPD | Windows Portable Devices COM API (native C++), pymobiledevice3 |
+| Real-time | WebSocket (15-event protocol), REST polling fallback |
+
+---
+
+## Troubleshooting
+
+| Symptom | Resolution |
+|---------|------------|
+| `Python 3.12 not found` | Ensure Python 3.12 is installed and `python --version` returns `3.12.x`. The `py -3.12` launcher is also probed automatically. |
+| `Port 47821 already in use` | A previous run may not have shut down cleanly. The orchestrator auto-sweeps stray processes on startup; if it still fails, kill the process occupying the port manually. |
+| `npm install` permission error | Run your terminal as Administrator (right-click → Run as administrator). |
+| iPhone not detected | Ensure MSVC is installed and `npm run build:native` has completed (look for `wpd_helper.exe` in `backend/bin/`). Trust the computer on your iPhone when prompted. |
+| Blank page after navigating | Known bug — fixed in the current branch. See [issue tracker](https://github.com/your-username/Transfera/issues). |
+| Thumbnails showing wrong images | Known bug — fixed in the current branch. Caused by a stale negative-cache between sessions. |
+| ExifTool not found | First-run auto-bootstrap handles this. If it fails, check internet connectivity; ExifTool is downloaded from `exiftool.org` on first launch. |
+| `wpd_helper build failed: LNK1104` | The `.exe` is locked by a running Transfera backend. Fully close the app (`Ctrl+C` in the terminal) and retry. |
+
+---
+
+## Running Tests
+
+```powershell
+cd backend
+.venv\Scripts\python -m pytest tests/ -v
+```
+
+The test suite covers pipeline integrity, crash recovery, schema migrations, organiser logic, duplicate detection, and API endpoint smoke tests.
 
 ---
 
 ## License
 
-MIT License &mdash; see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for full terms.
 
-Copyright (c) 2026 Rishi Misra
+Copyright © 2026 Rishi Misra
