@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://github.com/microsoft/winget-cli/releases/latest/download/manifest.installer.schema.1.6.0.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 PackageIdentifier: Transfera.Transfera
 PackageVersion: 2.4.0
 InstallerType: nullsoft
@@ -10,4 +10,4 @@ Installers:
     Scope: user
     UpgradeBehavior: install
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
