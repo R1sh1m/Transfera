@@ -144,7 +144,7 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
     const controller = new AbortController()
     let cancelled = false
 
-    fetchThumbnail(item.id, controller.signal).then((url) => {
+    fetchThumbnail(item.id, item.updated_at, controller.signal).then((url) => {
       if (cancelled) return
       if (url) {
         setThumbUrl(url)

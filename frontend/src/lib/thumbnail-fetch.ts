@@ -14,15 +14,28 @@ export function clearThumbFailCache(): void {
 
 export async function fetchThumbnail(
   mediaId: number,
+  updatedAtOrSignal?: string | Date | number | AbortSignal,
   signal?: AbortSignal,
 ): Promise<string | null> {
+  let updatedAt: string | Date | number | undefined
+  let activeSignal: AbortSignal | undefined
+
+  if (updatedAtOrSignal instanceof AbortSignal) {
+    activeSignal = updatedAtOrSignal
+  } else {
+    updatedAt = updatedAtOrSignal
+    activeSignal = signal
+  }
+
   const lastFail = _thumbFailCache.get(mediaId)
   if (lastFail && Date.now() - lastFail < THUMB_RETRY_DELAY) {
     return null
   }
 
   try {
-    const res = await fetch(`/api/media/${mediaId}/thumbnail`, { signal })
+    const t = updatedAt ? new Date(updatedAt).getTime() : ''
+    const url = `/api/media/${mediaId}/thumbnail${t ? `?t=${t}` : ''}`
+    const res = await fetch(url, { signal: activeSignal })
     if (res.status === 404 || res.status === 204) return null
     if (!res.ok) {
       _thumbFailCache.set(mediaId, Date.now())

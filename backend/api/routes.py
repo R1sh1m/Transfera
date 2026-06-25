@@ -20,7 +20,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import joinedload
 
 from backend.api import websocket as ws_events
@@ -1980,7 +1980,7 @@ def _get_placeholder_jpeg() -> bytes:
 
 
 @router.get("/media/{item_id}/thumbnail")
-async def get_media_thumbnail(item_id: int):
+async def get_media_thumbnail(item_id: int, request: Request):
     """Serve a thumbnail image from the in-memory LRU cache.
 
     Returns a placeholder JPEG for items whose thumbnail generation failed
@@ -1997,31 +1997,44 @@ async def get_media_thumbnail(item_id: int):
     status is intentionally not persisted so thumbnails can be regenerated
     when external drives are reconnected.
     """
-    data = thumbnail_cache.get(item_id)
-    if data is not None:
-        return Response(
-            content=data,
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": "public, max-age=86400",
-                "ETag": f'"{item_id}"',
-                "X-Thumbnail-Status": "ready",
-            },
-        )
-
     async with session_scope() as session:
         db_item = await session.get(MediaItem, item_id)
 
     if db_item is None:
         raise HTTPException(status_code=404, detail="Media item not found")
 
+    # Generate versioned ETag based on item ID and updated_at timestamp
+    etag = f'"{item_id}-{int(db_item.updated_at.timestamp())}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
+
+    # Determine Cache-Control based on version parameter 't'
+    has_version = "t" in request.query_params
+    if has_version:
+        cache_control = "public, max-age=31536000, immutable"
+    else:
+        cache_control = "no-cache, must-revalidate"
+
     if db_item.thumbnail_status == "failed":
         return Response(
             content=_get_placeholder_jpeg(),
             media_type="image/jpeg",
             headers={
-                "Cache-Control": "public, max-age=86400",
+                "Cache-Control": cache_control,
+                "ETag": etag,
                 "X-Thumbnail-Status": "failed",
+            },
+        )
+
+    data = thumbnail_cache.get(item_id)
+    if data is not None:
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": cache_control,
+                "ETag": etag,
+                "X-Thumbnail-Status": "ready",
             },
         )
 
@@ -2075,8 +2088,8 @@ async def get_media_thumbnail(item_id: int):
                 content=data,
                 media_type="image/jpeg",
                 headers={
-                    "Cache-Control": "public, max-age=86400",
-                    "ETag": f'"{item_id}"',
+                    "Cache-Control": cache_control,
+                    "ETag": etag,
                     "X-Thumbnail-Status": "ready",
                 },
             )
@@ -2271,6 +2284,12 @@ async def clear_library(_: None = Depends(require_local_token)) -> ClearResponse
         await session.execute(delete(MediaItem))
         await session.execute(delete(TransferBatch))
         await session.execute(delete(TransferSession))
+        try:
+            await session.execute(text("DELETE FROM sqlite_sequence WHERE name='media_items'"))
+            await session.execute(text("DELETE FROM sqlite_sequence WHERE name='transfer_batches'"))
+            await session.execute(text("DELETE FROM sqlite_sequence WHERE name='transfer_sessions'"))
+        except Exception as exc:
+            logger.debug("Failed to reset sqlite_sequence: %s", exc)
         await session.commit()
 
     # Clean up in-memory state for deleted sessions
@@ -2437,7 +2456,7 @@ async def get_session_progress(
                     file_name=item.file_name,
                     hop1_status=item.hop1_status,
                     hop2_status=item.hop2_status,
-                    thumbnail_url=f"/api/media/{item.id}/thumbnail" if item.thumbnail_path else None,
+                    thumbnail_url=f"/api/media/{item.id}/thumbnail?t={int(item.updated_at.timestamp())}" if item.thumbnail_path else None,
                     updated_at=item.updated_at,
                 )
                 for item in recent_result.scalars().all()
@@ -3047,7 +3066,7 @@ def _media_to_info(mi: MediaItem) -> MediaItemInfo:
         hop2_status=mi.hop2_status,
         final_status=mi.final_status,
         live_photo_group=mi.live_photo_group,
-        thumbnail_url=f"/api/media/{mi.id}/thumbnail",
+        thumbnail_url=f"/api/media/{mi.id}/thumbnail?t={int(mi.updated_at.timestamp())}",
         thumbnail_status=mi.thumbnail_status,
         date_taken=mi.date_taken,
         date_source=mi.date_source,

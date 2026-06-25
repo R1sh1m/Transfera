@@ -211,7 +211,7 @@ def _detect_duplicates(
 
     def _make_matched_url(mi: MediaItem) -> str | None:
         if mi.thumbnail_path:
-            return f"/api/media/{mi.id}/thumbnail"
+            return f"/api/media/{mi.id}/thumbnail?t={int(mi.updated_at.timestamp())}"
         return None
 
     def _make_matched_date(mi: MediaItem) -> str | None:

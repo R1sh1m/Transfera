@@ -86,7 +86,7 @@ function formatElapsed(ms: number) {
 // ---------------------------------------------------------------------------
 // PreviewThumbnail — Lazy loaded thumbnail with concurrency queue
 // ---------------------------------------------------------------------------
-function PreviewThumbnail({ itemId, name, thumbQueue }: { itemId: number | null; name: string; thumbQueue: ThumbQueue }) {
+function PreviewThumbnail({ itemId, updatedAt, name, thumbQueue }: { itemId: number | null; updatedAt?: string | Date; name: string; thumbQueue: ThumbQueue }) {
   const [imgSrc, setImgSrc] = useState<string | null>(null)
   const [loadState, setLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [retryCount, setRetryCount] = useState(0)
@@ -121,7 +121,7 @@ function PreviewThumbnail({ itemId, name, thumbQueue }: { itemId: number | null;
     setLoadState('idle')
     setRetryCount(0)
     setIsIntersecting(false)
-  }, [itemId, thumbQueue])
+  }, [itemId, updatedAt, thumbQueue])
 
   useEffect(() => {
     if (!itemId || isIntersecting) return
@@ -157,7 +157,7 @@ function PreviewThumbnail({ itemId, name, thumbQueue }: { itemId: number | null;
 
         setLoadState('loading')
         try {
-          const url = await fetchThumbnail(itemId, controller.signal)
+          const url = await fetchThumbnail(itemId, updatedAt, controller.signal)
           if (cancelled) {
             slotHeld.current = false
             thumbQueue.release()
@@ -332,7 +332,7 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
                       i === 0 ? 'bg-primary/10 ring-2 ring-primary' : 'bg-muted hover:bg-muted/80',
                     )}
                   >
-                    <PreviewThumbnail itemId={file.item_id} name={file.file_name} thumbQueue={thumbQueue} />
+                    <PreviewThumbnail itemId={file.item_id} updatedAt={file.updated_at} name={file.file_name} thumbQueue={thumbQueue} />
                     <span className="text-[10px] text-muted-foreground truncate w-full text-center px-1 py-0.5 block">
                       {file.file_name}
                     </span>

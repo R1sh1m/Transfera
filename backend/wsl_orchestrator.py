@@ -520,8 +520,8 @@ class WSLOrchestrator:
                     return False
             rc, out, _ = await _run_cmd(
                 "powershell", "-NoProfile", "-Command",
-                "Get-ComputerInfo -Property *HyperV* | Select-Object -ExpandProperty *HyperV*",
-                timeout=15,
+                "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent",
+                timeout=10,
             )
             if "True" in out:
                 return True
@@ -660,16 +660,31 @@ class WSLOrchestrator:
         update_lock_contended = False
 
         # Portable lock-polling loop (no --lock-timeout, works on apt 1.x/2.x)
-        rc, out, err = await _run_cmd(
-            "wsl", "-d", d, "-u", "root", "--",
-            "bash", "-c",
-            APT_LOCK_POLL_SCRIPT + "apt-get update -y",
-            timeout=200,
-        )
-        if rc == 0:
-            update_ok = True
-        elif _apt_lock_contended(err or ""):
-            update_lock_contended = True
+        try:
+            rc, out, err = await _run_cmd(
+                "wsl", "-d", d, "-u", "root", "--",
+                "bash", "-c",
+                APT_LOCK_POLL_SCRIPT + "DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 update -y",
+                timeout=200,
+            )
+            if rc == 0:
+                update_ok = True
+            elif _apt_lock_contended(err or ""):
+                update_lock_contended = True
+        except TimeoutError:
+            return Tier2StepResult(
+                step_id=StepID.PROVISION_LINUX,
+                completed=False,
+                error="Updating package lists timed out. Please check your internet connection inside WSL.",
+                details={"steps_completed": steps_completed},
+            )
+        except Exception as exc:
+            return Tier2StepResult(
+                step_id=StepID.PROVISION_LINUX,
+                completed=False,
+                error=f"Failed to update package lists: {exc}",
+                details={"steps_completed": steps_completed},
+            )
 
         if not update_ok:
             raw = err.strip() or out.strip()
@@ -704,7 +719,7 @@ class WSLOrchestrator:
             rc, out, err = await _run_cmd(
                 "wsl", "-d", d, "-u", "root", "--",
                 "bash", "-c",
-                APT_LOCK_POLL_SCRIPT + f"apt-get install -y {pkgs_str}",
+                APT_LOCK_POLL_SCRIPT + f"DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 install -y {pkgs_str}",
                 timeout=180,
             )
             if rc != 0 and "already" not in out.lower():
@@ -809,12 +824,15 @@ class WSLOrchestrator:
         # so it doesn't try to bind before the interface is up.
         network_ok = False
         for _ in range(20):
-            rc, out, _ = await _run_cmd("wsl", "-d", d, "--", "bash", "-c",
-                "hostname -I 2>/dev/null | grep -q . && echo OK || echo WAIT",
-                timeout=10)
-            if rc == 0 and "OK" in out:
-                network_ok = True
-                break
+            try:
+                rc, out, _ = await _run_cmd("wsl", "-d", d, "--", "bash", "-c",
+                    "hostname -I 2>/dev/null | grep -q . && echo OK || echo WAIT",
+                    timeout=10)
+                if rc == 0 and "OK" in out:
+                    network_ok = True
+                    break
+            except Exception:
+                pass
             await asyncio.sleep(1.0)
         if not network_ok:
             logger.warning("WSL network not ready after 20s — starting bridge anyway")
