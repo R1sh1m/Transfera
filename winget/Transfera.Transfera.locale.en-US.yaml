@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://github.com/microsoft/winget-cli/releases/latest/download/manifest.defaultLocale.schema.1.6.0.json
+PackageIdentifier: Transfera.Transfera
+PackageVersion: 2.4.0
+PackageLocale: en-US
+PackageName: Transfera
+Publisher: Transfera Team
+PublisherUrl: https://github.com/R1sh1m/Transfera
+PublisherSupportUrl: https://github.com/R1sh1m/Transfera/issues
+Author: Transfera Team
+ShortDescription: Local media backup and deduplication desktop app.
+Description: Transfera v2 is a desktop application that lets you move and organize photos and videos from local folders and connected iOS devices into a clean, deduplicated, and organized library.
+License: MIT
+LicenseUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
+Copyright: Copyright © 2026 Transfera Team
+CopyrightUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
+PrivacyUrl: https://github.com/R1sh1m/Transfera
+Moniker: transfera
+Tags:
+  - photo
+  - video
+  - backup
+  - media
+  - sync
+  - deduplicate
+  - electron
+  - iphone
+  - local
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

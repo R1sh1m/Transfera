@@ -1,37 +1,6 @@
-# yaml-language-server: $schema=https://github.com/microsoft/winget-cli/releases/latest/download/manifest.singleton.schema.1.6.0.json
+# yaml-language-server: $schema=https://github.com/microsoft/winget-cli/releases/latest/download/manifest.version.schema.1.6.0.json
 PackageIdentifier: Transfera.Transfera
 PackageVersion: 2.4.0
-PackageLocale: en-US
-PackageName: Transfera
-Publisher: Transfera Team
-PublisherUrl: https://github.com/R1sh1m/Transfera
-PublisherSupportUrl: https://github.com/R1sh1m/Transfera/issues
-Author: Transfera Team
-ShortDescription: Local media backup and deduplication desktop app.
-Description: Transfera v2 is a desktop application that lets you move and organize photos and videos from local folders and connected iOS devices into a clean, deduplicated, and organized library.
-License: MIT
-LicenseUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
-Copyright: Copyright © 2026 Transfera Team
-CopyrightUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
-PrivacyUrl: https://github.com/R1sh1m/Transfera
-Moniker: transfera
-Tags:
-  - photo
-  - video
-  - backup
-  - media
-  - sync
-  - deduplicate
-  - electron
-  - iphone
-  - local
-InstallerType: nullsoft
-Installers:
-  - Architecture: x64
-    InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.4.0/Transfera-Setup-2.4.0.exe
-    InstallerSha256: 94ed6ab5799b73a93bd5bebc5a3aa9a4c5a7621f835b45e16faf8c00fa7b94d9
-    InstallerType: nullsoft
-    Scope: user
-    UpgradeBehavior: install
-ManifestType: singleton
+DefaultLocale: en-US
+ManifestType: version
 ManifestVersion: 1.6.0
