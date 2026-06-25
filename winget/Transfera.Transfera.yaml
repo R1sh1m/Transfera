@@ -28,7 +28,7 @@ InstallerType: nullsoft
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.4.0/Transfera-Setup-2.4.0.exe
-    InstallerSha256: <SHA256_HASH_OF_THE_SETUP_EXE> # Update during release with the exact SHA256 of Transfera-Setup-2.4.0.exe from SHA256SUMS.txt
+    InstallerSha256: 94ed6ab5799b73a93bd5bebc5a3aa9a4c5a7621f835b45e16faf8c00fa7b94d9
     InstallerType: nullsoft
     Scope: user
     UpgradeBehavior: install
