@@ -7,15 +7,14 @@ and lazy thumbnail generation with in-memory LRU cache.
 from __future__ import annotations
 
 import hashlib
+import io as _io
 import logging
 import math
 import os
 import subprocess
+import tempfile
 import threading
 from collections import OrderedDict
-
-import io as _io
-import tempfile
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -38,6 +37,7 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
     """
     try:
         import asyncio
+
         from backend.ios_device import _get_afc_service
 
         afc, lockdown = await _get_afc_service(device_id)
@@ -233,7 +233,7 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
         # header, which is present in the first 128 KB of the file.
         try:
             import subprocess as _sp
-            import sys as _sys
+
             from backend.engines.metadata_extractor import _bootstrap_exiftool
             exe = _bootstrap_exiftool()
             if exe and len(data) >= 4096:  # Only worth trying on real data

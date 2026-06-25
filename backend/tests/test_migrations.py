@@ -8,10 +8,9 @@ expected schema on a fresh database.
 from __future__ import annotations
 
 import pytest
-
 from sqlalchemy import text
 
-from backend.database.manager import create_all_tables, dispose_engine, get_engine
+from backend.database.manager import create_all_tables, get_engine
 
 
 @pytest.mark.asyncio

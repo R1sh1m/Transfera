@@ -60,11 +60,25 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 Only **two tools** need to be on your system before running Transfera. Everything else — Python virtual environment, pip packages, npm packages, native build tools, ExifTool — is handled automatically on first launch.
 
+On Windows, you can install both prerequisites in a single command using `winget`:
+
+```powershell
+winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS.LTS
+```
+
+---
+
 ### 1. Python 3.12
 
 Transfera requires Python **3.12.x** specifically. This version is enforced because several core dependencies (`blake3`, `pillow-heif`) only ship pre-compiled wheels for 3.12, avoiding any need for local compilation.
 
-Download the installer from [python.org/downloads](https://www.python.org/downloads/) and during setup check **"Add python.exe to PATH"**.
+You can install it with the following `winget` command:
+
+```powershell
+winget install -e --id Python.Python.3.12
+```
+
+*(Or download the installer from [python.org/downloads](https://www.python.org/downloads/) and check **"Add python.exe to PATH"** during setup).*
 
 Verify after installation:
 
@@ -79,7 +93,15 @@ python --version
 
 The Electron shell and Vite build pipeline require Node **v20 LTS** or newer.
 
-Download from [nodejs.org](https://nodejs.org/) (choose the LTS release). Verify:
+You can install it with the following `winget` command:
+
+```powershell
+winget install -e --id OpenJS.NodeJS.LTS
+```
+
+*(Or download the installer from [nodejs.org](https://nodejs.org/) — choose the LTS release).*
+
+Verify after installation:
 
 ```powershell
 node --version
@@ -124,8 +146,11 @@ Transfera's iOS device support is powered by a native C++ helper compiled agains
 
 Install one of:
 
-- **Visual Studio 2022** (any edition, free Community edition works) with the **"Desktop development with C++"** workload, **or**
-- **Visual Studio 2022 Build Tools** (smaller, no IDE) — [download here](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+- **Visual Studio 2022 Build Tools** (smaller, C++ compiler only) via the following one-line `winget` command:
+  ```powershell
+  winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
+  ```
+- **Visual Studio 2022** (any edition, free Community edition works) with the **"Desktop development with C++"** workload.
 
 The build script locates the compiler via `vswhere.exe` automatically — no PATH configuration needed.
 

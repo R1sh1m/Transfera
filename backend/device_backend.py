@@ -65,11 +65,9 @@ from backend.ios_device import (
 
 try:
     from pymobiledevice3.exceptions import (
-        AfcException,
         ConnectionFailedToUsbmuxdError,
         DeviceHasPasscodeSetError,
         FatalPairingError,
-        LockdownError,
         MuxException,
         NotPairedError,
         PairingDialogResponsePendingError,

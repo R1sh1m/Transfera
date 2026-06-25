@@ -10,11 +10,9 @@ desktop app with no Redis dependency.
 from __future__ import annotations
 
 import time as _time
-
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request
-from fastapi.params import Depends
 
 
 class TokenBucket:

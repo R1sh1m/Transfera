@@ -58,9 +58,9 @@ def resolve_thumbnail_source_path(
     Tries the organised archive destination first, then the local Hop 1
     cache, and falls back to the original source path.
     """
+    from backend.config import CACHE_DIR
     from backend.database.models import MediaItem
     from backend.engines.cache_manager import get_cache_path
-    from backend.config import CACHE_DIR
 
     file_path: Path | None = None
     source_path = entry.get("source_path", "")

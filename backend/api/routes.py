@@ -94,7 +94,6 @@ from backend.config import (
     VIDEO_EXTENSIONS,
 )
 from backend.database.manager import (
-    dispose_engine,
     session_scope,
     set_session_field,
 )
@@ -128,16 +127,16 @@ from backend.engines.importer import (
     import_batch,
     purge_hop1_cache_for_completed_items,
 )
-from backend.engines.thumbnail_ops import (
-    mark_thumbnail_failed,
-    mark_thumbnail_ready,
-    resolve_thumbnail_source_path,
-)
 from backend.engines.recovery import recover_interrupted_batches
 from backend.engines.reporter import generate_session_report
 from backend.engines.scanner import scan as run_scan
 from backend.engines.source_reader import DeviceSourceReader
 from backend.engines.thumbnail_cache import thumbnail_cache
+from backend.engines.thumbnail_ops import (
+    mark_thumbnail_failed,
+    mark_thumbnail_ready,
+    resolve_thumbnail_source_path,
+)
 from backend.engines.thumbnailer import generate_thumbnail_bytes
 
 # Cancellation flag for regenerate_thumbnails background thread.
@@ -148,8 +147,10 @@ from backend.ios_device import (
     DeviceStatus,
     check_driver_status,
     is_ios_support_available,
-    list_ios_devices as _list_ios_devices_backend,
     parse_ios_source,
+)
+from backend.ios_device import (
+    list_ios_devices as _list_ios_devices_backend,
 )
 
 try:
@@ -1010,7 +1011,7 @@ async def start_session(session_id: int, background_tasks: BackgroundTasks) -> S
                 await asyncio.wait_for(
                     asyncio.shield(existing_task), timeout=2.0
                 )
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass  # Task has been cancelled or timed out — proceed
 
         # Create or reset the cancellation event so the background task can
@@ -1251,22 +1252,22 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
                             archive_session = await session.get(TransferSession, archive_item.session_id)
                             if archive_session and archive_session.dest_root:
                                 try:
-                                    from backend.engines.organizer import derive_timestamp, build_folder
                                     from backend.engines.importer import verify_file_hash
-                                    
+                                    from backend.engines.organizer import build_folder, derive_timestamp
+
                                     dest_root_path = Path(archive_session.dest_root)
                                     dt = derive_timestamp(archive_item)
                                     folder = build_folder(dest_root_path, dt, archive_session.folder_layout)
-                                    
+
                                     base_name = archive_item.file_name
                                     p = Path(base_name)
                                     stem = p.stem
                                     suffix = p.suffix
-                                    
+
                                     candidates = [folder / base_name]
                                     for i in range(1, 1000):
                                         candidates.append(folder / f"{stem}_{i:03d}{suffix}")
-                                        
+
                                     target_file = None
                                     for cand in candidates:
                                         if cand.is_file():
@@ -1277,7 +1278,7 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
                                             elif cand.stat().st_size == archive_item.file_size:
                                                 target_file = cand
                                                 break
-                                                
+
                                     if target_file:
                                         logger.info(
                                             "Deleting physical duplicate file before overwriting: %s",
@@ -1297,10 +1298,10 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
                                         archive_item.id,
                                         file_exc,
                                     )
-                        
+
                         # Evict from thumbnail cache
                         thumbnail_cache.evict_items([archive_item.id])
-                        
+
                         # Delete database record
                         await session.delete(archive_item)
 

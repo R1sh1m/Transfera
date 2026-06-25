@@ -380,10 +380,8 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
 # ExifTool -stay_open persistent batch session
 # ---------------------------------------------------------------------------
 import io as _io
-import threading as _threading
-
-
 import queue as _queue
+import threading as _threading
 
 
 class _ExifToolSession:
@@ -504,7 +502,7 @@ class _ExifToolSession:
 
         return buf.getvalue().decode("utf-8", errors="replace")
 
-    def extract_batch(self, paths: list[Path]) -> dict[str, "FileMetadata"]:
+    def extract_batch(self, paths: list[Path]) -> dict[str, FileMetadata]:
         """
         Extract metadata for all *paths* in a single ExifTool round-trip.
 
@@ -539,7 +537,7 @@ class _ExifToolSession:
                 src = record.get("SourceFile") or ""
                 exiftool_by_path[src] = record
 
-        results: dict[str, "FileMetadata"] = {}
+        results: dict[str, FileMetadata] = {}
         for path in paths:
             resolved = str(path.resolve())
             tags = (

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 import sys
@@ -22,7 +21,7 @@ from typing import Optional
 import aiofiles
 
 from backend.config import BATCH_SIZE, PARTIAL_SUFFIX
-from backend.database.manager import increment_session_counter, session_scope
+from backend.database.manager import session_scope
 from backend.database.models import (
     BatchStatus,
     HopStatus,
@@ -35,7 +34,7 @@ from backend.engines.cache_manager import get_cache_path
 from backend.engines.capture_time import extract_capture_datetime
 from backend.engines.organizer import resolve_archive_path
 from backend.engines.thumbnail_cache import thumbnail_cache
-from backend.engines.thumbnail_ops import mark_thumbnail_failed, mark_thumbnail_ready
+from backend.engines.thumbnail_ops import mark_thumbnail_ready
 from backend.engines.thumbnailer import generate_thumbnail_bytes
 from backend.utils.hashing import hash_file
 
@@ -380,7 +379,6 @@ def _restore_mtime(
         if sys.platform == "win32":
             if source_created_ts is not None:
                 # Use the source file's original creation time
-                from datetime import timezone
                 created_dt = datetime.fromtimestamp(source_created_ts, tz=UTC)
                 _set_windows_file_creation_time(dst, created_dt)
             else:
@@ -660,7 +658,7 @@ async def _unlink_source(item: MediaItem) -> None:
     from backend.ios_device import is_ios_source
 
     if is_ios_source(item.source_path):
-        from backend.ios_device import parse_ios_source, _get_afc_service
+        from backend.ios_device import _get_afc_service, parse_ios_source
         try:
             serial, afc_path = parse_ios_source(item.source_path)
             afc, lockdown = await _get_afc_service(serial)

@@ -150,8 +150,9 @@ async def lifespan(app: FastAPI):
     # cache is empty, so "memory" entries from a prior process no longer
     # have actual bytes available.  Setting them to NULL means the frontend
     # will get a clean 404 instead of endlessly retrying.
-    from sqlalchemy import text, CursorResult
     from typing import cast
+
+    from sqlalchemy import CursorResult, text
     async with session_scope() as session:
         result = await session.execute(
             text("UPDATE media_items SET thumbnail_path = NULL WHERE thumbnail_path = 'memory'")

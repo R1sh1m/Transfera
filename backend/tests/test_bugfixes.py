@@ -274,8 +274,9 @@ class TestThumbnailBrokenFile:
         data = _get_placeholder_jpeg()
         assert data, "Placeholder JPEG is empty"
 
-        from PIL import Image
         import io
+
+        from PIL import Image
         img = Image.open(io.BytesIO(data))
         assert img.format == "JPEG"
         assert img.size == (120, 120)
@@ -283,7 +284,7 @@ class TestThumbnailBrokenFile:
     def test_thumbnail_endpoint_returns_placeholder_with_header(self, test_client):
         """A failed thumbnail returns the placeholder JPEG and the
         ``X-Thumbnail-Status: failed`` header."""
-        from unittest.mock import AsyncMock, PropertyMock, patch
+        from unittest.mock import AsyncMock, patch
 
         from backend.database.models import MediaItem
 

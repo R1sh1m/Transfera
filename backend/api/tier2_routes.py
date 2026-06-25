@@ -6,8 +6,12 @@ Endpoints for WSL2/usbipd iPhone access setup and management.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
+
+if TYPE_CHECKING:
+    from backend.wsl_orchestrator import WSLOrchestrator
 
 from backend.api.auth import require_local_token
 from backend.api.tier2_schemas import (

@@ -37,7 +37,6 @@ from backend.engines.metadata_extractor import (
 )
 from backend.ios_device import (
     IOS_SOURCE_PREFIX,
-    _get_afc_service,
     is_ios_source,
     parse_ios_source,
 )
