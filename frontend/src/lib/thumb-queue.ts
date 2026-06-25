@@ -2,11 +2,13 @@ export interface ThumbQueue {
   request(onGranted: () => void): void
   release(): void
   reset(): void
+  getEpoch(): number
 }
 
 export function createThumbQueue(maxConcurrent = 4): ThumbQueue {
   let active = 0
   const queue: Array<() => void> = []
+  let epoch = 0
 
   return {
     request(onGranted) {
@@ -26,8 +28,12 @@ export function createThumbQueue(maxConcurrent = 4): ThumbQueue {
       }
     },
     reset() {
+      epoch++
       queue.length = 0
       active = 0
+    },
+    getEpoch() {
+      return epoch
     },
   }
 }

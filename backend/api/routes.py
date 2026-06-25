@@ -2488,11 +2488,17 @@ async def get_session_progress(
                             if speed_short > 0 and speed_med > 0
                             else speed_short or speed_med
                         )
+                    elif len(all_samples) == 1 and elapsed_seconds > 0 and ts.imported_files > 0:
+                        speed = ts.imported_files / elapsed_seconds
                 except (json.JSONDecodeError, KeyError, IndexError):
                     speed = 0.0
 
+            # Fallback: if still zero but we have files and elapsed time, use naive average
+            if speed == 0.0 and elapsed_seconds > 0 and ts.imported_files > 0:
+                speed = ts.imported_files / elapsed_seconds
+
             remaining = total_files - ts.imported_files
-            if speed > 0.05:
+            if speed > 0.01:
                 eta_seconds = int(remaining / speed)
 
         return SessionProgressResponse(

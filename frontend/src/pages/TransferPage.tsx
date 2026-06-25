@@ -573,13 +573,15 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Speed</p>
             <p className="text-sm font-semibold text-foreground mt-0.5">
-              {transfer.status === 'running' && speed === 0
-                ? 'Calculating...'
-                : speed > 0
-                  ? speed >= 1.0
-                    ? `${speed.toFixed(1)} files/sec`
-                    : `${(speed * 60).toFixed(0)} files/min`
-                  : '--'}
+              {transfer.status === 'running' && speed === 0 && elapsedMs < 2000
+                ? 'Starting...'
+                : transfer.status === 'running' && speed === 0
+                  ? 'Calculating...'
+                  : speed > 0
+                    ? speed >= 1.0
+                      ? `${speed.toFixed(1)} files/sec`
+                      : `${(speed * 60).toFixed(0)} files/min`
+                    : '--'}
             </p>
           </div>
           <div className="bg-muted/50 rounded-md p-2.5">
@@ -591,7 +593,9 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           <div className="bg-muted/50 rounded-md p-2.5">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Elapsed</p>
             <p className="text-sm font-semibold text-foreground mt-0.5 flex items-center gap-1.5">
-              {formatElapsed(elapsedMs)}
+              {transfer.status === 'created' || elapsedMs === 0
+                ? '--'
+                : formatElapsed(elapsedMs)}
               {isPaused && (
                 <span className="text-[10px] font-bold text-amber-500 uppercase">Paused</span>
               )}

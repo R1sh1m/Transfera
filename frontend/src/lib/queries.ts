@@ -291,7 +291,7 @@ export function useClearSessions() {
         await qc.cancelQueries({ queryKey: ['batches', prevSessionId] })
       }
 
-      store.clearAll()
+      store.clearAllExceptPage()
 
       qc.removeQueries({ queryKey: ['media'] })
       qc.removeQueries({ queryKey: ['session-progress'] })
@@ -301,7 +301,11 @@ export function useClearSessions() {
       }
 
       qc.invalidateQueries({ queryKey: ['sessions'] })
-      store.setCurrentPage('dashboard')
+
+      requestAnimationFrame(() => {
+        store.setCurrentPage('dashboard')
+      })
+
       store.showNotification('success', data.message)
     },
     onError: (error) => {
@@ -330,10 +334,9 @@ export function useClearLibrary() {
         await qc.cancelQueries({ queryKey: ['batches', prevSessionId] })
       }
 
-      // 2. Reset all client-side transfer state (sets sessionId→null,
-      //    status→'created', clears snapshot, etc.).
+      // 2. Reset all client-side transfer state (except currentPage).
       clearThumbFailCache()
-      store.clearAll()
+      store.clearAllExceptPage()
 
       // 3. Remove stale cached data so nothing re-fires against old IDs.
       qc.removeQueries({ queryKey: ['media'] })
@@ -345,8 +348,12 @@ export function useClearLibrary() {
       // Invalidate the sessions list so Dashboard shows empty state.
       qc.invalidateQueries({ queryKey: ['sessions'] })
 
-      // 4. Navigate to dashboard and show confirmation.
-      store.setCurrentPage('dashboard')
+      // 4. Defer navigation to Dashboard so React Query cache is clean first.
+      requestAnimationFrame(() => {
+        store.setCurrentPage('dashboard')
+      })
+
+      // 5. Show confirmation.
       store.showNotification('success', data.message)
     },
     onError: (error) => {

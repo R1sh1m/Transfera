@@ -19,6 +19,7 @@ const MAX_CONCURRENT_THUMBS = 4
 function createThumbQueue() {
   let active = 0
   const queue = []
+  let epoch = 0
 
   function request(onGranted) {
     if (active < MAX_CONCURRENT_THUMBS) {
@@ -41,11 +42,16 @@ function createThumbQueue() {
 
   // Drain the queue (called on sort/path change so stale callbacks are discarded)
   function reset() {
+    epoch++
     queue.length = 0
     active = 0
   }
 
-  return { request, release, reset }
+  function getEpoch() {
+    return epoch
+  }
+
+  return { request, release, reset, getEpoch }
 }
 
 function formatBytes(bytes) {
@@ -87,8 +93,8 @@ function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isFocus
 
   // Reset state whenever the item identity changes (e.g. sort order flip reuses cells)
   const prevItemIdRef = useRef(null)
-  if (prevItemIdRef.current !== item.id) {
-    prevItemIdRef.current = item.id
+  if (prevItemIdRef.current !== item.abs_path) {
+    prevItemIdRef.current = item.abs_path
     // Synchronously reset so the effect below sees a clean slate.
     // We can't call setState here (would cause re-render loop), so we use refs to gate
     // the observer, and set state only through the normal flow.
@@ -116,7 +122,13 @@ function MediaThumbCell({ item, isSelected, onToggle, isLikelyDuplicate, isFocus
           slotGrantedRef.current = true
           slotHeldRef.current = true
           const url = makeThumbnailUrl(item)
+          const myEpoch = thumbQueue.getEpoch()
           thumbQueue.request(() => {
+            if (thumbQueue.getEpoch() !== myEpoch) {
+              slotHeldRef.current = false
+              thumbQueue.release()
+              return
+            }
             setImgSrc(url)
             setLoadState('loading')
           })
@@ -336,6 +348,7 @@ function SourcePreviewPanelInner({
   if (!thumbQueueRef.current) {
     thumbQueueRef.current = createThumbQueue()
   }
+  const epochRef = useRef(0)
 
   function getPreviewUrl(page, pageSize, sortBy) {
     if (deviceSource) {
@@ -400,6 +413,7 @@ function SourcePreviewPanelInner({
     if (page === 1) {
       // Reset the thumb queue so stale callbacks from the old sort/page don't fire
       thumbQueueRef.current.reset()
+      epochRef.current++
       setItems([])
       setFocusedIndex(null)
     }
@@ -621,6 +635,7 @@ function SourcePreviewPanelInner({
                 // Reset queue before switching sort so stale callbacks
                 // from the previous sort don't run in the new batch.
                 thumbQueueRef.current.reset()
+                epochRef.current++
                 setSortBy(e.target.value)
                 setPage(1)
                 setItems([])
@@ -699,7 +714,7 @@ function SourcePreviewPanelInner({
             >
               {visibleItems.map((item, index) => (
                 <MediaThumbCell
-                  key={item.id}
+                  key={`${sortBy}-${page}-${item.abs_path}`}
                   item={item}
                   isSelected={selected.has(item.abs_path)}
                   onToggle={() => { setFocusedIndex(index); gridRef.current?.focus(); toggleItem(item.abs_path) }}

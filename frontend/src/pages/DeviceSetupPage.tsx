@@ -301,7 +301,7 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
             ? 'border-green-300 dark:border-green-700 bg-green-50/50 dark:bg-green-950/20'
             : 'border-border hover:border-muted-foreground/30',
         )}>
-          <div className="flex items-center gap-3 p-3">
+          <div className="flex items-center gap-3 p-3 pb-2">
             <div className={cn(
               'w-10 h-10 rounded-lg flex items-center justify-center shrink-0',
               isFolder
@@ -315,36 +315,56 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-foreground">Browse a folder on this PC</p>
-              {isFolder && sourceRef.type === 'local_folder' && (
-                <p className="text-xs text-muted-foreground truncate mt-0.5">
-                  {sourceRef.path}
-                </p>
-              )}
-              {!isFolder && (
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Select a folder containing photos or videos
-                </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Select or type a folder path containing photos or videos
+              </p>
+            </div>
+          </div>
+
+          <div className="px-3 pb-3 flex gap-2">
+            <div className="flex-1 relative">
+              <input
+                type="text"
+                value={isFolder && sourceRef.type === 'local_folder' ? sourceRef.path : ''}
+                onChange={(e) => {
+                  const val = e.target.value
+                  if (val.trim()) {
+                    onSourceChange({ type: 'local_folder', path: val })
+                    setMode('folder')
+                  } else {
+                    handleClear()
+                  }
+                }}
+                placeholder="Enter folder path..."
+                className={cn(
+                  'w-full px-3 py-2 bg-background border rounded-lg text-xs text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring transition-colors',
+                  isFolder && sourceRef.type === 'local_folder' && sourceRef.path.trim().length > 0
+                    ? 'border-green-300 dark:border-green-700'
+                    : 'border-border',
+                )}
+              />
+              {isFolder && sourceRef.type === 'local_folder' && sourceRef.path.trim().length > 0 && !pathValidation.isLoading && pathValidation.data?.exists && (
+                <FolderCheck className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-green-500 dark:text-green-400" />
               )}
             </div>
-            <div className="flex items-center gap-1.5">
-              {isFolder && (
-                <button
-                  type="button"
-                  onClick={handleClear}
-                  className="p-1 text-muted-foreground hover:text-foreground transition-colors"
-                  title="Clear source"
-                >
-                  <XCircle className="w-4 h-4" />
-                </button>
-              )}
+            <button
+              type="button"
+              onClick={handleBrowseFolder}
+              className="no-drag px-3 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-medium hover:bg-primary/90 active:scale-[0.95] transition-all flex items-center gap-1 shrink-0"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              Browse
+            </button>
+            {isFolder && (
               <button
                 type="button"
-                onClick={handleBrowseFolder}
-                className="no-drag px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-medium hover:bg-primary/90 active:scale-[0.95] transition-all"
+                onClick={handleClear}
+                className="p-1.5 text-muted-foreground hover:text-foreground transition-colors flex items-center justify-center shrink-0"
+                title="Clear source"
               >
-                Browse
+                <XCircle className="w-4 h-4" />
               </button>
-            </div>
+            )}
           </div>
 
           {/* Path validation feedback */}

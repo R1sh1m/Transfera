@@ -103,6 +103,7 @@ export interface UIState {
   setupFolderLayout: FolderLayout
   wsError: string | null
   lastCompletedSessionId: number | null
+  lastRegeneratedSessionId: number | null
   completedSnapshot: TransferSnapshot | null
 }
 
@@ -154,11 +155,13 @@ export interface TransferStore {
   setSetupFolderLayout: (layout: FolderLayout) => void
   resetSetup: () => void
   setLastCompletedSessionId: (id: number | null) => void
+  setLastRegeneratedSessionId: (id: number | null) => void
   setCompletedSnapshot: (snapshot: TransferSnapshot | null) => void
   setWsError: (error: string | null) => void
 
   // --- Clear all (used after "Clear Library") ----------------------------
   clearAll: () => void
+  clearAllExceptPage: () => void
 
   // --- WS actions ---------------------------------------------------------
   setWsConnected: (connected: boolean) => void
@@ -231,6 +234,7 @@ const initialUI: UIState = {
   setupFolderLayout: 'year/month',
   wsError: null,
   lastCompletedSessionId: null,
+  lastRegeneratedSessionId: null,
   completedSnapshot: null,
 }
 
@@ -450,6 +454,7 @@ function handleWsEventReducer(
       const isError = event.event === 'session_completed_with_errors'
       const imported = (d.imported_files as number) ?? state.transfer.importedFiles
       const failed = (d.failed_files as number) ?? state.transfer.failedFiles
+      const sessionId = (d.session_id as number) ?? state.transfer.sessionId
       patch.transfer = {
         ...state.transfer,
         status: isError ? ('completed_with_errors' as SessionStatus) : ('completed' as SessionStatus),
@@ -461,6 +466,7 @@ function handleWsEventReducer(
       if (isError) {
         patch.ui = {
           ...state.ui,
+          lastCompletedSessionId: sessionId,
           notification: {
             type: 'warning',
             message: `${imported} transferred, ${failed} failed. See library for details.`,
@@ -469,6 +475,7 @@ function handleWsEventReducer(
       } else {
         patch.ui = {
           ...state.ui,
+          lastCompletedSessionId: sessionId,
           notification: {
             type: 'success',
             message: `${imported} file${imported !== 1 ? 's' : ''} transferred successfully.`,
@@ -727,11 +734,33 @@ wsConnected: false,
   setLastCompletedSessionId: (id) =>
     set((s) => ({ ui: { ...s.ui, lastCompletedSessionId: id } })),
 
+  setLastRegeneratedSessionId: (id) =>
+    set((s) => ({ ui: { ...s.ui, lastRegeneratedSessionId: id } })),
+
   setCompletedSnapshot: (snapshot) =>
     set((s) => ({ ui: { ...s.ui, completedSnapshot: snapshot } })),
 
   setWsError: (error) =>
     set((s) => ({ ui: { ...s.ui, wsError: error } })),
+
+  // --- Clear all except currentPage (used before deferred navigation) ---
+  clearAllExceptPage: () => {
+    clearThumbFailCache()
+    return set((s) => ({
+      transfer: { ...initialTransfer, status: 'cancelled' as SessionStatus },
+      library: { ...initialLibrary },
+      scan: { ...initialScan },
+      duplicates: { ...initialDuplicates },
+      ui: {
+        ...s.ui,
+        notification: null,
+        wsError: null,
+        completedSnapshot: null,
+        lastCompletedSessionId: null,
+        lastRegeneratedSessionId: null,
+      },
+    }))
+  },
 
   // --- Clear all (used after "Clear Library") ----------------------------
   clearAll: () => {
@@ -747,10 +776,12 @@ wsConnected: false,
       duplicates: { ...initialDuplicates },
       ui: {
         ...s.ui,
+        currentPage: 'dashboard' as const,
         notification: null,
         wsError: null,
         completedSnapshot: null,
         lastCompletedSessionId: null,
+        lastRegeneratedSessionId: null,
       },
     }))
   },

@@ -177,37 +177,66 @@ function PageRouter() {
   const currentPage = useTransferStore((s) => s.ui.currentPage)
 
   return (
-    <AnimatePresence mode="wait">
-      <motion.div
-        key={currentPage}
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -6 }}
-        transition={{ duration: 0.15 }}
-        className="flex-1 overflow-y-auto px-6 py-5"
-      >
+    <div className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
+      <AnimatePresence mode="sync" initial={false}>
         {currentPage === 'dashboard' && (
-          <PageErrorBoundary pageName="Dashboard">
-            <DashboardPage />
-          </PageErrorBoundary>
+          <motion.div
+            key="dashboard"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
+            className="absolute inset-0 overflow-y-auto px-6 py-5"
+          >
+            <PageErrorBoundary key="dashboard" pageName="Dashboard">
+              <DashboardPage />
+            </PageErrorBoundary>
+          </motion.div>
         )}
         {currentPage === 'setup' && (
-          <PageErrorBoundary pageName="Setup">
-            <DeviceSetupPage />
-          </PageErrorBoundary>
+          <motion.div
+            key="setup"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
+            className="absolute inset-0 overflow-y-auto px-6 py-5"
+          >
+            <PageErrorBoundary key="setup" pageName="Setup">
+              <DeviceSetupPage />
+            </PageErrorBoundary>
+          </motion.div>
         )}
         {currentPage === 'transfer' && (
-          <PageErrorBoundary pageName="Transfer">
-            <TransferPage />
-          </PageErrorBoundary>
+          <motion.div
+            key="transfer"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
+            className="absolute inset-0 overflow-y-auto px-6 py-5"
+          >
+            <PageErrorBoundary key="transfer" pageName="Transfer">
+              <TransferPage />
+            </PageErrorBoundary>
+          </motion.div>
         )}
         {currentPage === 'library' && (
-          <PageErrorBoundary pageName="Library">
-            <LibraryPage />
-          </PageErrorBoundary>
+          <motion.div
+            key="library"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
+            className="absolute inset-0 overflow-y-auto px-6 py-5"
+          >
+            <PageErrorBoundary key="library" pageName="Library">
+              <LibraryPage />
+            </PageErrorBoundary>
+          </motion.div>
         )}
-      </motion.div>
-    </AnimatePresence>
+      </AnimatePresence>
+    </div>
   )
 }
 

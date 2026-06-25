@@ -339,6 +339,7 @@ export default function LibraryPage() {
   const setLoadingMore = useTransferStore((s) => s.setLoadingMore)
   const queryClient = useQueryClient()
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const hasAutoRegenRef = useRef(false)
 
   useEffect(() => {
     return () => {
@@ -347,6 +348,8 @@ export default function LibraryPage() {
   }, [])
 
   const lastSessionId = useTransferStore((s) => s.ui.lastCompletedSessionId)
+  const lastRegeneratedSessionId = useTransferStore((s) => s.ui.lastRegeneratedSessionId)
+  const setLastRegeneratedSessionId = useTransferStore((s) => s.setLastRegeneratedSessionId)
   const [showingRecent, setShowingRecent] = useState(true)
 
   useEffect(() => {
@@ -354,6 +357,17 @@ export default function LibraryPage() {
       setShowingRecent(true)
     }
   }, [lastSessionId])
+
+  // Auto-trigger thumbnail regeneration when a transfer completes
+  useEffect(() => {
+    if (
+      lastSessionId != null &&
+      lastSessionId !== lastRegeneratedSessionId
+    ) {
+      setLastRegeneratedSessionId(lastSessionId)
+      handleRegenThumbnails()
+    }
+  }, [lastSessionId, lastRegeneratedSessionId])
 
   const sessionFilter = showingRecent && lastSessionId ? lastSessionId : undefined
   const [fetchPage, setFetchPage] = useState(1)
@@ -379,6 +393,7 @@ export default function LibraryPage() {
     filterKeyRef.current += 1
     const myKey = filterKeyRef.current
     loadedPages.current = new Set()
+    hasAutoRegenRef.current = false
     resetLibrary()
     setFetchPage(1)
     setFilterKey(myKey)
@@ -391,6 +406,37 @@ export default function LibraryPage() {
     loadedPages.current.add(fetchPage)
     appendLibraryItems(data.items, data.total, data.pages)
   }, [data, filterKey, fetchPage, appendLibraryItems])
+
+  // Auto-trigger thumbnail regeneration when library loads items with pending
+  // thumbnails, firing at most once per filter/mount cycle.
+  useEffect(() => {
+    if (hasAutoRegenRef.current) return
+    if (!data || data.items.length === 0) return
+    const hasPending = data.items.some(
+      (item) => item.thumbnail_status === 'pending',
+    )
+    if (!hasPending) return
+
+    hasAutoRegenRef.current = true
+
+    apiClient.post('/media/regenerate-thumbnails').then((res) => {
+      const resData = res.data as { total?: number; count?: number }
+      const total = resData.total ?? resData.count ?? 0
+      if (total === 0) return
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+      let attempts = 0
+      pollIntervalRef.current = setInterval(() => {
+        attempts++
+        queryClient.invalidateQueries({ queryKey: ['media'] })
+        if (attempts >= 20) {
+          clearInterval(pollIntervalRef.current!)
+          pollIntervalRef.current = null
+        }
+      }, 2000)
+    }).catch(() => {
+      // Silently ignore — user can always click the manual button
+    })
+  }, [data, queryClient])
 
   // Measure container
   useEffect(() => {
