@@ -12,7 +12,7 @@
 =============================================================================================
 ```
 
-**Two-Stage Verified Media Vaulting Engine** — FastAPI · Electron · React · SQLite
+**Two-Stage Verified Media Vaulting Engine**   FastAPI · Electron · React · SQLite
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -24,9 +24,9 @@
 
 ## What is Transfera?
 
-Transfera is a local desktop application for **cryptographically verified media backup**. It transfers photos, videos, and audio from any source — local folders, iPhone, iPad, or USB-attached cameras — to an organised archive destination, verifying every byte in transit before committing the file.
+Transfera is a local desktop application for **cryptographically verified media backup**. It transfers photos, videos, and audio from any source (local folders, iPhone, iPad, or USB-attached cameras) to an organised archive destination, whilst verifying every byte in transit before committing the files.
 
-Unlike a plain copy, Transfera's **Two-Stage Verified Pipeline** ensures no silent corruption ever reaches your archive:
+Transfera's **Two-Stage Verified Pipeline** ensures that no silent corruption ever reaches the destination:
 
 ```
 Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verified Backup
@@ -43,24 +43,24 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ## Key Features
 
-- **BLAKE3 hashing** (SHA-256 fallback) computed *during* the copy stream — no second read required
-- **Atomic writes** via `.partial` staging — a corrupt or interrupted file never lands in your archive
-- **iPhone & iPad support** via native WPD driver integration and optional WSL2 bridge (Tier 2)
-- **Live Photo detection** — pairs HEIC + MOV files by matching filename, preserving them together
-- **Duplicate detection** — exact (hash-based) and near-duplicate (metadata similarity) resolution with per-file controls
-- **Crash recovery** — interrupted `LOADING` and `ARCHIVED` batch states are automatically resumed on next launch
-- **Real-time transfer monitor** — WebSocket-driven progress with per-hop bars, ETA, speed, and media thumbnail preview
-- **Media library** — masonry/list/history views of every archived file, with infinite scroll and thumbnail regeneration
-- **SQLite WAL mode** — safe concurrent reads during active writes; no database lock contention
-- **ExifTool auto-bootstrap** — downloads and manages ExifTool automatically; no manual installation needed
+- **BLAKE3 hashing** (SHA-256 fallback) computed *during* the copy stream, requiring no second reads
+- **Atomic writes** via `.partial` staging, ensuring a corrupt or interrupted file never lands in the final archive
+- **iPhone & iPad support** via native WPD driver integration (optional WSL2 bridge for Tier 2)
+- **Live Photo detection** pairs HEIC + MOV files by matching filename, preserving them together
+- **Duplicate detection** using exact (hash-based) and near-duplicate (metadata similarity) resolution with per-file controls
+- **Crash recovery** interrupted `LOADING` and `ARCHIVED` batch states are automatically resumed on next launch
+- **Real-time transfer monitor** WebSocket-driven progress with per-hop bars, ETA, speed, and media thumbnail preview
+- **Media library** masonry/list/history views of every archived file, with infinite scroll and thumbnail regeneration
+- **SQLite WAL mode** safe concurrent reads during active writes with no database lock contention
+- **ExifTool auto-bootstrap** downloads and manages ExifTool automatically with no manual installation needed
 
 ---
 
 ## Prerequisites
 
-Only **two tools** need to be on your system before running Transfera. Everything else — Python virtual environment, pip packages, npm packages, native build tools, ExifTool — is handled automatically on first launch.
+Only **two tools** need to be on the system before running Transfera. Everything else like Python virtual environment, pip packages, npm packages, native build tools, ExifTool, etc is handled automatically on first launch.
 
-On Windows, you can install both prerequisites in a single command using `winget`:
+On Windows, install both prerequisites in a single command using `winget`:
 
 ```powershell
 winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS.LTS
@@ -72,7 +72,7 @@ winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS
 
 Transfera requires Python **3.12.x** specifically. This version is enforced because several core dependencies (`blake3`, `pillow-heif`) only ship pre-compiled wheels for 3.12, avoiding any need for local compilation.
 
-You can install it with the following `winget` command:
+Install Python 3.12 using the following `winget` command:
 
 ```powershell
 winget install -e --id Python.Python.3.12
@@ -87,13 +87,13 @@ python --version
 # Python 3.12.x
 ```
 
-> If you have multiple Python versions installed, the `py` launcher (`py -3.12`) is also supported — the run script probes for it automatically.
+> If multiple Python versions are installed, the `py` launcher (`py -3.12`) is also supported — the run script probes for it automatically.
 
 ### 2. Node.js v20 or later
 
 The Electron shell and Vite build pipeline require Node **v20 LTS** or newer.
 
-You can install it with the following `winget` command:
+Install Node.js v20 using the following `winget` command:
 
 ```powershell
 winget install -e --id OpenJS.NodeJS.LTS
@@ -109,10 +109,6 @@ node --version
 ```
 
 ### That's it
-
-Everything else — the `.venv`, pip packages, `node_modules`, the React build, ExifTool, and the native WPD device helper — is set up automatically the first time you run `python run.py`.
-
----
 
 ## Quickstart
 
@@ -142,26 +138,19 @@ Press **Ctrl+C** at any time for a clean teardown of all processes.
 
 ## iPhone & iPad Support — Native Helper
 
-Transfera's iOS device support is powered by a native C++ helper compiled against the Windows Portable Devices (WPD) API. The run script builds it automatically, but **requires Microsoft's C++ compiler (MSVC)** to be present on the system.
+Transfera's iOS device support is powered by a native C++ helper compiled against the Windows Portable Devices (WPD) API. The run script builds it automatically (requires Visual Studio Build Tools), but **requires Microsoft's C++ compiler (MSVC)** to be present on the system.
 
 Install one of:
 
-- **Visual Studio 2022 Build Tools** (smaller, C++ compiler only) via the following one-line `winget` command:
+- **Visual Studio 2022 Build Tools** via the following command:
   ```powershell
   winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
   ```
 - **Visual Studio 2022** (any edition, free Community edition works) with the **"Desktop development with C++"** workload.
 
-The build script locates the compiler via `vswhere.exe` automatically — no PATH configuration needed.
+The build script locates the compiler via `vswhere.exe` automatically, no PATH configuration needed.
 
 > **If you skip this step**, Transfera still runs fully. Local folder and network path backups work without the native helper. iPhone/iPad detection simply won't be available until MSVC is installed and the helper is built.
-
-To build it manually at any time:
-
-```powershell
-cd frontend
-npm run build:native
-```
 
 ---
 
@@ -180,28 +169,6 @@ The full dev stack runs two processes:
 |---------|-----|-------------|
 | FastAPI backend | `http://127.0.0.1:47821` | REST API + WebSocket + static frontend server |
 | Electron (Vite HMR) | `http://127.0.0.1:5173` | Dev shell with hot-module reload |
-
----
-
-## Building a Standalone Installer
-
-To produce a distributable Windows installer (`.exe`) that bundles the Python backend, the React frontend, and Electron into a self-contained package:
-
-```powershell
-cd frontend
-npm run electron:build
-```
-
-Output is written to:
-
-```
-frontend/release/Transfera-Setup-2.4.0.exe    ← NSIS installer
-frontend/release/win-unpacked/                ← Portable build
-```
-
-Build pipeline: TypeScript compile → Vite bundle → Electron Builder NSIS packaging.
-
-**Prerequisites for building:** the `.venv` must already exist (run `python run.py` once first), and MSVC must be installed for the native WPD helper.
 
 ---
 
