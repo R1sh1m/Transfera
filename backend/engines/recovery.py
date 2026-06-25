@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -67,7 +68,7 @@ def _clean_orphaned_thumbnails() -> int:
 async def recover_interrupted_batches(
     *,
     cache_dir: Path = CACHE_DIR,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """
     Scan all sessions for batches stuck in LOADING or ARCHIVED and recover.
 
@@ -80,7 +81,7 @@ async def recover_interrupted_batches(
     background task for each of these sessions so the remaining items
     actually get processed.
     """
-    stats: dict[str, object] = {
+    stats: dict[str, Any] = {
         "loading_recovered": 0,
         "archived_recovered": 0,
         "resumable_session_ids": [],

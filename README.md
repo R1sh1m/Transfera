@@ -95,7 +95,7 @@ Everything else — the `.venv`, pip packages, `node_modules`, the React build, 
 ## Quickstart
 
 ```powershell
-git clone https://github.com/your-username/Transfera.git
+git clone https://github.com/R1sh1m/Transfera.git
 cd Transfera
 python run.py
 ```
@@ -170,7 +170,7 @@ npm run electron:build
 Output is written to:
 
 ```
-frontend/release/Transfera-Setup-2.0.0.exe    ← NSIS installer
+frontend/release/Transfera-Setup-2.4.0.exe    ← NSIS installer
 frontend/release/win-unpacked/                ← Portable build
 ```
 
@@ -289,7 +289,7 @@ Transfera/
 | `Port 47821 already in use` | A previous run may not have shut down cleanly. The orchestrator auto-sweeps stray processes on startup; if it still fails, kill the process occupying the port manually. |
 | `npm install` permission error | Run your terminal as Administrator (right-click → Run as administrator). |
 | iPhone not detected | Ensure MSVC is installed and `npm run build:native` has completed (look for `wpd_helper.exe` in `backend/bin/`). Trust the computer on your iPhone when prompted. |
-| Blank page after navigating | Known bug — fixed in the current branch. See [issue tracker](https://github.com/your-username/Transfera/issues). |
+| Blank page after navigating | Known bug — fixed in the current branch. See [issue tracker](https://github.com/R1sh1m/Transfera/issues). |
 | Thumbnails showing wrong images | Known bug — fixed in the current branch. Caused by a stale negative-cache between sessions. |
 | ExifTool not found | First-run auto-bootstrap handles this. If it fails, check internet connectivity; ExifTool is downloaded from `exiftool.org` on first launch. |
 | `wpd_helper build failed: LNK1104` | The `.exe` is locked by a running Transfera backend. Fully close the app (`Ctrl+C` in the terminal) and retry. |

@@ -150,13 +150,15 @@ async def lifespan(app: FastAPI):
     # cache is empty, so "memory" entries from a prior process no longer
     # have actual bytes available.  Setting them to NULL means the frontend
     # will get a clean 404 instead of endlessly retrying.
-    from sqlalchemy import text
+    from sqlalchemy import text, CursorResult
+    from typing import cast
     async with session_scope() as session:
         result = await session.execute(
             text("UPDATE media_items SET thumbnail_path = NULL WHERE thumbnail_path = 'memory'")
         )
-        if result.rowcount > 0:
-            logger.info("Reset %d stale 'memory' thumbnail entries after restart", result.rowcount)
+        cursor_result = cast(CursorResult, result)
+        if cursor_result.rowcount > 0:
+            logger.info("Reset %d stale 'memory' thumbnail entries after restart", cursor_result.rowcount)
     logger.info("Stale thumbnail sentinels cleared")
 
     # Run crash recovery
@@ -234,7 +236,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Transfera v2",
         description="Local media backup engine",
-        version="2.0.0",
+        version="2.4.0",
         lifespan=lifespan,
     )
 
@@ -276,7 +278,7 @@ def create_app() -> FastAPI:
             return {
                 "name": "Transfera Backend API",
                 "status": "active",
-                "version": "2.0.0",
+                "version": "2.4.0",
                 "note": "Frontend not built — run 'npm run build' in frontend/",
             }
 
