@@ -1,6 +1,7 @@
 # yaml-language-server: $schema=https://github.com/microsoft/winget-cli/releases/latest/download/manifest.singleton.schema.1.6.0.json
 PackageIdentifier: Transfera.Transfera
 PackageVersion: 2.4.0
+PackageLocale: en-US
 PackageName: Transfera
 Publisher: Transfera Team
 PublisherUrl: https://github.com/R1sh1m/Transfera
