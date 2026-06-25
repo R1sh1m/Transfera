@@ -87,7 +87,7 @@ python --version
 # Python 3.12.x
 ```
 
-> If multiple Python versions are installed, the `py` launcher (`py -3.12`) is also supported — the run script probes for it automatically.
+> If multiple Python versions are installed, the `py` launcher (`py -3.12`) is also supported, the run script probes for it automatically.
 
 ### 2. Node.js v20 or later
 
