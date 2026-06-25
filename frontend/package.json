@@ -53,6 +53,13 @@
     "productName": "Transfera",
     "copyright": "Copyright © 2026 Transfera Team",
     "asar": true,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "R1sh1m",
+        "repo": "Transfera"
+      }
+    ],
     "directories": {
       "output": "release",
       "buildResources": "build"
