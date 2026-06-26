@@ -22,11 +22,13 @@
 
 ---
 
-## What is Transfera?
+## What it does
 
-Transfera is a local desktop application for **cryptographically verified media backup**. It transfers photos, videos, and audio from any source (local folders, iPhone, iPad, or USB-attached cameras) to an organised archive destination, whilst verifying every byte in transit before committing the files.
+Transfera is a Windows desktop app that transfers photos, videos, and documents from iPhones, Android phones, cameras, and USB drives to a folder on your PC. It skips duplicate files using content based hashing, organizes media by capture date, and generates thumbnails so you can preview what was imported. Everything runs locally, no cloud account, no internet connection, no subscription.
 
-Transfera's **Two-Stage Verified Pipeline** ensures that no silent corruption ever reaches the destination:
+### Two-Stage Verified Pipeline
+
+Transfera's pipeline ensures that no silent corruption ever reaches the destination:
 
 ```
 Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verified Backup
@@ -41,7 +43,19 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ---
 
-## Key Features
+## Features
+
+- Copy or move files from connected devices and USB drives
+- iPhone support via native AFC protocol (no iTunes required) and WSL bridge for deeper access
+- Android and camera support via Windows MTP/WPD
+- Duplicate detection using BLAKE3 content hashing
+- Date based organization using EXIF metadata
+- Thumbnail preview during and after transfer
+- Pause, resume, and crash recovery for interrupted transfers
+- Transfer history with session logs
+- Dark and light mode
+
+### Technical Details
 
 - **BLAKE3 hashing** (SHA-256 fallback) computed *during* the copy stream, requiring no second reads
 - **Atomic writes** via `.partial` staging, ensuring a corrupt or interrupted file never lands in the final archive
@@ -60,8 +74,8 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 The easiest way to use Transfera on Windows is to download one of the pre-built packages or install it directly using WinGet.
 
-### Option 1: Install via WinGet (Recommended)
-You can install Transfera directly from your PowerShell or Command Prompt using the Windows Package Manager:
+### Option 1: Install via WinGet (Coming Soon)
+Transfera has been submitted to the Windows Package Manager. Once the PR is merged, you will be able to install it directly from PowerShell or Command Prompt:
 ```cmd
 winget install Transfera.Transfera
 ```
@@ -76,9 +90,12 @@ winget install Transfera.Transfera
 If you prefer not to install the application, download the standalone `Transfera-Portable-X.Y.Z.exe` from the releases page. Double-click it to run immediately.
 
 > [!WARNING]
-> **Windows Defender SmartScreen Warning (Unsigned Binaries)**  
-> Because Transfera is an open-source project and does not use a paid commercial code-signing certificate, Windows SmartScreen will display a blue warning banner (*"Windows protected your PC"*) when you run the installer or portable binary for the first time.  
-> **How to bypass**: Click **"More info"** on the banner, then click **"Run anyway"**. The binary is completely safe, open-source, and verified by our CI/CD pipeline.
+> **Windows Defender SmartScreen Warning**  
+> Transfera has applied for free code signing via SignPath Foundation. Once approved, the installer will be signed and this warning will no longer appear. Until then, click **"More info"** then **"Run anyway"** to proceed. The binary is completely safe, open source, and verified by our CI/CD pipeline.
+
+<!-- TODO: Uncomment once SignPath signing is approved
+Windows release binaries are code signed by SignPath Foundation, a nonprofit that provides free Authenticode signing for qualifying open source projects. The certificate is issued to "SignPath Foundation". You can verify the signature by right clicking the installer, selecting Properties, and opening the Digital Signatures tab.
+-->
 
 ---
 
@@ -216,7 +233,7 @@ To produce a self-contained, signed or unsigned Windows installer (`.exe`) that 
    - `frontend/release/Transfera-Setup-[version].exe` (NSIS installer)
    - `frontend/release/win-unpacked/` (Portable build directory)
 
-For detailed information on configuring Windows Authenticode code-signing, exporting certificates, and whitelisting the app with Microsoft SmartScreen, refer to [WINDOWS_RELEASE_GUIDE.md](WINDOWS_RELEASE_GUIDE.md).
+
 
 ---
 
