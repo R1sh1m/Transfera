@@ -4,6 +4,7 @@ PackageVersion: 2.4.0
 InstallerType: nullsoft
 Installers:
   - Architecture: x64
+    InstallerLocale: en-US
     InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.4.0/Transfera-Setup-2.4.0.exe
     InstallerSha256: b34949e521ca4334497a6719f260c3252fc388fe3a6c70be8cb05ff0b3c5f35a
     InstallerType: nullsoft

@@ -6,14 +6,13 @@ PackageName: Transfera
 Publisher: Transfera Team
 PublisherUrl: https://github.com/R1sh1m/Transfera
 PublisherSupportUrl: https://github.com/R1sh1m/Transfera/issues
-Author: Transfera Team
+Author: Rishi Misra
 ShortDescription: Local media backup and deduplication desktop app.
 Description: Transfera v2 is a desktop application that lets you move and organize photos and videos from local folders and connected iOS devices into a clean, deduplicated, and organized library.
 License: MIT
 LicenseUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
-Copyright: Copyright © 2026 Transfera Team
+Copyright: Copyright © 2026 Rishi Misra
 CopyrightUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
-PrivacyUrl: https://github.com/R1sh1m/Transfera
 Moniker: transfera
 Tags:
   - photo
