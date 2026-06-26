@@ -122,7 +122,8 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}",
-      "warningsAsErrors": false
+      "warningsAsErrors": false,
+      "runAfterFinish": false
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}.${ext}"
