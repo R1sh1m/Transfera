@@ -6,9 +6,13 @@ Installers:
   - Architecture: x64
     InstallerLocale: en-US
     InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.4.0/Transfera-Setup-2.4.0.exe
-    InstallerSha256: b34949e521ca4334497a6719f260c3252fc388fe3a6c70be8cb05ff0b3c5f35a
+    InstallerSha256: 0f74b5c4ac74a282fc48b890e44836111aaf6437549dc7d499b8777176c8eba7
     InstallerType: nullsoft
     Scope: user
     UpgradeBehavior: install
+    AppsAndFeaturesEntries:
+      - DisplayName: Transfera
+        Publisher: Transfera Team
+        ProductCode: '{04ea60df-565b-5136-ab3e-2fae205511bd}'
 ManifestType: installer
 ManifestVersion: 1.12.0

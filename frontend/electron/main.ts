@@ -798,84 +798,102 @@ process.on('unhandledRejection', (reason) => {
   console.error('[lifecycle] Unhandled rejection:', reason)
 })
 
-app.whenReady().then(async () => {
-  registerIPC()
+// ---------------------------------------------------------------------------
+// Single Instance Lock
+// ---------------------------------------------------------------------------
+const gotTheLock = app.requestSingleInstanceLock()
 
-  const envExternalBackend = process.env.TRANSFERA_EXTERNAL_BACKEND === '1'
+if (!gotTheLock) {
+  console.log('[lifecycle] Another instance of Transfera is already running. Quitting.')
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      if (!mainWindow.isVisible()) mainWindow.show()
+      mainWindow.focus()
+    }
+  })
 
-  createWindow()
-  createTray()
-  startDriveWatcher()
+  app.whenReady().then(async () => {
+    registerIPC()
 
-  if (envExternalBackend) {
-    externalBackend = true
-    console.log('[lifecycle] TRANSFERA_EXTERNAL_BACKEND set — skipping backend spawn')
-  } else {
-    // Probe the backend port before spawning so we know whether
-    // to manage our own subprocess or rely on an externally-launched one.
-    const alreadyRunning = await probeBackend()
+    const envExternalBackend = process.env.TRANSFERA_EXTERNAL_BACKEND === '1'
 
-    if (alreadyRunning) {
+    createWindow()
+    createTray()
+    startDriveWatcher()
+
+    if (envExternalBackend) {
       externalBackend = true
-      console.log('[lifecycle] Detected external backend — skipping spawn')
+      console.log('[lifecycle] TRANSFERA_EXTERNAL_BACKEND set — skipping backend spawn')
     } else {
-      startBackend().catch((err) => {
-        console.error('[lifecycle] Backend startup error:', err)
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('backend:down')
-        }
-      })
-    }
-  }
+      // Probe the backend port before spawning so we know whether
+      // to manage our own subprocess or rely on an externally-launched one.
+      const alreadyRunning = await probeBackend()
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-    }
-  })
-})
-
-// Window-all-closed: on non-macOS, tell the app to quit (which triggers
-// before-quit → backend shutdown → exit).
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
-})
-
-// Before-quit: prevent the default quit so we can shut down the backend
-// asynchronously first.  After cleanup, call app.exit(0) which skips the
-// quit events and terminates immediately.
-app.on('before-quit', (event) => {
-  if (driveWatcherInterval) {
-    clearInterval(driveWatcherInterval)
-    driveWatcherInterval = null
-  }
-  if (isQuitting) return
-  event.preventDefault()
-  isQuitting = true
-
-  shutdownBackend().finally(() => {
-    app.exit(0)
-  })
-})
-
-// Will-quit: last-resort safety net.  If the app reaches this point with
-// the backend still running (e.g. before-quit wasn't invoked on macOS,
-// or the async shutdown hangs), force-kill the process tree immediately.
-app.on('will-quit', () => {
-  if (externalBackend) return
-
-  if (backendProcess && !backendProcess.killed) {
-    console.log('[lifecycle] will-quit: force-killing backend as last resort')
-    const pid = backendProcess.pid
-    backendProcess = null
-    if (pid) {
-      if (process.platform === 'win32') {
-        execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 3000 }, () => {})
+      if (alreadyRunning) {
+        externalBackend = true
+        console.log('[lifecycle] Detected external backend — skipping spawn')
       } else {
-        try { process.kill(pid, 'SIGKILL') } catch { /* already dead */ }
+        startBackend().catch((err) => {
+          console.error('[lifecycle] Backend startup error:', err)
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('backend:down')
+          }
+        })
       }
     }
-  }
-})
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
+      }
+    })
+  })
+
+  // Window-all-closed: on non-macOS, tell the app to quit (which triggers
+  // before-quit → backend shutdown → exit).
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit()
+    }
+  })
+
+  // Before-quit: prevent the default quit so we can shut down the backend
+  // asynchronously first.  After cleanup, call app.exit(0) which skips the
+  // quit events and terminates immediately.
+  app.on('before-quit', (event) => {
+    if (driveWatcherInterval) {
+      clearInterval(driveWatcherInterval)
+      driveWatcherInterval = null
+    }
+    if (isQuitting) return
+    event.preventDefault()
+    isQuitting = true
+
+    shutdownBackend().finally(() => {
+      app.exit(0)
+    })
+  })
+
+  // Will-quit: last-resort safety net.  If the app reaches this point with
+  // the backend still running (e.g. before-quit wasn't invoked on macOS,
+  // or the async shutdown hangs), force-kill the process tree immediately.
+  app.on('will-quit', () => {
+    if (externalBackend) return
+
+    if (backendProcess && !backendProcess.killed) {
+      console.log('[lifecycle] will-quit: force-killing backend as last resort')
+      const pid = backendProcess.pid
+      backendProcess = null
+      if (pid) {
+        if (process.platform === 'win32') {
+          execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 3000 }, () => {})
+        } else {
+          try { process.kill(pid, 'SIGKILL') } catch { /* already dead */ }
+        }
+      }
+    }
+  })
+}
