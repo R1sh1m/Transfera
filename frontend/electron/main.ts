@@ -421,7 +421,7 @@ function createWindow(): void {
   if (isDev) {
     mainWindow.loadURL(VITE_DEV_SERVER)
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+    mainWindow.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'))
   }
 
   mainWindow.once('ready-to-show', () => {
