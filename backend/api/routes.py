@@ -203,12 +203,33 @@ def _cleanup_session_state(session_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Health
+# Health & Lifecycle
 # ---------------------------------------------------------------------------
 @router.get("/health")
 async def health_check() -> dict:
     """Return service health status for frontend polling and startup detection."""
     return {"status": "ok", "version": "2.0"}
+
+
+@router.post("/shutdown")
+async def shutdown_endpoint(background_tasks: BackgroundTasks) -> dict:
+    """Cooperatively shut down the application after returning the response."""
+    # Close ExifTool session immediately to release resources
+    try:
+        from backend.engines.metadata_extractor import _exiftool_session
+        _exiftool_session.close()
+    except Exception:
+        pass
+
+    def kill_self():
+        import time
+        import os
+        import signal
+        time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    background_tasks.add_task(kill_self)
+    return {"status": "shutting down"}
 
 
 # ---------------------------------------------------------------------------
@@ -1579,11 +1600,20 @@ async def _phase_execute_batches(
         async with session_scope() as session:
             ts = await session.get(TransferSession, session_id)
             dest_root = Path(ts.dest_root) if ts else CACHE_DIR
+            move_mode = (ts.transfer_mode == "move") if ts else False
 
         async def _hop2_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
             await ws_events.emit_hop2_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
 
-        imported = await import_batch(batch.id, dest_root=dest_root, cache_dir=CACHE_DIR, on_file_progress=_hop2_progress_cb, cancel_event=cancel_event, session_id=session_id)
+        imported = await import_batch(
+            batch.id,
+            dest_root=dest_root,
+            cache_dir=CACHE_DIR,
+            move_mode=move_mode,
+            on_file_progress=_hop2_progress_cb,
+            cancel_event=cancel_event,
+            session_id=session_id,
+        )
         await ws_events.emit_hop2_complete(session_id, batch.id, imported)
         await ws_events.emit_batch_complete(session_id, batch.id, batch.batch_number, "completed")
 

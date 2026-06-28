@@ -5,7 +5,9 @@ import { CheckCircle, AlertTriangle, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import ErrorBoundary from './ErrorBoundary'
 
-const API_BASE = window.location.origin || 'http://127.0.0.1:47821'
+const API_BASE = !window.location.origin || window.location.origin.startsWith('file://')
+  ? 'http://127.0.0.1:47821'
+  : window.location.origin
 const THUMBNAIL_SIZE = 200
 const GRID_COLUMNS = 4
 // Raised from 6 → 12 to saturate the parallel thumbnail worker pool on the backend.

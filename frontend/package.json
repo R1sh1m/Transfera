@@ -88,6 +88,14 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "build",
+        "to": ".",
+        "filter": [
+          "icon.ico",
+          "icon.png"
+        ]
       }
     ],
     "win": {

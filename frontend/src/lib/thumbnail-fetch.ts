@@ -3,6 +3,8 @@
 // Module-level negative cache to prevent endless 404 retry loops.
 // ---------------------------------------------------------------------------
 
+import { API_BASE_URL } from './api-client'
+
 const _thumbFailCache = new Map<number, number>()
 const THUMB_RETRY_DELAY = 60_000
 
@@ -34,7 +36,7 @@ export async function fetchThumbnail(
 
   try {
     const t = updatedAt ? new Date(updatedAt).getTime() : ''
-    const url = `/api/media/${mediaId}/thumbnail${t ? `?t=${t}` : ''}`
+    const url = `${API_BASE_URL}/api/media/${mediaId}/thumbnail${t ? `?t=${t}` : ''}`
     const res = await fetch(url, { signal: activeSignal })
     if (res.status === 404 || res.status === 204) return null
     if (!res.ok) {

@@ -6,9 +6,11 @@
 
 import axios from 'axios'
 
-// In packaged Electron (file:// protocol), window.location.origin is null.
+// In packaged Electron (file:// protocol), window.location.origin resolves to 'file://'.
 // Fall back to direct backend connection on port 47821.
-const API_BASE_URL = window.location.origin || 'http://127.0.0.1:47821'
+export const API_BASE_URL = !window.location.origin || window.location.origin.startsWith('file://')
+  ? 'http://127.0.0.1:47821'
+  : window.location.origin
 
 // Augment Axios config to support our retry flag
 declare module 'axios' {

@@ -670,6 +670,8 @@ async def _unlink_source(item: MediaItem) -> None:
                 lockdown.close()
         except Exception as exc:
             logger.warning("Failed to unlink iOS source %s: %s", item.source_path, exc)
+    elif item.source_path.startswith("wpd://"):
+        logger.warning("WPD device sources do not support file deletion (Move Mode is read-only for WPD): %s", item.source_path)
     else:
         src = Path(item.source_path).resolve()
         try:

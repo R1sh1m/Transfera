@@ -353,7 +353,9 @@ export default function App() {
 
         // Fetch session info to determine the right destination
         try {
-          const BASE_URL = window.location.origin || 'http://127.0.0.1:47821'
+          const BASE_URL = !window.location.origin || window.location.origin.startsWith('file://')
+            ? 'http://127.0.0.1:47821'
+            : window.location.origin
           const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`)
           if (!res.ok) throw new Error('Failed to fetch session')
           const session = await res.json()

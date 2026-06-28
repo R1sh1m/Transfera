@@ -32,6 +32,7 @@ function suppressStartupErrors(proxy: any) {
 }
 
 export default defineConfig({
+  base: './',
   plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
