@@ -222,9 +222,9 @@ async def shutdown_endpoint(background_tasks: BackgroundTasks) -> dict:
         pass
 
     def kill_self():
-        import time
         import os
         import signal
+        import time
         time.sleep(0.5)
         os.kill(os.getpid(), signal.SIGTERM)
 
