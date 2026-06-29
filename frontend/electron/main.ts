@@ -291,10 +291,15 @@ async function startBackend(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Icon resolution — platform-aware, works in both dev and packaged builds.
 // ---------------------------------------------------------------------------
-function resolveIconPath(): string {
-  const ext = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
-  return path.join(__dirname, '..', '..', 'build', ext)
+function resolveIconPath(forcePng = false): string {
+  const ext = (process.platform === 'win32' && !forcePng) ? 'icon.ico' : 'icon.png'
+  if (isDev) {
+    const projectRoot = path.resolve(__dirname, '..', '..', '..')
+    return path.join(projectRoot, 'frontend', 'build', ext)
+  }
+  return path.join(process.resourcesPath, ext)
 }
+
 
 // ---------------------------------------------------------------------------
 // System tray
@@ -790,7 +795,7 @@ const gotTheLock = app.requestSingleInstanceLock()
 
 if (!gotTheLock) {
   console.log('[lifecycle] Another instance of Transfera is already running. Quitting.')
-  app.quit()
+  app.exit(0)
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
