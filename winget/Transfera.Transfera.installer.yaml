@@ -6,7 +6,7 @@ Installers:
   - Architecture: x64
     InstallerLocale: en-US
     InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.4.0/Transfera-Setup-2.4.0.exe
-    InstallerSha256: 0f74b5c4ac74a282fc48b890e44836111aaf6437549dc7d499b8777176c8eba7
+    InstallerSha256: b03e17494ef1359e7c8dfe4461e1e83d80e075b369a729ef4cc19c633fb174cd
     InstallerType: nullsoft
     Scope: user
     UpgradeBehavior: install
