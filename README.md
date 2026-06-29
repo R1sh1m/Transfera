@@ -70,32 +70,28 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ---
 
-## Download & Installation 
+## Download & Installation
 
-The easiest way to use Transfera on Windows is to download one of the pre-built packages or install it directly using WinGet.
+The easiest way to run Transfera on Windows is to download one of our pre-built releases.
 
-### Option 1: Install via WinGet (Coming Soon)
-Transfera has been submitted to the Windows Package Manager. Once the PR is merged, you will be able to install it directly from PowerShell or Command Prompt:
-```cmd
-winget install Transfera.Transfera
-```
-
-### Option 2: Standalone Installer
+### Option 1: Portable ZIP (Recommended - No Installation)
+For a lightweight, zero-installation setup:
 1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**.
-2. Download the latest `Transfera-Setup-X.Y.Z.exe` installer.
-3. Run the installer to install the application on your computer.
-4. Launch **Transfera** from your desktop or Start Menu.
+2. Download `Transfera-Portable-X.Y.Z.zip`.
+3. Extract the folder and run `Transfera.exe`.
+4. **SmartScreen Bypass:** On first launch, Windows SmartScreen will show a warning because the binary is compiled locally. Click **"More info"** and then **"Run anyway"**. Since this build does not install files to your system or request admin permissions, it is highly secure and fast.
 
-### Option 3: Portable Build
-If you prefer not to install the application, download the standalone `Transfera-Portable-X.Y.Z.exe` from the releases page. Double-click it to run immediately.
+### Option 2: Desktop Installer (Zero Warnings)
+If you prefer a standard desktop installation with start menu shortcuts and **zero security warnings or blocks** during setup:
+1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**.
+2. Download the installer package containing:
+   - `Transfera-Setup-X.Y.Z.exe`
+   - `transfera-release.cer`
+   - `trust-and-install.bat`
+3. Extract the files to a local folder.
+4. Right-click `trust-and-install.bat` and select **"Run as administrator"**.
+5. The script will automatically import the certificate to trust the developer's signature locally and trigger the setup installer. The installation will complete with no SmartScreen warnings.
 
-> [!WARNING]
-> **Windows Defender SmartScreen Warning**  
-> Transfera has applied for free code signing via SignPath Foundation. Once approved, the installer will be signed and this warning will no longer appear. Until then, click **"More info"** then **"Run anyway"** to proceed. The binary is completely safe, open source, and verified by our CI/CD pipeline.
-
-<!-- TODO: Uncomment once SignPath signing is approved
-Windows release binaries are code signed by SignPath Foundation, a nonprofit that provides free Authenticode signing for qualifying open source projects. The certificate is issued to "SignPath Foundation". You can verify the signature by right clicking the installer, selecting Properties, and opening the Digital Signatures tab.
--->
 
 ---
 
@@ -219,19 +215,32 @@ The full dev stack runs two processes:
 
 ---
 
-### Building the Standalone Installer
+### Packaging Releases (Developer Guide)
 
-To produce a self-contained, signed or unsigned Windows installer (`.exe`) that packages the Python backend, React frontend, and Electron shell:
+To produce the portable distribution and signed setup installer:
 
 1. Ensure the development virtual environment has been created (run `python run.py` at least once first).
-2. Run the build script in the `frontend` folder:
+2. To build the **Portable ZIP**:
    ```powershell
    cd frontend
-   npm run electron:build
+   npm run electron:build:dir
    ```
-3. The packaged results will be written to:
-   - `frontend/release/Transfera-Setup-[version].exe` (NSIS installer)
-   - `frontend/release/win-unpacked/` (Portable build directory)
+   Compress the resulting directory `frontend/release/win-unpacked/` into a `.zip` archive.
+
+3. To build the **Self-Signed Installer**:
+   - Generate a release certificate (run once as Administrator):
+     ```powershell
+     cd frontend
+     .\scripts\generate-release-cert.ps1
+     ```
+   - Compile and sign the setup installer:
+     ```powershell
+     $env:CSC_LINK = "release-certs\transfera-release.pfx"
+     $env:CSC_KEY_PASSWORD = "transfera-release-pwd"
+     npm run electron:build
+     ```
+   - Package `Transfera-Setup-[version].exe` together with `release-certs/transfera-release.cer` and `scripts/trust-and-install.bat`.
+
 
 
 
