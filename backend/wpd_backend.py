@@ -17,9 +17,9 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
-import sys
 from typing import Any
 
 creationflags = 0x08000000 if sys.platform == "win32" else 0

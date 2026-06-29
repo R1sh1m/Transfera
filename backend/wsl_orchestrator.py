@@ -15,11 +15,11 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-import sys
 
 from backend.config import DATA_DIR
 

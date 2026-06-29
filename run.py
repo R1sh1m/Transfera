@@ -310,7 +310,7 @@ def _check_node() -> None:
         )
         if result.returncode != 0:
             raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
-        
+
         version_str = result.stdout.strip()
         cleaned = version_str.lstrip("v")
         if cleaned:
@@ -412,10 +412,7 @@ def _native_is_stale() -> bool:
     if not WPD_HELPER_EXE.is_file():
         return True
     exe_mtime = WPD_HELPER_EXE.stat().st_mtime
-    for src in _native_src_files():
-        if src.stat().st_mtime > exe_mtime:
-            return True
-    return False
+    return any(src.stat().st_mtime > exe_mtime for src in _native_src_files())
 
 
 def _build_native() -> bool:
