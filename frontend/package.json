@@ -66,7 +66,9 @@
     },
     "files": [
       "dist/**/*",
-      "electron/dist-electron/**/*"
+      "electron/dist-electron/**/*",
+      "build/icon.ico",
+      "build/icon.png"
     ],
     "extraResources": [
       {
@@ -77,6 +79,7 @@
           "requirements.txt",
           "config.py",
           "bin/wpd_helper.exe",
+          "bin/exiftool/exiftool.exe",
           "!__pycache__/**",
           "!*.pyc",
           "!data/**"
@@ -120,11 +123,11 @@
       ]
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
       "guid": "04ea60df-565b-5136-ab3e-2fae205511bd",
       "allowElevation": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Transfera",
@@ -132,10 +135,20 @@
       "uninstallerIcon": "build/icon.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}",
       "warningsAsErrors": false,
-      "runAfterFinish": false
+      "runAfterFinish": true
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}.${ext}"
+    },
+    "appx": {
+      "identityName": "Transfera.Transfera",
+      "publisher": "CN=YOUR-PUBLISHER-IDENTITY-HERE",
+      "publisherDisplayName": "Transfera Team",
+      "applicationId": "Transfera",
+      "displayName": "Transfera",
+      "languages": [
+        "en-US"
+      ]
     },
     "linux": {
       "target": [

@@ -170,7 +170,7 @@ async function cleanupOrphanedBackend(): Promise<void> {
         execFile(
           'powershell',
           [
-            '-NoProfile', '-NonInteractive', '-Command',
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command',
             `Get-NetTCPConnection -LocalPort ${BACKEND_PORT} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object { taskkill /pid $_ /T /F }`,
           ],
           { timeout: 10000 },
@@ -293,22 +293,7 @@ async function startBackend(): Promise<void> {
 // ---------------------------------------------------------------------------
 function resolveIconPath(): string {
   const ext = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
-  const candidates: string[] = []
-
-  if (app.isPackaged) {
-    candidates.push(path.join(process.resourcesPath, 'build', ext))
-    candidates.push(path.join(process.resourcesPath, ext))
-  } else {
-    candidates.push(path.join(__dirname, '..', 'build', ext))
-    candidates.push(path.join(__dirname, '..', '..', 'build', ext))
-  }
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate
-  }
-
-  console.warn('[icon] Could not resolve icon, tried:', candidates)
-  return path.join(__dirname, '..', 'build', ext)
+  return path.join(__dirname, '..', '..', 'build', ext)
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +414,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on('before-input-event', (_event, input) => {
-    if (input.key === 'F12' && input.type === 'keyDown') {
+    if (isDev && input.key === 'F12' && input.type === 'keyDown') {
       mainWindow?.webContents.toggleDevTools()
     }
     // Ctrl+Q to quit the app permanently
@@ -591,7 +576,7 @@ function registerIPC(): void {
       return new Promise<{ success: boolean; exitCode: number | null; error?: string }>((resolve) => {
         execFile(
           'powershell',
-          ['-NoProfile', '-NonInteractive', '-Command', psCommand],
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', psCommand],
           { timeout: 300_000 },
           (error, stdout, stderr) => {
             if (error) {
@@ -655,7 +640,7 @@ function registerIPC(): void {
       return new Promise<{ success: boolean; exitCode: number | null; error?: string }>((resolve) => {
         execFile(
           'powershell',
-          ['-NoProfile', '-NonInteractive', '-Command', psCommand],
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', psCommand],
           { timeout: 300_000 },
           (error, stdout, stderr) => {
             if (error) {
@@ -701,7 +686,7 @@ function registerIPC(): void {
         return new Promise((resolve) => {
           execFile(
             'powershell',
-            ['-NoProfile', '-NonInteractive', '-Command', psCommand],
+            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', psCommand],
             { timeout },
             (error, stdout, stderr) => {
               if (error) {
@@ -753,7 +738,7 @@ function registerIPC(): void {
     return new Promise<{ available: boolean; details: string }>((resolve) => {
       execFile(
         'powershell',
-        ['-NoProfile', '-NonInteractive', '-Command', 'Get-ComputerInfo | Select-Object -ExpandProperty HyperVRequirementVirtualizationFirmwareEnabled'],
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', 'Get-ComputerInfo | Select-Object -ExpandProperty HyperVRequirementVirtualizationFirmwareEnabled'],
         { timeout: 30_000 },
         (error, stdout, stderr) => {
           if (error) {

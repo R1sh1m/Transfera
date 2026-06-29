@@ -41,6 +41,7 @@ CACHE_DIR: Path = DATA_DIR / "cache"
 LOG_DIR: Path = DATA_DIR / "logs"
 EXPORT_DIR: Path = DATA_DIR / "exports"
 EXIFTOOL_DIR: Path = DATA_DIR / "bin" / "exiftool"
+PACKAGED_EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
 WPD_HELPER: Path = BACKEND_ROOT / "bin" / "wpd_helper.exe"
 
 # Ensure runtime directories exist at import time.

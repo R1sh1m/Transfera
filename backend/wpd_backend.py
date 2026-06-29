@@ -19,7 +19,10 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+import sys
 from typing import Any
+
+creationflags = 0x08000000 if sys.platform == "win32" else 0
 
 from backend.ios_device import DeviceFileInfo, DeviceStatus, IOSDevice
 
@@ -82,6 +85,7 @@ class _WpdFileReader:
             "--path", self._path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
         )
         return self
 
@@ -384,6 +388,7 @@ class WpdBackend:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                creationflags=creationflags,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:

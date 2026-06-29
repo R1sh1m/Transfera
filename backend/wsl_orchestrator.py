@@ -19,6 +19,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+import sys
+
+from backend.config import DATA_DIR
+
+creationflags = 0x08000000 if sys.platform == "win32" else 0
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,7 @@ STATE_DIR = Path.home() / ".transfera"
 STATE_FILE = STATE_DIR / "tier2_state.json"
 BRIDGE_SCRIPT_NAME = "wsl_bridge.py"
 BRIDGE_INSTALL_PATH = "/opt/transfera-bridge"
-DISTRO_SAVE_PATH = Path(__file__).resolve().parent.parent / "data" / "wsl_distro.txt"
+DISTRO_SAVE_PATH = DATA_DIR / "wsl_distro.txt"
 
 # ---------------------------------------------------------------------------
 # Distro name resolution
@@ -66,6 +71,7 @@ def get_transfera_wsl_distro() -> str | None:
             ["wsl", "--list", "--quiet"],
             capture_output=True,
             timeout=10,
+            creationflags=creationflags,
         )
         # wsl --list --quiet outputs plain distro names in UTF-16LE
         output = result.stdout.decode("utf-16-le", errors="replace")
@@ -84,6 +90,7 @@ def get_transfera_wsl_distro() -> str | None:
                 ["wsl", "--list", "--verbose"],
                 capture_output=True,
                 timeout=10,
+                creationflags=creationflags,
             )
             output = result.stdout.decode("utf-16-le", errors="replace")
             distros = []
@@ -374,6 +381,7 @@ async def _run_cmd(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        creationflags=creationflags,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -844,6 +852,7 @@ class WSLOrchestrator:
                 "python3", bridge_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                creationflags=creationflags,
             )
             logger.info("Bridge process started (pid=%s)", proc.pid)
             # Poll generously — first-time cold start inside WSL can be slow

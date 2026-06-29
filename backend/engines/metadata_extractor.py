@@ -3,9 +3,10 @@ Transfera v2 — Metadata Extractor
 ExifTool subprocess integration with automated bootstrapper and filesystem fallback.
 
 Bootstrapper priority:
-  1. Local app-relative binary (backend/bin/exiftool/exiftool.exe)
-  2. Global system PATH lookup
-  3. Auto-download from official distribution (Windows only, with full error handling)
+  1. Packaged read-only app resources (backend/bin/exiftool/exiftool.exe)
+  2. Writable user AppData local storage (AppData/Roaming/.../bin/exiftool/exiftool.exe)
+  3. Global system PATH lookup
+  4. Auto-download from official distribution (Windows only, with full error handling)
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from backend.config import EXIFTOOL_DIR
+from backend.config import EXIFTOOL_DIR, PACKAGED_EXIFTOOL_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _EXIFTOOL_EXE_NAME = "exiftool.exe" if sys.platform == "win32" else "exiftool"
 _LOCAL_EXIFTOOL: Path = EXIFTOOL_DIR / _EXIFTOOL_EXE_NAME
+_PACKAGED_EXIFTOOL: Path = PACKAGED_EXIFTOOL_DIR / _EXIFTOOL_EXE_NAME
 
 # Official ExifTool Windows zip download page
 _EXIFTOOL_HOME = "https://exiftool.org"
@@ -126,11 +128,12 @@ _bootstrap_done = False
 
 def _bootstrap_exiftool() -> str | None:
     """
-    Resolve the ExifTool binary path using a three-tier fallback:
+    Resolve the ExifTool binary path using a four-tier fallback:
 
-      1. Local app-relative directory (backend/bin/exiftool/)
-      2. System PATH via shutil.which()
-      3. Auto-download from official source (Windows only)
+      1. Packaged read-only app resources (backend/bin/exiftool/)
+      2. Writable user AppData local storage (AppData/Roaming/.../bin/exiftool/)
+      3. System PATH via shutil.which()
+      4. Auto-download from official source (Windows only)
 
     Returns the absolute path string on success, or None if unavailable.
     """
@@ -139,13 +142,19 @@ def _bootstrap_exiftool() -> str | None:
         return _resolved_exiftool
     _bootstrap_done = True
 
-    # Tier 1: Local binary
+    # Tier 1: Packaged binary (prioritized for Microsoft Store and offline support)
+    if _PACKAGED_EXIFTOOL.is_file():
+        logger.info("ExifTool found in package resources at %s", _PACKAGED_EXIFTOOL)
+        _resolved_exiftool = str(_PACKAGED_EXIFTOOL)
+        return _resolved_exiftool
+
+    # Tier 2: Writable AppData local binary (fallback for non-Store download channel)
     if _LOCAL_EXIFTOOL.is_file():
-        logger.info("ExifTool found locally at %s", _LOCAL_EXIFTOOL)
+        logger.info("ExifTool found in AppData local storage at %s", _LOCAL_EXIFTOOL)
         _resolved_exiftool = str(_LOCAL_EXIFTOOL)
         return _resolved_exiftool
 
-    # Tier 2: System PATH
+    # Tier 3: System PATH
     path_loc = shutil.which("exiftool")
     if path_loc:
         logger.info("ExifTool found on system PATH at %s", path_loc)
@@ -153,7 +162,7 @@ def _bootstrap_exiftool() -> str | None:
         return _resolved_exiftool
 
     logger.info(
-        "ExifTool not found locally or on PATH -- attempting automated download"
+        "ExifTool not found in package, AppData, or on PATH -- attempting automated download"
     )
 
     # Tier 3: Auto-download (Windows only)

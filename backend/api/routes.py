@@ -724,9 +724,11 @@ async def install_pymobiledevice3() -> dict:
     ``pymobiledevice3_installable`` flag.
     """
     try:
+        creationflags = 0x08000000 if sys.platform == "win32" else 0
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "pip", "install", "pymobiledevice3",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=creationflags,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode == 0:
