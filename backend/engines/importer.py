@@ -18,8 +18,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
-import aiofiles
-
 from backend.config import BATCH_SIZE, PARTIAL_SUFFIX
 from backend.database.manager import session_scope
 from backend.database.models import (

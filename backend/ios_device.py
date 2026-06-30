@@ -194,7 +194,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                 )
             finally:
                 lockdown.close()
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             logger.warning("Device %s timed out during lockdown — device may be locked", serial)
             return IOSDevice(
                 serial=serial,

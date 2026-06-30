@@ -518,9 +518,7 @@ class WSLOrchestrator:
                 "(Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent -or (Get-CimInstance -ClassName Win32_Processor).VirtualizationFirmwareEnabled",
                 timeout=10,
             )
-            if rc == 0 and "true" in out.lower():
-                return True
-            return False
+            return rc == 0 and "true" in out.lower()
         except Exception:
             return False
 

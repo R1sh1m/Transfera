@@ -9,6 +9,7 @@ Supports both raw path strings (legacy) and SourceRef typed references.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections import defaultdict
