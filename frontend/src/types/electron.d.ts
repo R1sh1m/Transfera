@@ -85,6 +85,11 @@ export interface ElectronAPI {
 
   // Removable drive detection — fires when a new USB drive is connected
   onNewRemovableDrive: (callback: (data: { driveLetter: string; volumeName: string | null }) => void) => () => void
+
+  // Setup / Python installation
+  checkPythonInstalled: () => Promise<{ installed: boolean }>
+  installPython: () => Promise<void>
+  onInstallProgress: (callback: (data: { step: string; percent: number; error?: string }) => void) => () => void
 }
 
 declare global {

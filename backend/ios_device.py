@@ -158,13 +158,12 @@ async def list_ios_devices() -> list[IOSDevice]:
 
     logger.info("usbmux found %d connected device(s)", len(mux_devices))
 
-    devices: list[IOSDevice] = []
-    for mux_dev in mux_devices:
+    async def _get_device_info_task(mux_dev) -> IOSDevice:
         serial = mux_dev.serial
         try:
             lockdown = await asyncio.wait_for(
                 asyncio.to_thread(create_using_usbmux, serial=serial, autopair=False),
-                timeout=5.0,
+                timeout=2.0,
             )
             try:
                 info = lockdown.short_info
@@ -185,50 +184,52 @@ async def list_ios_devices() -> list[IOSDevice]:
                     "Device detected: %s (%s) serial=%s status=%s ios=%s",
                     device_name, model, serial, status.value, ios_version,
                 )
-                devices.append(IOSDevice(
+                return IOSDevice(
                     serial=serial,
                     name=device_name,
                     model=model,
                     ios_version=ios_version,
                     connection_type=connection_type,
                     status=status,
-                ))
+                )
             finally:
                 lockdown.close()
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             logger.warning("Device %s timed out during lockdown — device may be locked", serial)
-            devices.append(IOSDevice(
+            return IOSDevice(
                 serial=serial,
                 name="Unknown Device",
                 model="iPhone",
                 ios_version="unknown",
                 connection_type="USB",
                 status=DeviceStatus.LOCKED,
-            ))
+            )
         except Exception as exc:
             exc_str = str(exc).lower()
             if "not paired" in exc_str or "trust" in exc_str:
                 logger.info("Device %s not paired — requires Trust This Computer", serial)
-                devices.append(IOSDevice(
+                return IOSDevice(
                     serial=serial,
                     name="Unknown Device",
                     model="iPhone",
                     ios_version="unknown",
                     connection_type="USB",
                     status=DeviceStatus.NOT_TRUSTED,
-                ))
+                )
             else:
                 logger.warning("Failed to get info for device %s: %s", serial, exc)
-                devices.append(IOSDevice(
+                return IOSDevice(
                     serial=serial,
                     name="Unknown Device",
                     model="iPhone",
                     ios_version="unknown",
                     connection_type="USB",
                     status=DeviceStatus.ERROR,
-                ))
+                )
 
-    return devices
+    tasks = [_get_device_info_task(mux_dev) for mux_dev in mux_devices]
+    devices = await asyncio.gather(*tasks)
+    return list(devices)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +252,7 @@ def check_driver_status() -> str:
     import socket
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2.0)
+        sock.settimeout(0.5)
         # usbmuxd on Windows listens on 127.0.0.1:27015
         sock.connect(("127.0.0.1", 27015))
         sock.close()

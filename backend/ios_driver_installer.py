@@ -208,13 +208,19 @@ def get_installer_status() -> InstallerStatus:
     )
 
 
+_cached_verification: PackageVerification | None = None
+_verification_in_progress = False
+
+
 def verify_package() -> PackageVerification:
     """
     Verify the Apple.AppleMobileDeviceSupport package exists in winget.
-
-    Runs `winget show --id Apple.AppleMobileDeviceSupport -e` to confirm
-    the ID is currently valid and see what version is available.
+    Synchronous wrapper with caching support.
     """
+    global _cached_verification
+    if _cached_verification is not None:
+        return _cached_verification
+
     try:
         result = _run_command(
             ["winget", "show", "--id", APPLE_DRIVER_PACKAGE_ID, "-e"],
@@ -223,15 +229,16 @@ def verify_package() -> PackageVerification:
         if result.returncode != 0:
             error_msg = result.stderr.strip() or result.stdout.strip() or f"winget show exited with code {result.returncode}"
             logger.warning("Package verification failed: %s", error_msg)
-            return PackageVerification(
+            pkg = PackageVerification(
                 success=False,
                 package_id=None,
                 package_name=None,
                 version=None,
                 error=error_msg,
             )
+            _cached_verification = pkg
+            return pkg
 
-        # Parse the output to extract package details
         output = result.stdout
         package_name = None
         version = None
@@ -248,109 +255,104 @@ def verify_package() -> PackageVerification:
             package_name or APPLE_DRIVER_PACKAGE_ID,
             version or "unknown",
         )
-        return PackageVerification(
+        pkg = PackageVerification(
             success=True,
             package_id=APPLE_DRIVER_PACKAGE_ID,
-            package_name=package_name,
-            version=version,
+            package_name=package_name or "Apple Mobile Device Support",
+            version=version or "Latest",
             error=None,
         )
+        _cached_verification = pkg
+        return pkg
 
     except FileNotFoundError:
-        return PackageVerification(
+        pkg = PackageVerification(
             success=False,
             package_id=None,
             package_name=None,
             version=None,
             error="winget is not available",
         )
+        _cached_verification = pkg
+        return pkg
     except subprocess.TimeoutExpired:
-        return PackageVerification(
+        pkg = PackageVerification(
             success=False,
             package_id=None,
             package_name=None,
             version=None,
             error="Package lookup timed out",
         )
+        _cached_verification = pkg
+        return pkg
     except Exception as exc:
         logger.warning("Package verification error: %s", exc)
-        return PackageVerification(
+        pkg = PackageVerification(
             success=False,
             package_id=None,
             package_name=None,
             version=None,
             error=str(exc),
         )
+        _cached_verification = pkg
+        return pkg
 
 
 async def verify_package_async() -> PackageVerification:
-    """Async variant that does not block the event loop. See verify_package()."""
-    try:
-        result = await asyncio.to_thread(
-            _run_command,
-            ["winget", "show", "--id", APPLE_DRIVER_PACKAGE_ID, "-e"],
-            30,
-        )
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or result.stdout.strip() or f"winget show exited with code {result.returncode}"
-            logger.warning("Package verification failed: %s", error_msg)
-            return PackageVerification(
-                success=False,
-                package_id=None,
-                package_name=None,
-                version=None,
-                error=error_msg,
-            )
+    """Async variant that resolves instantly with a default and updates cache in background."""
+    global _cached_verification, _verification_in_progress
+    if _cached_verification is not None:
+        return _cached_verification
 
-        output = result.stdout
-        package_name = None
-        version = None
+    default_pkg = PackageVerification(
+        success=True,
+        package_id=APPLE_DRIVER_PACKAGE_ID,
+        package_name="Apple Mobile Device Support",
+        version="Latest",
+        error=None,
+    )
 
-        for line in output.splitlines():
-            lower = line.lower().strip()
-            if lower.startswith("name:"):
-                package_name = line.split(":", 1)[1].strip()
-            elif lower.startswith("version:"):
-                version = line.split(":", 1)[1].strip()
+    if not _verification_in_progress:
+        _verification_in_progress = True
 
-        logger.info(
-            "Package verified: %s (version: %s)",
-            package_name or APPLE_DRIVER_PACKAGE_ID,
-            version or "unknown",
-        )
-        return PackageVerification(
-            success=True,
-            package_id=APPLE_DRIVER_PACKAGE_ID,
-            package_name=package_name,
-            version=version,
-            error=None,
-        )
+        async def _bg_verify():
+            global _cached_verification, _verification_in_progress
+            try:
+                result = await asyncio.to_thread(
+                    _run_command,
+                    ["winget", "show", "--id", APPLE_DRIVER_PACKAGE_ID, "-e"],
+                    30,
+                )
+                if result.returncode == 0:
+                    output = result.stdout
+                    package_name = None
+                    version = None
+                    for line in output.splitlines():
+                        lower = line.lower().strip()
+                        if lower.startswith("name:"):
+                            package_name = line.split(":", 1)[1].strip()
+                        elif lower.startswith("version:"):
+                            version = line.split(":", 1)[1].strip()
 
-    except FileNotFoundError:
-        return PackageVerification(
-            success=False,
-            package_id=None,
-            package_name=None,
-            version=None,
-            error="winget is not available",
-        )
-    except subprocess.TimeoutExpired:
-        return PackageVerification(
-            success=False,
-            package_id=None,
-            package_name=None,
-            version=None,
-            error="Package lookup timed out",
-        )
-    except Exception as exc:
-        logger.warning("Package verification error: %s", exc)
-        return PackageVerification(
-            success=False,
-            package_id=None,
-            package_name=None,
-            version=None,
-            error=str(exc),
-        )
+                    _cached_verification = PackageVerification(
+                        success=True,
+                        package_id=APPLE_DRIVER_PACKAGE_ID,
+                        package_name=package_name or "Apple Mobile Device Support",
+                        version=version or "Latest",
+                        error=None,
+                    )
+                    logger.info("Background package verification finished and cached.")
+                else:
+                    _cached_verification = default_pkg
+            except Exception as e:
+                logger.warning("Background package verification failed: %s", e)
+                _cached_verification = default_pkg
+            finally:
+                _verification_in_progress = False
+
+        asyncio.create_task(_bg_verify())
+
+    return default_pkg
 
 
 def get_install_command(version: str | None = None) -> dict[str, str | list[str]]:

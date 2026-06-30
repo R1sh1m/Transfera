@@ -80,6 +80,23 @@ def compute_archive_path(
 # ---------------------------------------------------------------------------
 # Streaming copy + hash (cache -> destination)
 # ---------------------------------------------------------------------------
+def _copy_and_hash_sync(src: Path, partial: Path, chunk_size: int) -> str:
+    if _BLAKE3_AVAILABLE:
+        hasher = _blake3.blake3()  # type: ignore[union-attr]
+    else:
+        hasher = hashlib.sha256()
+
+    with open(src, "rb") as src_fh, open(partial, "wb") as dst_fh:
+        while True:
+            chunk = src_fh.read(chunk_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            dst_fh.write(chunk)
+
+    return hasher.hexdigest()
+
+
 async def _copy_cache_to_dest(
     src: Path,
     dst: Path,
@@ -95,20 +112,7 @@ async def _copy_cache_to_dest(
     partial = dst.with_suffix(dst.suffix + PARTIAL_SUFFIX)
     partial.unlink(missing_ok=True)
 
-    if _BLAKE3_AVAILABLE:
-        hasher = _blake3.blake3()  # type: ignore[union-attr]
-    else:
-        hasher = hashlib.sha256()
-
-    async with aiofiles.open(src, "rb") as src_fh, aiofiles.open(partial, "wb") as dst_fh:
-        while True:
-            chunk = await src_fh.read(chunk_size)
-            if not chunk:
-                break
-            hasher.update(chunk)
-            await dst_fh.write(chunk)
-
-    computed = hasher.hexdigest()
+    computed = await asyncio.to_thread(_copy_and_hash_sync, src, partial, chunk_size)
     partial.rename(dst)
     return computed
 
@@ -218,7 +222,7 @@ async def _import_single_item(
 
     # Skip if destination already matches cache_hash
     if dst.is_file() and item.source_hash:
-        if verify_file_hash(dst, item.source_hash):
+        if await asyncio.to_thread(verify_file_hash, dst, item.source_hash):
             logger.debug("Destination already verified: %s", dst.name)
             await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt)
             await cleanup_cache_file(cache_dir, item)
@@ -275,7 +279,7 @@ async def _import_single_item(
         # Post-copy verification: re-read destination from disk
         if item.source_hash:
             try:
-                dest_hash = hash_file(dst)
+                dest_hash = await asyncio.to_thread(hash_file, dst)
             except Exception as exc:
                 if attempt < max_attempts:
                     logger.warning(

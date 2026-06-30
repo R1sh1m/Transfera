@@ -148,7 +148,7 @@ async def _extract_ios_file_date(
     try:
         handle = await asyncio.to_thread(afc.fopen, device_path)
         try:
-            data = await asyncio.to_thread(afc.fread, handle, 256 * 1024)
+            data = await asyncio.to_thread(afc.fread, handle, 64 * 1024)
         finally:
             try:
                 await asyncio.to_thread(afc.fclose, handle)
@@ -383,16 +383,24 @@ async def _walk_ios_directory(
         logger.warning("Failed to browse %s on device %s: %s", path, serial, exc)
         return all_files
 
+    subdirs: list[str] = []
     for entry in entries:
         if entry.is_dir:
             # Recurse into subdirectories (skip "." and "..")
             if entry.name in (".", ".."):
                 continue
-            sub_path = f"{path.rstrip('/')}/{entry.name}"
-            sub_files = await _walk_ios_directory(serial, sub_path)
-            all_files.extend(sub_files)
+            subdirs.append(f"{path.rstrip('/')}/{entry.name}")
         else:
             all_files.append(entry)
+
+    if subdirs:
+        tasks = [_walk_ios_directory(serial, sd) for sd in subdirs]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                logger.warning("Subdirectory walk failed: %s", res)
+            elif res:
+                all_files.extend(res)
 
     return all_files
 

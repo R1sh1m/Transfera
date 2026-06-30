@@ -1,4 +1,5 @@
 import http from 'http'
+import https from 'https'
 import { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, nativeImage } from 'electron'
 import { spawn, execFile, type ChildProcess } from 'child_process'
 import path from 'path'
@@ -30,6 +31,13 @@ let knownRemovableDrives = new Set<string>()
 // ---------------------------------------------------------------------------
 // Backend process management
 // ---------------------------------------------------------------------------
+function isPythonInstalled(): boolean {
+  if (isDev) return true
+  const downloadedPython = path.join(app.getPath('userData'), 'python', 'python.exe')
+  const bundledPython = path.join(process.resourcesPath, 'backend', 'python', 'python.exe')
+  return fs.existsSync(downloadedPython) || fs.existsSync(bundledPython)
+}
+
 function getBackendCommand(): { cmd: string; args: string[] } {
   if (isDev) {
     const projectRoot = path.resolve(__dirname, '..', '..', '..')
@@ -39,6 +47,17 @@ function getBackendCommand(): { cmd: string; args: string[] } {
       args: ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
     }
   }
+
+  // 1. Try downloaded python in userData directory (persists across app updates, always writable)
+  const downloadedPython = path.join(app.getPath('userData'), 'python', 'python.exe')
+  if (fs.existsSync(downloadedPython)) {
+    return {
+      cmd: downloadedPython,
+      args: ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
+    }
+  }
+
+  // 2. Fallback to bundled python in resources
   const backendDir = path.join(process.resourcesPath, 'backend')
   const bundledPython = path.join(backendDir, 'python', 'python.exe')
   const cmd = fs.existsSync(bundledPython) ? bundledPython : path.join(backendDir, 'venv', 'Scripts', 'python.exe')
@@ -434,11 +453,12 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // Intercept close → hide to tray unless actually quitting
+  // Intercept close → quit app and shut down backend
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault()
-      mainWindow?.hide()
+      isQuitting = true
+      shutdownBackend().finally(() => app.exit(0))
     }
   })
 
@@ -447,9 +467,154 @@ function createWindow(): void {
   })
 }
 
-// ---------------------------------------------------------------------------
-// IPC Handlers
-// ---------------------------------------------------------------------------
+function downloadFile(url: string, dest: string, onProgress?: (percent: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest)
+    const request = (targetUrl: string) => {
+      https.get(targetUrl, (response) => {
+        if (
+          response.statusCode === 301 ||
+          response.statusCode === 302 ||
+          response.statusCode === 307 ||
+          response.statusCode === 308
+        ) {
+          const redirectUrl = response.headers.location
+          if (redirectUrl) {
+            request(redirectUrl)
+            return
+          }
+        }
+        if (response.statusCode !== 200) {
+          reject(new Error(`Failed to download: ${response.statusCode}`))
+          return
+        }
+        const totalSize = parseInt(response.headers['content-length'] || '0', 10)
+        let downloaded = 0
+        response.on('data', (chunk) => {
+          downloaded += chunk.length
+          if (totalSize > 0 && onProgress) {
+            onProgress(Math.round((downloaded / totalSize) * 100))
+          }
+        })
+        response.pipe(file)
+        file.on('finish', () => {
+          file.close()
+          resolve()
+        })
+      }).on('error', (err) => {
+        fs.unlink(dest, () => reject(err))
+      })
+    }
+    request(url)
+  })
+}
+
+async function runSetupInstall(event: Electron.IpcMainInvokeEvent): Promise<void> {
+  const sendProgress = (step: string, percent: number, error?: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('setup:install-progress', { step, percent, error })
+    }
+  }
+
+  const userDataDir = app.getPath('userData')
+  const pythonDir = path.join(userDataDir, 'python')
+  const zipPath = path.join(userDataDir, 'python-embed.zip')
+  const getPipPath = path.join(pythonDir, 'get-pip.py')
+
+  try {
+    sendProgress('Creating directories...', 0)
+    if (fs.existsSync(pythonDir)) {
+      fs.rmSync(pythonDir, { recursive: true, force: true })
+    }
+    fs.mkdirSync(pythonDir, { recursive: true })
+
+    sendProgress('Downloading Python runtime...', 5)
+    const pythonUrl = 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip'
+    await downloadFile(pythonUrl, zipPath, (pct) => {
+      sendProgress('Downloading Python runtime...', 5 + Math.round(pct * 0.40)) // 5% -> 45%
+    })
+
+    sendProgress('Extracting Python runtime...', 45)
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        'powershell',
+        [
+          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+          `Expand-Archive -Path '${zipPath}' -DestinationPath '${pythonDir}' -Force`
+        ],
+        { timeout: 60000 },
+        (err) => (err ? reject(err) : resolve())
+      )
+    })
+    
+    if (fs.existsSync(zipPath)) {
+      fs.unlinkSync(zipPath)
+    }
+
+    sendProgress('Configuring Python environment...', 50)
+    const files = fs.readdirSync(pythonDir)
+    const pthFile = files.find(f => f.endsWith('._pth'))
+    if (!pthFile) {
+      throw new Error('Could not find ._pth file in extracted Python directory')
+    }
+    const pthPath = path.join(pythonDir, pthFile)
+    const zipLib = pthFile.replace('._pth', '.zip')
+    const pthContent = `${zipLib}\n.\nsite-packages\n\nimport site\n`
+    fs.writeFileSync(pthPath, pthContent)
+
+    const sitePackagesDir = path.join(pythonDir, 'site-packages')
+    fs.mkdirSync(sitePackagesDir, { recursive: true })
+
+    sendProgress('Downloading package manager (pip)...', 55)
+    const pipUrl = 'https://bootstrap.pypa.io/get-pip.py'
+    await downloadFile(pipUrl, getPipPath, (pct) => {
+      sendProgress('Downloading package manager (pip)...', 55 + Math.round(pct * 0.15)) // 55% -> 70%
+    })
+
+    sendProgress('Bootstrapping pip...', 70)
+    const pythonExe = path.join(pythonDir, 'python.exe')
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        pythonExe,
+        [getPipPath, '--no-warn-script-location'],
+        { timeout: 60000 },
+        (err) => (err ? reject(err) : resolve())
+      )
+    })
+
+    if (fs.existsSync(getPipPath)) {
+      fs.unlinkSync(getPipPath)
+    }
+
+    sendProgress('Installing backend dependencies (pymobiledevice3, fastapi, pillow)...', 75)
+    const requirementsPath = isDev 
+      ? path.resolve(__dirname, '..', '..', '..', 'backend', 'requirements.txt')
+      : path.join(process.resourcesPath, 'backend', 'requirements.txt')
+
+    await new Promise<void>((resolve, reject) => {
+      const pipProc = spawn(pythonExe, ['-m', 'pip', 'install', '--upgrade', '-r', requirementsPath])
+      
+      pipProc.on('error', (err) => reject(err))
+      pipProc.on('exit', (code) => {
+        if (code === 0) {
+          resolve()
+        } else {
+          reject(new Error(`pip install exited with code ${code}`))
+        }
+      })
+    })
+
+    sendProgress('Setup complete! Starting backend...', 95)
+    await startBackend()
+    
+    sendProgress('Completed', 100)
+  } catch (err: any) {
+    console.error('[setup] Installation failed:', err)
+    sendProgress('Failed', 0, err.message || String(err))
+    throw err
+  }
+}
+
 function registerIPC(): void {
   ipcMain.handle('dialog:open', async (_event, options) => {
     if (!mainWindow) return { canceled: true, filePaths: [] }
@@ -770,6 +935,14 @@ function registerIPC(): void {
     app.relaunch({ args: [] })
     app.exit(0)
   })
+
+  ipcMain.handle('setup:check-python', async () => {
+    return { installed: isPythonInstalled() }
+  })
+
+  ipcMain.handle('setup:install-python', async (event) => {
+    return runSetupInstall(event)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -826,12 +999,21 @@ if (!gotTheLock) {
         externalBackend = true
         console.log('[lifecycle] Detected external backend — skipping spawn')
       } else {
-        startBackend().catch((err) => {
-          console.error('[lifecycle] Backend startup error:', err)
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('backend:down')
-          }
-        })
+        if (!isPythonInstalled()) {
+          console.log('[lifecycle] Python runtime not installed. Skipping automatic startup until installation.')
+          setTimeout(() => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('backend:down')
+            }
+          }, 2000)
+        } else {
+          startBackend().catch((err) => {
+            console.error('[lifecycle] Backend startup error:', err)
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('backend:down')
+            }
+          })
+        }
       }
     }
 

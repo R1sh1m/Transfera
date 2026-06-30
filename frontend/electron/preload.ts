@@ -106,4 +106,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('device:new-removable-drive', handler)
     return () => ipcRenderer.removeListener('device:new-removable-drive', handler)
   },
+
+  // Setup / python installer
+  checkPythonInstalled: () => ipcRenderer.invoke('setup:check-python'),
+  installPython: () => ipcRenderer.invoke('setup:install-python'),
+  onInstallProgress: (callback: (data: { step: string; percent: number; error?: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { step: string; percent: number; error?: string }) => callback(data)
+    ipcRenderer.on('setup:install-progress', handler)
+    return () => ipcRenderer.removeListener('setup:install-progress', handler)
+  },
 })

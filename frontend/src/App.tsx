@@ -147,6 +147,7 @@ function TitleBar() {
         <div className="no-drag flex items-center gap-1">
           <button
             onClick={() => window.electronAPI?.minimizeWindow()}
+            title="Minimize to Tray"
             className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
           >
             <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1"/></svg>
@@ -159,7 +160,7 @@ function TitleBar() {
           </button>
           <button
             onClick={() => window.electronAPI?.closeWindow()}
-            title="Close to System Tray"
+            title="Close"
             className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 1L9 9M9 1L1 9"/></svg>
@@ -246,8 +247,55 @@ function PageRouter() {
 function BackendDownScreen() {
   const serverDown = useTransferStore((s) => s.ui.serverDown)
   const [retrying, setRetrying] = useState(false)
+  const [needsSetup, setNeedsSetup] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [installProgress, setInstallProgress] = useState<{ step: string; percent: number; error?: string }>({
+    step: 'Ready to configure',
+    percent: 0,
+  })
+
+  // Check if Python is installed on mount / serverDown status change
+  useEffect(() => {
+    if (serverDown && isElectron && window.electronAPI?.checkPythonInstalled) {
+      window.electronAPI.checkPythonInstalled().then((status: { installed: boolean }) => {
+        if (!status.installed) {
+          setNeedsSetup(true)
+        } else {
+          setNeedsSetup(false)
+        }
+      })
+    }
+  }, [serverDown])
+
+  // Bind install progress listener
+  useEffect(() => {
+    if (isElectron && window.electronAPI?.onInstallProgress) {
+      const unsub = window.electronAPI.onInstallProgress((data: { step: string; percent: number; error?: string }) => {
+        setInstallProgress(data)
+        if (data.step === 'Completed') {
+          // Setup finished, backend is running!
+          useTransferStore.getState().setServerDown(false)
+          setInstalling(false)
+          setNeedsSetup(false)
+        }
+      })
+      return unsub
+    }
+  }, [])
 
   if (!serverDown) return null
+
+  const handleStartSetup = async () => {
+    if (!isElectron || !window.electronAPI?.installPython) return
+    setInstalling(true)
+    setInstallProgress({ step: 'Initializing setup...', percent: 0 })
+    try {
+      await window.electronAPI.installPython()
+    } catch (err: any) {
+      setInstallProgress((prev) => ({ ...prev, error: err.message || String(err) }))
+      setInstalling(false)
+    }
+  }
 
   const handleRetry = async () => {
     setRetrying(true)
@@ -275,6 +323,61 @@ function BackendDownScreen() {
       // ignore
     }
     setTimeout(() => setRetrying(false), 2000)
+  }
+
+  if (needsSetup) {
+    return (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="fixed inset-0 z-100 bg-background flex items-center justify-center"
+      >
+        <div className="text-center space-y-6 max-w-md mx-auto px-6">
+          <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+            <RefreshCw className={cn('w-8 h-8 text-primary', installing && 'animate-spin')} />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-2xl font-bold text-foreground">First-Time Setup</h1>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Transfera needs to download and configure a portable Python runtime (~15MB zip) and its backend libraries.
+              This requires an active internet connection and will take about 1-2 minutes.
+            </p>
+          </div>
+
+          {installing || installProgress.percent > 0 ? (
+            <div className="space-y-4">
+              <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
+                <div
+                  className="bg-primary h-2.5 rounded-full transition-all duration-300"
+                  style={{ width: `${installProgress.percent}%` }}
+                />
+              </div>
+              <div className="flex justify-between items-center text-xs text-muted-foreground">
+                <span className="truncate max-w-[80%] font-medium">{installProgress.step}</span>
+                <span className="font-mono">{installProgress.percent}%</span>
+              </div>
+            </div>
+          ) : null}
+
+          {installProgress.error ? (
+            <div className="p-3.5 bg-destructive/10 text-destructive text-xs rounded-lg border border-destructive/20 text-left space-y-1">
+              <div className="font-semibold">Setup failed:</div>
+              <div className="font-mono break-all leading-normal">{installProgress.error}</div>
+            </div>
+          ) : null}
+
+          <div className="pt-2">
+            <button
+              onClick={handleStartSetup}
+              disabled={installing}
+              className="no-drag w-full inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              {installing ? 'Installing Requirements...' : installProgress.error ? 'Retry Setup' : 'Start Setup'}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    )
   }
 
   return (

@@ -514,28 +514,15 @@ class WSLOrchestrator:
     async def _check_virtualization(self) -> bool:
         try:
             rc, out, _ = await _run_cmd(
-                "cmd", "/c",
-                'systeminfo | findstr /i "Hyper-V"',
-                timeout=30,
-            )
-            if "Yes" in out or "Able" in out:
-                return True
-            rc, out, _ = await _run_cmd("wsl", "--status", timeout=10)
-            if "virtualization" in out.lower():
-                if "enabled" in out.lower() or "available" in out.lower():
-                    return True
-                if "not enabled" in out.lower() or "not available" in out.lower():
-                    return False
-            rc, out, _ = await _run_cmd(
-                "powershell", "-NoProfile", "-Command",
-                "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent",
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                "(Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent -or (Get-CimInstance -ClassName Win32_Processor).VirtualizationFirmwareEnabled",
                 timeout=10,
             )
-            if "True" in out:
+            if rc == 0 and "true" in out.lower():
                 return True
+            return False
         except Exception:
-            pass
-        return True
+            return False
 
     async def install_wsl(self) -> Tier2StepResult:
         try:
