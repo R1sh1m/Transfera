@@ -20,6 +20,7 @@ import {
   Info,
   ServerCrash,
   RefreshCw,
+  Loader2,
 } from 'lucide-react'
 import { useTransferStore } from '@/store/transfer'
 import { cn, isElectron } from '@/lib/utils'
@@ -249,6 +250,7 @@ function BackendDownScreen() {
   const [retrying, setRetrying] = useState(false)
   const [needsSetup, setNeedsSetup] = useState(false)
   const [installing, setInstalling] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
   const [installProgress, setInstallProgress] = useState<{ step: string; percent: number; error?: string }>({
     step: 'Ready to configure',
     percent: 0,
@@ -267,6 +269,27 @@ function BackendDownScreen() {
     }
   }, [serverDown])
 
+  // Listen for backend:starting — show a loading state instead of the error screen
+  useEffect(() => {
+    if (isElectron && window.electronAPI?.onBackendStarting) {
+      const unsub = window.electronAPI.onBackendStarting(() => {
+        setIsStarting(true)
+      })
+      return unsub
+    }
+  }, [])
+
+  // Listen for backend:ready — clear the starting/error state
+  useEffect(() => {
+    if (isElectron && window.electronAPI?.onBackendReady) {
+      const unsub = window.electronAPI.onBackendReady(() => {
+        setIsStarting(false)
+        useTransferStore.getState().setServerDown(false)
+      })
+      return unsub
+    }
+  }, [])
+
   // Bind install progress listener
   useEffect(() => {
     if (isElectron && window.electronAPI?.onInstallProgress) {
@@ -283,7 +306,28 @@ function BackendDownScreen() {
     }
   }, [])
 
-  if (!serverDown) return null
+  if (!serverDown && !isStarting) return null
+
+  // Show a clean loading screen while the backend is in the process of starting up
+  if (isStarting && !serverDown) {
+    return (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="fixed inset-0 z-100 bg-background flex items-center justify-center"
+      >
+        <div className="text-center space-y-4 max-w-sm mx-auto px-6">
+          <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+            <Loader2 className="w-8 h-8 text-primary animate-spin" />
+          </div>
+          <h1 className="text-xl font-bold text-foreground">Starting Transfera</h1>
+          <p className="text-sm text-muted-foreground">
+            The backend engine is starting up. This takes a few seconds on the first launch.
+          </p>
+        </div>
+      </motion.div>
+    )
+  }
 
   const handleStartSetup = async () => {
     if (!isElectron || !window.electronAPI?.installPython) return
@@ -304,6 +348,12 @@ function BackendDownScreen() {
         const status = await window.electronAPI.getBackendStatus()
         if (status.running) {
           useTransferStore.getState().setServerDown(false)
+          setRetrying(false)
+          return
+        }
+        // Backend is still launching — show starting state
+        if (status.starting) {
+          setIsStarting(true)
           setRetrying(false)
           return
         }

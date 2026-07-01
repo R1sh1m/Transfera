@@ -60,5 +60,21 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        // Split large vendor libraries into a separate chunk so they can be
+        // cached independently from app code and don't block the initial paint.
+        manualChunks: {
+          // Core React runtime — almost never changes, cache-friendly
+          'vendor-react': ['react', 'react-dom'],
+          // Animation library — sizeable but infrequently updated
+          'vendor-motion': ['framer-motion'],
+          // Data-fetching and state
+          'vendor-query': ['@tanstack/react-query', 'axios', 'zustand'],
+          // Icon set — large at rest, rarely changed
+          'vendor-icons': ['lucide-react'],
+        },
+      },
+    },
   },
 })

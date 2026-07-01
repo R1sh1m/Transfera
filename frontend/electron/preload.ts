@@ -57,6 +57,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('backend:down', callback)
   },
 
+  onBackendStarting: (callback: () => void) => {
+    ipcRenderer.on('backend:starting', callback)
+    return () => ipcRenderer.removeListener('backend:starting', callback)
+  },
+
+  onBackendReady: (callback: () => void) => {
+    ipcRenderer.on('backend:ready', callback)
+    return () => ipcRenderer.removeListener('backend:ready', callback)
+  },
+
   // Native OS notification — returns true if shown, false if unsupported
   showNotification: (opts: { title: string; body: string; sessionId: number }) =>
     ipcRenderer.invoke('notification:show', opts),

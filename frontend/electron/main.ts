@@ -25,6 +25,7 @@ let tray: Tray | null = null
 let backendProcess: ChildProcess | null = null
 let isQuitting = false
 let externalBackend = false
+let backendStarting = false
 let driveWatcherInterval: ReturnType<typeof setInterval> | null = null
 let knownRemovableDrives = new Set<string>()
 
@@ -78,7 +79,7 @@ function isPortAvailable(port: number): Promise<boolean> {
   })
 }
 
-async function waitForBackend(timeout = 30000): Promise<boolean> {
+async function waitForBackend(timeout = 60000): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeout) {
     try {
@@ -240,6 +241,18 @@ async function startBackend(): Promise<void> {
     TRANSFERA_DATA_DIR: isDev
       ? path.resolve(__dirname, '..', '..', '..', 'backend', 'data')
       : path.join(app.getPath('userData'), 'data'),
+    // Force UTF-8 stdout/stderr on Windows so Unicode log characters don't
+    // cause UnicodeEncodeError crashes in the Python process.
+    PYTHONIOENCODING: 'utf-8',
+    // Suppress .pyc bytecode files — avoids file-lock races on Windows when
+    // the backend is restarted quickly (e.g. auto-update or crash recovery).
+    PYTHONDONTWRITEBYTECODE: '1',
+  }
+
+  // Signal the renderer that the backend is launching (not crashed — just starting).
+  backendStarting = true
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('backend:starting')
   }
 
   backendProcess = spawn(cmd, args, {
@@ -259,9 +272,11 @@ async function startBackend(): Promise<void> {
 
   backendProcess.on('error', (err) => {
     console.error('[lifecycle] Failed to start backend:', err)
+    backendStarting = false
   })
 
   backendProcess.on('exit', (code, signal) => {
+    backendStarting = false
     if (code === 1) {
       // Could be port-already-in-use (e.g. run.py's backend beat us to it).
       // Probe the health endpoint: if it still responds, an external backend
@@ -299,8 +314,12 @@ async function startBackend(): Promise<void> {
   })
 
   const ready = await waitForBackend()
+  backendStarting = false
   if (ready) {
     console.log('[lifecycle] Backend is ready.')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend:ready')
+    }
   } else {
     console.error('[lifecycle] Backend failed to start within timeout.')
     mainWindow?.webContents.send('backend:down')
@@ -692,12 +711,12 @@ function registerIPC(): void {
     try {
       const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/health`)
       if (res.ok) {
-        return { running: true, port: BACKEND_PORT }
+        return { running: true, starting: false, port: BACKEND_PORT }
       }
     } catch {
       // not running
     }
-    return { running: false, port: BACKEND_PORT }
+    return { running: false, starting: backendStarting, port: BACKEND_PORT }
   })
 
   ipcMain.handle(
@@ -1000,12 +1019,22 @@ if (!gotTheLock) {
         console.log('[lifecycle] Detected external backend — skipping spawn')
       } else {
         if (!isPythonInstalled()) {
-          console.log('[lifecycle] Python runtime not installed. Skipping automatic startup until installation.')
+          // Python runtime not found in the expected locations.
+          // Signal the renderer so it can show the first-time setup UI.
+          console.log('[lifecycle] Python runtime not installed. Showing setup screen.')
+          // Give the window a moment to finish loading before sending the IPC.
+          mainWindow?.webContents.once('did-finish-load', () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('backend:down')
+            }
+          })
+          // Belt-and-suspenders: also send after a short delay in case the
+          // window already finished loading before this code ran.
           setTimeout(() => {
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('backend:down')
             }
-          }, 2000)
+          }, 3000)
         } else {
           startBackend().catch((err) => {
             console.error('[lifecycle] Backend startup error:', err)

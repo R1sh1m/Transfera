@@ -34,7 +34,7 @@ export interface ElectronAPI {
   openDirectory: (defaultPath?: string) => Promise<string | null>
 
   // Backend status
-  getBackendStatus: () => Promise<{ running: boolean; port: number }>
+  getBackendStatus: () => Promise<{ running: boolean; starting: boolean; port: number }>
 
   // Shell
   showItemInFolder: (fullPath: string) => Promise<void>
@@ -42,6 +42,8 @@ export interface ElectronAPI {
 
   // Backend lifecycle events
   onBackendDown: (callback: () => void) => () => void
+  onBackendStarting: (callback: () => void) => () => void
+  onBackendReady: (callback: () => void) => () => void
 
   // Native OS notification
   showNotification: (opts: { title: string; body: string; sessionId: number }) => Promise<boolean>
