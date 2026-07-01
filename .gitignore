@@ -71,6 +71,7 @@ backend/data/cache/
 # --- Electron build artifacts ---
 frontend/release/
 *.blockmap
+SHA256SUMS.txt
 
 # --- Test databases (created during test runs) ---
 backend/data/db/test_*.db*
