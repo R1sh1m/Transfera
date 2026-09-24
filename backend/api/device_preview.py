@@ -15,11 +15,16 @@ import subprocess
 import tempfile
 import threading
 from collections import OrderedDict
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from backend.api.auth import require_local_token
 from backend.ios_device import browse_device_directory, read_device_file
+
+_PREVIEW_MAX_FILES = 5000
+_PREVIEW_MAX_DEPTH = 8
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +47,13 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
 
         afc, lockdown = await _get_afc_service(device_id)
         try:
-            handle = await asyncio.to_thread(afc.fopen, path)
+            handle = await asyncio.to_thread(lambda: afc.fopen(path))
             try:
-                data = await asyncio.to_thread(afc.fread, handle, max_bytes)
+                data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))
                 return data if data else None
             finally:
                 try:
-                    await asyncio.to_thread(afc.fclose, handle)
+                    await asyncio.to_thread(lambda: afc.fclose(handle))
                 except Exception:
                     pass
         finally:
@@ -64,15 +69,35 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
         logger.debug("_read_device_file_partial failed for %s: %s", path, exc)
         return None
 
+
 router = APIRouter(prefix="/api/device")
 
 # Supported extensions for preview scanning
-PREVIEW_IMAGE_EXTENSIONS: frozenset[str] = frozenset({
-    ".jpg", ".jpeg", ".heic", ".png", ".webp", ".dng", ".tiff", ".tif", ".bmp",
-})
-PREVIEW_VIDEO_EXTENSIONS: frozenset[str] = frozenset({
-    ".mp4", ".mov", ".avi", ".mkv", ".3gp", ".m4v", ".mts", ".wmv",
-})
+PREVIEW_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".heic",
+        ".png",
+        ".webp",
+        ".dng",
+        ".tiff",
+        ".tif",
+        ".bmp",
+    }
+)
+PREVIEW_VIDEO_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".3gp",
+        ".m4v",
+        ".mts",
+        ".wmv",
+    }
+)
 PREVIEW_EXTENSIONS: frozenset[str] = PREVIEW_IMAGE_EXTENSIONS | PREVIEW_VIDEO_EXTENSIONS
 
 # ---------------------------------------------------------------------------
@@ -82,16 +107,19 @@ _THUMB_CACHE_MAX = 500
 _thumb_cache: OrderedDict[tuple[str, int], bytes] = OrderedDict()
 _thumb_cache_lock = threading.Lock()
 
+
 # Fallback JPEG — generated once at import time via Pillow (never a tuple)
 def _make_gray_fallback() -> bytes:
     try:
         from PIL import Image
+
         img = Image.new("RGB", (4, 4), (128, 128, 128))
         buf = _io.BytesIO()
         img.save(buf, format="JPEG", quality=60)
         return buf.getvalue()
     except Exception:
         return b"\xff\xd8\xff\xd9"
+
 
 _GRAY_FALLBACK_JPEG: bytes = _make_gray_fallback()
 
@@ -122,6 +150,7 @@ def _get_thumb_cache(key: tuple[str, int]) -> bytes | None:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_supported_media(ext: str) -> bool:
     return ext.lower() in PREVIEW_EXTENSIONS
 
@@ -142,11 +171,13 @@ def _get_video_duration(path: str) -> float | None:
     """Run ffprobe to get video duration in seconds. Returns None on failure."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json",
-             "-show_format", "-show_streams", path],
-            capture_output=True, text=True, timeout=5,
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         import json as _json
+
         data = _json.loads(result.stdout)
         duration = data.get("format", {}).get("duration")
         if duration:
@@ -171,12 +202,15 @@ def _generate_photo_thumbnail(path: str, size: int) -> bytes | None:
     img = None
     try:
         from PIL import Image, ImageOps
+        from PIL.Image import Resampling
+
         img = Image.open(path)
         img = ImageOps.exif_transpose(img) or img
-        img.thumbnail((size, size), Image.LANCZOS)
+        img.thumbnail((size, size), Resampling.LANCZOS)
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         import io
+
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         return buf.getvalue()
@@ -194,18 +228,44 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
     """Generate thumbnail for a video using ffmpeg."""
     try:
         result = subprocess.run(
-            ["ffmpeg", "-i", path, "-ss", "00:00:01", "-frames:v", "1",
-             "-vf", f"scale={size}:{size}:force_original_aspect_ratio=decrease",
-             "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-            capture_output=True, timeout=10,
+            [
+                "ffmpeg",
+                "-i",
+                path,
+                "-ss",
+                "00:00:01",
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=10,
         )
         if result.returncode == 0 and len(result.stdout) > 100:
             return result.stdout
         result2 = subprocess.run(
-            ["ffmpeg", "-i", path, "-frames:v", "1",
-             "-vf", f"scale={size}:{size}:force_original_aspect_ratio=decrease",
-             "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-            capture_output=True, timeout=10,
+            [
+                "ffmpeg",
+                "-i",
+                path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=10,
         )
         if result2.returncode == 0 and len(result2.stdout) > 100:
             return result2.stdout
@@ -235,6 +295,7 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
             import subprocess as _sp
 
             from backend.engines.metadata_extractor import _bootstrap_exiftool
+
             exe = _bootstrap_exiftool()
             if exe and len(data) >= 4096:  # Only worth trying on real data
                 result = _sp.run(
@@ -246,9 +307,11 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
                 )
                 if result.returncode == 0 and result.stdout and len(result.stdout) > 500:
                     # Validate and resize the embedded thumbnail
+                    from PIL.Image import Resampling
+
                     thumb_img = Image.open(_io.BytesIO(result.stdout))
                     thumb_img = ImageOps.exif_transpose(thumb_img) or thumb_img
-                    thumb_img.thumbnail((size, size), Image.LANCZOS)
+                    thumb_img.thumbnail((size, size), Resampling.LANCZOS)
                     if thumb_img.mode not in ("RGB",):
                         thumb_img = thumb_img.convert("RGB")
                     buf = _io.BytesIO()
@@ -258,9 +321,11 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
         except Exception:
             pass  # Fall through to full Pillow decode
 
+        from PIL.Image import Resampling
+
         img = Image.open(_io.BytesIO(data))
         img = ImageOps.exif_transpose(img) or img
-        img.thumbnail((size, size), Image.LANCZOS)
+        img.thumbnail((size, size), Resampling.LANCZOS)
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         buf = _io.BytesIO()
@@ -280,21 +345,26 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
 # Endpoint A: GET /api/device/preview
 # ---------------------------------------------------------------------------
 
+
 @router.get("/preview")
 async def preview_directory(
     path: str = Query(..., description="Absolute path to the source directory"),
     recursive: bool = Query(False, description="Scan subdirectories recursively"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(100, ge=1, le=500),
+    page_size: int = Query(100, ge=1, le=100),
     include_duration: bool = Query(False, description="Run ffprobe for video durations (slow)"),
     sort_by: str = Query("newest", pattern="^(newest|oldest|name_asc|name_desc|size_desc|size_asc)$"),
+    _: None = Depends(require_local_token),
 ):
     abs_path = os.path.abspath(path)
 
     if not os.path.exists(abs_path):
-        raise HTTPException(status_code=400, detail=f"Path does not exist: {path}")
+        raise HTTPException(status_code=400, detail="Path does not exist")
     if not os.path.isdir(abs_path):
-        raise HTTPException(status_code=400, detail=f"Path is not a directory: {path}")
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+    if os.path.ismount(abs_path) or abs_path in ("C:\\", "C:/", "/"):
+        # Allow drive roots explicitly but cap recursive walks below
+        pass
 
     items: list[dict] = []
     total_photos = 0
@@ -305,29 +375,46 @@ async def preview_directory(
         scan_iter = os.scandir(abs_path)
 
         if recursive:
-            # Recursive walk — collect first, then process
+            # Recursive walk — collect first, then process (capped)
             all_entries: list[str] = []
+            base_depth = abs_path.rstrip(os.sep).count(os.sep)
             for root, dirs, files in os.walk(abs_path):
+                depth = root.count(os.sep) - base_depth
+                if depth > _PREVIEW_MAX_DEPTH:
+                    dirs[:] = []
+                    continue
+                # Prune symlinked dirs to avoid escape/loops
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
                 for fname in files:
                     fpath = os.path.join(root, fname)
                     all_entries.append(fpath)
+                    if len(all_entries) >= _PREVIEW_MAX_FILES:
+                        break
+                if len(all_entries) >= _PREVIEW_MAX_FILES:
+                    dirs[:] = []
+                    break
 
             for entry in all_entries:
-                ext = os.path.splitext(entry.name)[1].lower() if hasattr(entry, "name") else os.path.splitext(entry)[1].lower()
+                ext = (
+                    os.path.splitext(entry.name)[1].lower()
+                    if hasattr(entry, "name")
+                    else os.path.splitext(entry)[1].lower()
+                )
                 if ext not in PREVIEW_EXTENSIONS:
                     continue
                 fpath = getattr(entry, "path", entry) if isinstance(entry, os.DirEntry) else entry
-                if not os.path.isfile(fpath):
+                fpath_str = str(fpath)
+                if not os.path.isfile(fpath_str):
                     continue
                 try:
-                    stat = os.stat(fpath)
+                    stat = os.stat(fpath_str)
                 except OSError:
                     continue
                 item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
-                item = {
-                    "id": _file_id(fpath),
-                    "filename": os.path.basename(fpath),
-                    "abs_path": fpath,
+                item: dict[str, Any] = {
+                    "id": _file_id(fpath_str),
+                    "filename": os.path.basename(fpath_str),
+                    "abs_path": fpath_str,
                     "type": item_type,
                     "size_bytes": stat.st_size,
                     "mtime": stat.st_mtime,
@@ -335,7 +422,7 @@ async def preview_directory(
                     "thumbnail_ready": False,
                 }
                 if item_type == "video" and include_duration:
-                    item["duration_s"] = _get_video_duration(fpath)
+                    item["duration_s"] = _get_video_duration(fpath_str)
                 items.append(item)
                 total_size += stat.st_size
                 if item_type == "photo":
@@ -354,7 +441,7 @@ async def preview_directory(
                 except OSError:
                     continue
                 item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
-                item = {
+                item: dict[str, Any] = {
                     "id": _file_id(entry.path),
                     "filename": entry.name,
                     "abs_path": entry.path,
@@ -377,12 +464,12 @@ async def preview_directory(
 
     # Sort based on sort_by parameter
     _SORT_KEYS = {
-        "newest":    (lambda x: x["mtime"],      True),
-        "oldest":    (lambda x: x["mtime"],      False),
-        "name_asc":  (lambda x: x["filename"].lower(), False),
+        "newest": (lambda x: x["mtime"], True),
+        "oldest": (lambda x: x["mtime"], False),
+        "name_asc": (lambda x: x["filename"].lower(), False),
         "name_desc": (lambda x: x["filename"].lower(), True),
         "size_desc": (lambda x: x["size_bytes"], True),
-        "size_asc":  (lambda x: x["size_bytes"], False),
+        "size_asc": (lambda x: x["size_bytes"], False),
     }
     sort_key, sort_reverse = _SORT_KEYS.get(sort_by, _SORT_KEYS["newest"])
     items.sort(key=sort_key, reverse=sort_reverse)
@@ -390,7 +477,7 @@ async def preview_directory(
     total = len(items)
     pages = max(1, math.ceil(total / page_size))
     offset = (page - 1) * page_size
-    page_items = items[offset:offset + page_size]
+    page_items = items[offset : offset + page_size]
 
     return {
         "total": total,
@@ -408,14 +495,22 @@ async def preview_directory(
 # Endpoint B: GET /api/device/thumbnail
 # ---------------------------------------------------------------------------
 
+
 @router.get("/thumbnail")
 async def device_thumbnail(
     path: str = Query(..., description="Absolute path of the source file"),
-    size: int = Query(200, ge=32, le=1024),
+    size: int = Query(200, ge=32, le=512),
+    _: None = Depends(require_local_token),
 ):
     abs_path = os.path.abspath(path)
 
     if not os.path.exists(abs_path):
+        return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+
+    try:
+        if os.path.isfile(abs_path) and os.path.getsize(abs_path) > 200 * 1024 * 1024:
+            return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+    except OSError:
         return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
 
     ext = os.path.splitext(abs_path)[1].lower()
@@ -434,6 +529,7 @@ async def device_thumbnail(
     # Offload CPU-bound Pillow decode + JPEG encode to the thread pool so the
     # event loop stays free for other requests during thumbnail generation.
     import asyncio
+
     if ext in PREVIEW_IMAGE_EXTENSIONS:
         jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail, abs_path, size)
     else:
@@ -454,13 +550,15 @@ async def device_thumbnail(
 # Endpoint C: GET /api/device/ios-preview
 # ---------------------------------------------------------------------------
 
+
 @router.get("/ios-preview")
 async def ios_preview_directory(
     device_id: str = Query(..., description="iOS device serial"),
     path: str = Query(..., description="Virtual path on device, e.g. /DCIM/100APPLE"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(100, ge=1, le=500),
+    page_size: int = Query(100, ge=1, le=100),
     sort_by: str = Query("newest", pattern="^(newest|oldest|name_asc|name_desc|size_desc|size_asc)$"),
+    _: None = Depends(require_local_token),
 ):
     try:
         entries = await browse_device_directory(device_id, path)
@@ -483,16 +581,18 @@ async def ios_preview_directory(
         item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
         size_bytes = entry.size
         mtime = entry.mtime
-        items.append({
-            "id": _file_id(f"{device_id}:{device_abs}"),
-            "filename": fname,
-            "abs_path": f"ios://{device_id}{device_abs}",
-            "type": item_type,
-            "size_bytes": size_bytes,
-            "mtime": mtime,
-            "duration_s": None,
-            "thumbnail_ready": False,
-        })
+        items.append(
+            {
+                "id": _file_id(f"{device_id}:{device_abs}"),
+                "filename": fname,
+                "abs_path": f"ios://{device_id}{device_abs}",
+                "type": item_type,
+                "size_bytes": size_bytes,
+                "mtime": mtime,
+                "duration_s": None,
+                "thumbnail_ready": False,
+            }
+        )
         total_size += size_bytes
         if item_type == "photo":
             total_photos += 1
@@ -500,15 +600,19 @@ async def ios_preview_directory(
             total_videos += 1
 
     reverse = sort_by in ("newest", "size_desc", "name_desc")
-    key_fn = (lambda x: x["mtime"]) if sort_by in ("newest", "oldest") else \
-             (lambda x: x["size_bytes"]) if sort_by in ("size_desc", "size_asc") else \
-             (lambda x: x["filename"].lower())
+    key_fn = (
+        (lambda x: x["mtime"])
+        if sort_by in ("newest", "oldest")
+        else (lambda x: x["size_bytes"])
+        if sort_by in ("size_desc", "size_asc")
+        else (lambda x: x["filename"].lower())
+    )
     items.sort(key=key_fn, reverse=reverse)
 
     total = len(items)
     pages = max(1, math.ceil(total / page_size))
     start_idx = (page - 1) * page_size
-    page_items = items[start_idx: start_idx + page_size]
+    page_items = items[start_idx : start_idx + page_size]
 
     return {
         "total": total,
@@ -526,12 +630,16 @@ async def ios_preview_directory(
 # Endpoint D: GET /api/device/ios-thumbnail
 # ---------------------------------------------------------------------------
 
+
 @router.get("/ios-thumbnail")
 async def ios_thumbnail(
     device_id: str = Query(...),
     path: str = Query(..., description="Virtual path on device, e.g. /DCIM/100APPLE/IMG_0042.HEIC"),
-    size: int = Query(200, ge=32, le=800),
+    size: int = Query(200, ge=32, le=512),
+    _: None = Depends(require_local_token),
 ):
+    if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=400, detail="Invalid device path")
     cache_key = (f"ios:{device_id}:{path}", size)
     cached = _get_thumb_cache(cache_key)
     if cached is not None:
@@ -558,9 +666,7 @@ async def ios_thumbnail(
 
             partial_bytes: bytes | None = None
             try:
-                partial_bytes = await _read_device_file_partial(
-                    device_id, path, max_bytes=PARTIAL_READ_BYTES
-                )
+                partial_bytes = await _read_device_file_partial(device_id, path, max_bytes=PARTIAL_READ_BYTES)
             except Exception as exc:
                 logger.debug("iOS partial read failed for %s: %s", path, exc)
 
@@ -571,7 +677,8 @@ async def ios_thumbnail(
             if not jpeg_bytes:
                 logger.debug(
                     "iOS partial-read thumbnail failed for %s (%d bytes) — falling back to full read",
-                    path, len(partial_bytes) if partial_bytes else 0,
+                    path,
+                    len(partial_bytes) if partial_bytes else 0,
                 )
                 try:
                     file_bytes = await read_device_file(device_id, path)
@@ -581,9 +688,13 @@ async def ios_thumbnail(
 
         else:
             # Video: must download full file for ffmpeg frame extraction
+            # Cap at 200MB to avoid RAM DoS from a malicious/compromised client
             suffix = ext or ".mp4"
             try:
                 file_bytes = await read_device_file(device_id, path)
+                if file_bytes is not None and len(file_bytes) > 200 * 1024 * 1024:
+                    logger.warning("iOS video too large for thumbnail: %s", path)
+                    file_bytes = None
             except Exception as exc:
                 logger.debug("iOS video file read error for %s: %s", path, exc)
                 file_bytes = None
@@ -610,4 +721,3 @@ async def ios_thumbnail(
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
-

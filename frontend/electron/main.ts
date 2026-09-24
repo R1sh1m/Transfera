@@ -1,96 +1,212 @@
-import http from 'http'
-import https from 'https'
-import { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, nativeImage } from 'electron'
-import { spawn, execFile, type ChildProcess } from 'child_process'
-import path from 'path'
-import fs from 'fs'
-import net from 'net'
+import http from "http";
+import https from "https";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  shell,
+  Notification,
+  Tray,
+  Menu,
+  nativeImage,
+} from "electron";
+import { spawn, execFile, type ChildProcess } from "child_process";
+import path from "path";
+import fs from "fs";
+import net from "net";
 
 // ---------------------------------------------------------------------------
 // App identity — must be set before app.whenReady() so Windows groups the
 // taskbar entry under the correct AppUserModelID.
 // ---------------------------------------------------------------------------
-app.setAppUserModelId('com.transfera.app')
+app.setAppUserModelId("com.transfera.app");
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const BACKEND_PORT = 47821
-const VITE_DEV_SERVER = 'http://127.0.0.1:5173'
-const isDev = !app.isPackaged
-const GRACEFUL_SHUTDOWN_WAIT = 4000
+const BACKEND_PORT = 47821;
+const VITE_DEV_SERVER = "http://127.0.0.1:5173";
+const isDev = !app.isPackaged;
+const GRACEFUL_SHUTDOWN_WAIT = 4000;
 
-let mainWindow: BrowserWindow | null = null
-let tray: Tray | null = null
-let backendProcess: ChildProcess | null = null
-let isQuitting = false
-let externalBackend = false
-let backendStarting = false
-let driveWatcherInterval: ReturnType<typeof setInterval> | null = null
-let knownRemovableDrives = new Set<string>()
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let backendProcess: ChildProcess | null = null;
+let isQuitting = false;
+let externalBackend = false;
+let backendStarting = false;
+let driveWatcherInterval: ReturnType<typeof setInterval> | null = null;
+let knownRemovableDrives = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// IPC allowlists — renderer input must never reach execFile/shell unvalidated.
+// Only these binaries may be launched via elevated/command handlers, and
+// shell paths must exist on disk. Preload only uses contextBridge +
+// ipcRenderer.invoke, so sandbox:true keeps working.
+// ---------------------------------------------------------------------------
+const ALLOWED_ELEVATED_BINARIES = new Set([
+  "winget.exe",
+  "wsl.exe",
+  "usbipd.exe",
+  "sc.exe",
+]);
+
+function normalizeAllowedExecutable(executable: unknown): string | null {
+  if (typeof executable !== "string" || executable.length === 0) return null;
+  const base = executable.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const withExe = base.endsWith(".exe") ? base : `${base}.exe`;
+  if (!ALLOWED_ELEVATED_BINARIES.has(withExe)) return null;
+  return withExe;
+}
+
+function isSafeArg(arg: unknown): boolean {
+  if (typeof arg !== "string") return false;
+  if (arg.length === 0 || arg.length > 2000) return false;
+  if (arg.includes("\0") || arg.includes("\n") || arg.includes("\r"))
+    return false;
+  return true;
+}
+
+function validateCommandOpts(opts: unknown):
+  | {
+      executable: string;
+      args: string[];
+    }
+  | { error: string } {
+  if (!opts || typeof opts !== "object") return { error: "Invalid options" };
+  const { executable, args } = opts as { executable: unknown; args: unknown };
+  const normalized = normalizeAllowedExecutable(executable);
+  if (!normalized) return { error: "Executable not allowed" };
+  if (!Array.isArray(args) || args.length > 64)
+    return { error: "Invalid args" };
+  for (const a of args) {
+    if (!isSafeArg(a)) return { error: "Unsafe argument blocked" };
+  }
+  return { executable: normalized, args: args as string[] };
+}
+
+function isExistingPath(p: unknown): boolean {
+  if (typeof p !== "string" || p.length === 0 || p.length > 32767) return false;
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedExternalUrl(raw: unknown): boolean {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048)
+    return false;
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Backend process management
 // ---------------------------------------------------------------------------
 function isPythonInstalled(): boolean {
-  if (isDev) return true
-  const downloadedPython = path.join(app.getPath('userData'), 'python', 'python.exe')
-  const bundledPython = path.join(process.resourcesPath, 'backend', 'python', 'python.exe')
-  return fs.existsSync(downloadedPython) || fs.existsSync(bundledPython)
+  if (isDev) return true;
+  const downloadedPython = path.join(
+    app.getPath("userData"),
+    "python",
+    "python.exe",
+  );
+  const bundledPython = path.join(
+    process.resourcesPath,
+    "backend",
+    "python",
+    "python.exe",
+  );
+  return fs.existsSync(downloadedPython) || fs.existsSync(bundledPython);
 }
 
 function getBackendCommand(): { cmd: string; args: string[] } {
   if (isDev) {
-    const projectRoot = path.resolve(__dirname, '..', '..', '..')
-    const venvPython = path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
+    const projectRoot = path.resolve(__dirname, "..", "..", "..");
+    const venvPython = path.join(projectRoot, ".venv", "Scripts", "python.exe");
     return {
       cmd: venvPython,
-      args: ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
-    }
+      args: [
+        "-m",
+        "uvicorn",
+        "backend.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(BACKEND_PORT),
+      ],
+    };
   }
 
   // 1. Try downloaded python in userData directory (persists across app updates, always writable)
-  const downloadedPython = path.join(app.getPath('userData'), 'python', 'python.exe')
+  const downloadedPython = path.join(
+    app.getPath("userData"),
+    "python",
+    "python.exe",
+  );
   if (fs.existsSync(downloadedPython)) {
     return {
       cmd: downloadedPython,
-      args: ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
-    }
+      args: [
+        "-m",
+        "uvicorn",
+        "backend.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(BACKEND_PORT),
+      ],
+    };
   }
 
   // 2. Fallback to bundled python in resources
-  const backendDir = path.join(process.resourcesPath, 'backend')
-  const bundledPython = path.join(backendDir, 'python', 'python.exe')
-  const cmd = fs.existsSync(bundledPython) ? bundledPython : path.join(backendDir, 'venv', 'Scripts', 'python.exe')
+  const backendDir = path.join(process.resourcesPath, "backend");
+  const bundledPython = path.join(backendDir, "python", "python.exe");
+  const cmd = fs.existsSync(bundledPython)
+    ? bundledPython
+    : path.join(backendDir, "venv", "Scripts", "python.exe");
   return {
     cmd,
-    args: ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
-  }
+    args: [
+      "-m",
+      "uvicorn",
+      "backend.main:app",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(BACKEND_PORT),
+    ],
+  };
 }
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const server = net.createServer()
-    server.once('error', () => resolve(false))
-    server.once('listening', () => {
-      server.close(() => resolve(true))
-    })
-    server.listen(port, '127.0.0.1')
-  })
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, "127.0.0.1");
+  });
 }
 
 async function waitForBackend(timeout = 60000): Promise<boolean> {
-  const start = Date.now()
+  const start = Date.now();
   while (Date.now() - start < timeout) {
     try {
-      const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/health`)
-      if (res.ok) return true
+      const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/health`);
+      if (res.ok) return true;
     } catch {
       // not ready yet
     }
-    await new Promise((r) => setTimeout(r, 500))
+    await new Promise((r) => setTimeout(r, 500));
   }
-  return false
+  return false;
 }
 
 // -- Graceful shutdown -----------------------------------------------------------------
@@ -99,31 +215,45 @@ async function waitForBackend(timeout = 60000): Promise<boolean> {
 async function tryGracefulShutdown(): Promise<boolean> {
   try {
     const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/shutdown`, {
-      method: 'POST',
+      method: "POST",
       signal: AbortSignal.timeout(5000),
-    })
-    return res.ok
+    });
+    return res.ok;
   } catch {
-    return false
+    return false;
   }
 }
 
 /** Windows process-tree termination via taskkill. */
 async function taskkillProcessTree(pid: number): Promise<void> {
   await new Promise<void>((resolve) => {
-    execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 5000 }, () => resolve())
-  })
+    execFile(
+      "taskkill",
+      ["/pid", String(pid), "/T", "/F"],
+      { timeout: 5000 },
+      () => resolve(),
+    );
+  });
 }
 
 /** Wait for a child process to exit, with a timeout. */
-function waitForProcessExit(proc: ChildProcess, timeout: number): Promise<void> {
+function waitForProcessExit(
+  proc: ChildProcess,
+  timeout: number,
+): Promise<void> {
   return new Promise((resolve) => {
-    if (proc.killed) { resolve(); return }
-    const timer = setTimeout(resolve, timeout)
-    const done = () => { clearTimeout(timer); resolve() }
-    proc.on('exit', done)
-    proc.on('error', done)
-  })
+    if (proc.killed) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, timeout);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    proc.on("exit", done);
+    proc.on("error", done);
+  });
 }
 
 /**
@@ -135,38 +265,42 @@ function waitForProcessExit(proc: ChildProcess, timeout: number): Promise<void> 
  */
 async function shutdownBackend(): Promise<void> {
   if (externalBackend) {
-    console.log('[lifecycle] Backend was started externally — leaving it running.')
-    backendProcess = null
-    return
+    console.log(
+      "[lifecycle] Backend was started externally — leaving it running.",
+    );
+    backendProcess = null;
+    return;
   }
 
   if (!backendProcess || backendProcess.killed) {
-    backendProcess = null
-    return
+    backendProcess = null;
+    return;
   }
 
-  const proc = backendProcess
-  console.log('[lifecycle] Shutting down backend (PID %s)...', proc.pid)
+  const proc = backendProcess;
+  console.log("[lifecycle] Shutting down backend (PID %s)...", proc.pid);
 
-  const gracefulOk = await tryGracefulShutdown()
+  const gracefulOk = await tryGracefulShutdown();
   if (gracefulOk) {
-    console.log('[lifecycle] Graceful shutdown signal sent, waiting for exit...')
-    await waitForProcessExit(proc, GRACEFUL_SHUTDOWN_WAIT)
+    console.log(
+      "[lifecycle] Graceful shutdown signal sent, waiting for exit...",
+    );
+    await waitForProcessExit(proc, GRACEFUL_SHUTDOWN_WAIT);
   }
 
   if (!proc.killed) {
-    console.log('[lifecycle] Force-killing backend process tree...')
-    if (process.platform === 'win32' && proc.pid) {
-      await taskkillProcessTree(proc.pid)
-      await waitForProcessExit(proc, 3000)
+    console.log("[lifecycle] Force-killing backend process tree...");
+    if (process.platform === "win32" && proc.pid) {
+      await taskkillProcessTree(proc.pid);
+      await waitForProcessExit(proc, 3000);
     }
     if (!proc.killed) {
-      proc.kill()
+      proc.kill();
     }
   }
 
-  backendProcess = null
-  console.log('[lifecycle] Backend shutdown complete.')
+  backendProcess = null;
+  console.log("[lifecycle] Backend shutdown complete.");
 }
 
 // -- Orphan cleanup --------------------------------------------------------------------
@@ -179,36 +313,44 @@ async function shutdownBackend(): Promise<void> {
  * a Python/uvicorn process running would cause EADDRINUSE on the next launch.
  */
 async function cleanupOrphanedBackend(): Promise<void> {
-  const portAvailable = await isPortAvailable(BACKEND_PORT)
-  if (portAvailable) return
+  const portAvailable = await isPortAvailable(BACKEND_PORT);
+  if (portAvailable) return;
 
-  console.log(`[lifecycle] Port ${BACKEND_PORT} is already in use — attempting to clean up orphaned process...`)
+  console.log(
+    `[lifecycle] Port ${BACKEND_PORT} is already in use — attempting to clean up orphaned process...`,
+  );
 
-  if (process.platform === 'win32') {
+  if (process.platform === "win32") {
     try {
       await new Promise<void>((resolve, reject) => {
         execFile(
-          'powershell',
+          "powershell",
           [
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command',
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-NonInteractive",
+            "-Command",
             `Get-NetTCPConnection -LocalPort ${BACKEND_PORT} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object { taskkill /pid $_ /T /F }`,
           ],
           { timeout: 10000 },
           (err) => (err ? reject(err) : resolve()),
-        )
-      })
+        );
+      });
     } catch {
       // orphan may already be gone — that's fine
     }
     // Give taskkill a moment
-    await new Promise((r) => setTimeout(r, 1500))
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
-  const nowAvailable = await isPortAvailable(BACKEND_PORT)
+  const nowAvailable = await isPortAvailable(BACKEND_PORT);
   if (nowAvailable) {
-    console.log('[lifecycle] Orphaned backend cleaned up successfully.')
+    console.log("[lifecycle] Orphaned backend cleaned up successfully.");
   } else {
-    console.warn(`[lifecycle] Port ${BACKEND_PORT} is still occupied — will attempt to start anyway.`)
+    console.warn(
+      `[lifecycle] Port ${BACKEND_PORT} is still occupied — will attempt to start anyway.`,
+    );
   }
 }
 
@@ -221,108 +363,123 @@ function probeBackend(): Promise<boolean> {
       `http://127.0.0.1:${BACKEND_PORT}/api/health`,
       { timeout: 1000 },
       (res) => {
-        resolve(res.statusCode === 200)
-        res.resume()
+        resolve(res.statusCode === 200);
+        res.resume();
       },
-    )
-    req.on('error', () => resolve(false))
-    req.on('timeout', () => { req.destroy(); resolve(false) })
-  })
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
 }
 
 async function startBackend(): Promise<void> {
-  await cleanupOrphanedBackend()
+  await cleanupOrphanedBackend();
 
-  const { cmd, args } = getBackendCommand()
-  console.log(`[lifecycle] Starting backend: ${cmd} ${args.join(' ')}`)
+  const { cmd, args } = getBackendCommand();
+  console.log(`[lifecycle] Starting backend: ${cmd} ${args.join(" ")}`);
 
   const env = {
     ...process.env,
     TRANSFERA_DATA_DIR: isDev
-      ? path.resolve(__dirname, '..', '..', '..', 'backend', 'data')
-      : path.join(app.getPath('userData'), 'data'),
+      ? path.resolve(__dirname, "..", "..", "..", "backend", "data")
+      : path.join(app.getPath("userData"), "data"),
     // Force UTF-8 stdout/stderr on Windows so Unicode log characters don't
     // cause UnicodeEncodeError crashes in the Python process.
-    PYTHONIOENCODING: 'utf-8',
+    PYTHONIOENCODING: "utf-8",
     // Suppress .pyc bytecode files — avoids file-lock races on Windows when
     // the backend is restarted quickly (e.g. auto-update or crash recovery).
-    PYTHONDONTWRITEBYTECODE: '1',
-  }
+    PYTHONDONTWRITEBYTECODE: "1",
+  };
 
   // Signal the renderer that the backend is launching (not crashed — just starting).
-  backendStarting = true
+  backendStarting = true;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('backend:starting')
+    mainWindow.webContents.send("backend:starting");
   }
 
   backendProcess = spawn(cmd, args, {
-    cwd: isDev ? path.resolve(__dirname, '..', '..', '..') : process.resourcesPath,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: isDev
+      ? path.resolve(__dirname, "..", "..", "..")
+      : process.resourcesPath,
+    stdio: ["ignore", "pipe", "pipe"],
     detached: false,
     env,
-  })
+  });
 
-  backendProcess.stdout?.on('data', (data: Buffer) => {
-    console.log(`[backend] ${data.toString().trim()}`)
-  })
+  backendProcess.stdout?.on("data", (data: Buffer) => {
+    console.log(`[backend] ${data.toString().trim()}`);
+  });
 
-  backendProcess.stderr?.on('data', (data: Buffer) => {
-    console.error(`[backend] ${data.toString().trim()}`)
-  })
+  backendProcess.stderr?.on("data", (data: Buffer) => {
+    console.error(`[backend] ${data.toString().trim()}`);
+  });
 
-  backendProcess.on('error', (err) => {
-    console.error('[lifecycle] Failed to start backend:', err)
-    backendStarting = false
-  })
+  backendProcess.on("error", (err) => {
+    console.error("[lifecycle] Failed to start backend:", err);
+    backendStarting = false;
+  });
 
-  backendProcess.on('exit', (code, signal) => {
-    backendStarting = false
+  backendProcess.on("exit", (code, signal) => {
+    backendStarting = false;
     if (code === 1) {
       // Could be port-already-in-use (e.g. run.py's backend beat us to it).
       // Probe the health endpoint: if it still responds, an external backend
       // is holding the port — adopt it rather than reporting a crash.
-      probeBackend().then((stillUp) => {
-        if (stillUp) {
-          console.log('[lifecycle] Backend exited (code 1, port occupied by external process) — adopting external backend')
-          backendProcess = null
-          externalBackend = true
-          return
-        }
-        // Port is gone — backend actually crashed.
-        console.log(`[lifecycle] Backend exited with code ${code}, signal ${signal}`)
-        backendProcess = null
-        if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('backend:down')
-        }
-      }).catch(() => {
-        // Probe itself failed — treat as crash.
-        console.log(`[lifecycle] Backend exited with code ${code}, signal ${signal}`)
-        backendProcess = null
-        if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('backend:down')
-        }
-      })
-      return
+      probeBackend()
+        .then((stillUp) => {
+          if (stillUp) {
+            console.log(
+              "[lifecycle] Backend exited (code 1, port occupied by external process) — adopting external backend",
+            );
+            backendProcess = null;
+            externalBackend = true;
+            return;
+          }
+          // Port is gone — backend actually crashed.
+          console.log(
+            `[lifecycle] Backend exited with code ${code}, signal ${signal}`,
+          );
+          backendProcess = null;
+          if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("backend:down");
+          }
+        })
+        .catch(() => {
+          // Probe itself failed — treat as crash.
+          console.log(
+            `[lifecycle] Backend exited with code ${code}, signal ${signal}`,
+          );
+          backendProcess = null;
+          if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("backend:down");
+          }
+        });
+      return;
     }
 
     // Non-1 exit codes are always crashes.
-    console.log(`[lifecycle] Backend exited with code ${code}, signal ${signal}`)
-    backendProcess = null
+    console.log(
+      `[lifecycle] Backend exited with code ${code}, signal ${signal}`,
+    );
+    backendProcess = null;
     if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('backend:down')
+      mainWindow.webContents.send("backend:down");
     }
-  })
+  });
 
-  const ready = await waitForBackend()
-  backendStarting = false
+  const ready = await waitForBackend();
+  backendStarting = false;
   if (ready) {
-    console.log('[lifecycle] Backend is ready.')
+    console.log("[lifecycle] Backend is ready.");
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('backend:ready')
+      mainWindow.webContents.send("backend:ready");
     }
   } else {
-    console.error('[lifecycle] Backend failed to start within timeout.')
-    mainWindow?.webContents.send('backend:down')
+    console.error("[lifecycle] Backend failed to start within timeout.");
+    mainWindow?.webContents.send("backend:down");
   }
 }
 
@@ -330,771 +487,982 @@ async function startBackend(): Promise<void> {
 // Icon resolution — platform-aware, works in both dev and packaged builds.
 // ---------------------------------------------------------------------------
 function resolveIconPath(forcePng = false): string {
-  const ext = (process.platform === 'win32' && !forcePng) ? 'icon.ico' : 'icon.png'
+  const ext =
+    process.platform === "win32" && !forcePng ? "icon.ico" : "icon.png";
   if (isDev) {
-    const projectRoot = path.resolve(__dirname, '..', '..', '..')
-    return path.join(projectRoot, 'frontend', 'build', ext)
+    const projectRoot = path.resolve(__dirname, "..", "..", "..");
+    return path.join(projectRoot, "frontend", "build", ext);
   }
-  return path.join(process.resourcesPath, ext)
+  return path.join(process.resourcesPath, ext);
 }
-
 
 // ---------------------------------------------------------------------------
 // System tray
 // ---------------------------------------------------------------------------
 function createTray(): void {
-  const icon = nativeImage.createFromPath(resolveIconPath())
-  tray = new Tray(icon)
+  const icon = nativeImage.createFromPath(resolveIconPath());
+  tray = new Tray(icon);
 
-  tray.setToolTip('Transfera')
+  tray.setToolTip("Transfera");
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: 'Open Transfera',
+      label: "Open Transfera",
       click: () => {
         if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore()
-          if (!mainWindow.isVisible()) mainWindow.show()
-          mainWindow.focus()
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          if (!mainWindow.isVisible()) mainWindow.show();
+          mainWindow.focus();
         }
       },
     },
-    { type: 'separator' },
+    { type: "separator" },
     {
-      label: 'Quit',
+      label: "Quit",
       click: () => {
-        isQuitting = true
-        shutdownBackend().finally(() => app.exit(0))
+        isQuitting = true;
+        shutdownBackend().finally(() => app.exit(0));
       },
     },
-  ])
-  tray.setContextMenu(contextMenu)
+  ]);
+  tray.setContextMenu(contextMenu);
 
-  tray.on('click', () => {
+  tray.on("click", () => {
     if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      if (!mainWindow.isVisible()) mainWindow.show()
-      mainWindow.focus()
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
     }
-  })
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Removable drive watcher — polls wmic every 5 s for newly-connected drives.
 // ---------------------------------------------------------------------------
 function startDriveWatcher(): void {
-  if (process.platform !== 'win32') return
+  if (process.platform !== "win32") return;
 
   const poll = () => {
     execFile(
-      'wmic',
-      ['logicaldisk', 'where', 'drivetype=2', 'get', 'caption,volumename', '/format:csv'],
+      "wmic",
+      [
+        "logicaldisk",
+        "where",
+        "drivetype=2",
+        "get",
+        "caption,volumename",
+        "/format:csv",
+      ],
       { timeout: 5000 },
       (error, stdout) => {
-        if (error || !mainWindow || mainWindow.isDestroyed()) return
-        const currentDrives = new Set<string>()
-        const lines = stdout.trim().split('\n')
+        if (error || !mainWindow || mainWindow.isDestroyed()) return;
+        const currentDrives = new Set<string>();
+        const lines = stdout.trim().split("\n");
         for (let i = 1; i < lines.length; i++) {
-          const line = (lines[i] ?? '').trim()
-          if (!line) continue
-          const parts = line.split(',')
+          const line = (lines[i] ?? "").trim();
+          if (!line) continue;
+          const parts = line.split(",");
           if (parts.length >= 2) {
-            const caption = (parts[1] ?? '').trim()
-            const volumeName = (parts[2] ?? '').trim()
+            const caption = (parts[1] ?? "").trim();
+            const volumeName = (parts[2] ?? "").trim();
             if (caption) {
-              currentDrives.add(caption)
+              currentDrives.add(caption);
               if (!knownRemovableDrives.has(caption)) {
-                mainWindow.webContents.send('device:new-removable-drive', {
+                mainWindow.webContents.send("device:new-removable-drive", {
                   driveLetter: caption,
                   volumeName: volumeName || null,
-                })
+                });
               }
             }
           }
         }
-        knownRemovableDrives = currentDrives
+        knownRemovableDrives = currentDrives;
       },
-    )
-  }
+    );
+  };
 
-  poll()
-  driveWatcherInterval = setInterval(poll, 5000)
+  poll();
+  driveWatcherInterval = setInterval(poll, 5000);
 }
 
 // ---------------------------------------------------------------------------
 // Window creation
 // ---------------------------------------------------------------------------
 function createWindow(): void {
-  const iconPath = resolveIconPath()
-  console.log(`[icon] Using icon: ${iconPath}`)
+  const iconPath = resolveIconPath();
+  console.log(`[icon] Using icon: ${iconPath}`);
 
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: 'Transfera',
+    title: "Transfera",
     icon: iconPath,
     frame: false,
-    backgroundColor: '#0f0f0f',
+    backgroundColor: "#0f0f0f",
     webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
     show: false,
-  })
+  });
 
   if (isDev) {
-    mainWindow.loadURL(VITE_DEV_SERVER)
+    mainWindow.loadURL(VITE_DEV_SERVER);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'))
+    mainWindow.loadFile(path.join(__dirname, "..", "..", "dist", "index.html"));
   }
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show()
-  })
+  mainWindow.once("ready-to-show", () => {
+    mainWindow?.show();
+  });
 
-  mainWindow.webContents.on('before-input-event', (_event, input) => {
-    if (isDev && input.key === 'F12' && input.type === 'keyDown') {
-      mainWindow?.webContents.toggleDevTools()
+  mainWindow.webContents.on("before-input-event", (_event, input) => {
+    if (isDev && input.key === "F12" && input.type === "keyDown") {
+      mainWindow?.webContents.toggleDevTools();
     }
     // Ctrl+Q to quit the app permanently
-    if ((input.control || input.meta) && input.key.toLowerCase() === 'q' && input.type === 'keyDown') {
-      isQuitting = true
-      shutdownBackend().finally(() => app.exit(0))
+    if (
+      (input.control || input.meta) &&
+      input.key.toLowerCase() === "q" &&
+      input.type === "keyDown"
+    ) {
+      isQuitting = true;
+      shutdownBackend().finally(() => app.exit(0));
     }
-  })
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
-    return { action: 'deny' }
-  })
+    if (isAllowedExternalUrl(url)) {
+      shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
 
   // Intercept close → quit app and shut down backend
-  mainWindow.on('close', (event) => {
+  mainWindow.on("close", (event) => {
     if (!isQuitting) {
-      event.preventDefault()
-      isQuitting = true
-      shutdownBackend().finally(() => app.exit(0))
+      event.preventDefault();
+      isQuitting = true;
+      shutdownBackend().finally(() => app.exit(0));
     }
-  })
+  });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
-  })
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
 }
 
-function downloadFile(url: string, dest: string, onProgress?: (percent: number) => void): Promise<void> {
+function downloadFile(
+  url: string,
+  dest: string,
+  onProgress?: (percent: number) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest)
+    const file = fs.createWriteStream(dest);
     const request = (targetUrl: string) => {
-      https.get(targetUrl, (response) => {
-        if (
-          response.statusCode === 301 ||
-          response.statusCode === 302 ||
-          response.statusCode === 307 ||
-          response.statusCode === 308
-        ) {
-          const redirectUrl = response.headers.location
-          if (redirectUrl) {
-            request(redirectUrl)
-            return
+      https
+        .get(targetUrl, (response) => {
+          if (
+            response.statusCode === 301 ||
+            response.statusCode === 302 ||
+            response.statusCode === 307 ||
+            response.statusCode === 308
+          ) {
+            const redirectUrl = response.headers.location;
+            if (redirectUrl) {
+              request(redirectUrl);
+              return;
+            }
           }
-        }
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: ${response.statusCode}`))
-          return
-        }
-        const totalSize = parseInt(response.headers['content-length'] || '0', 10)
-        let downloaded = 0
-        response.on('data', (chunk) => {
-          downloaded += chunk.length
-          if (totalSize > 0 && onProgress) {
-            onProgress(Math.round((downloaded / totalSize) * 100))
+          if (response.statusCode !== 200) {
+            reject(new Error(`Failed to download: ${response.statusCode}`));
+            return;
           }
+          const totalSize = parseInt(
+            response.headers["content-length"] || "0",
+            10,
+          );
+          let downloaded = 0;
+          response.on("data", (chunk) => {
+            downloaded += chunk.length;
+            if (totalSize > 0 && onProgress) {
+              onProgress(Math.round((downloaded / totalSize) * 100));
+            }
+          });
+          response.pipe(file);
+          file.on("finish", () => {
+            file.close();
+            resolve();
+          });
         })
-        response.pipe(file)
-        file.on('finish', () => {
-          file.close()
-          resolve()
-        })
-      }).on('error', (err) => {
-        fs.unlink(dest, () => reject(err))
-      })
-    }
-    request(url)
-  })
+        .on("error", (err) => {
+          fs.unlink(dest, () => reject(err));
+        });
+    };
+    request(url);
+  });
 }
 
-async function runSetupInstall(event: Electron.IpcMainInvokeEvent): Promise<void> {
+async function runSetupInstall(
+  event: Electron.IpcMainInvokeEvent,
+): Promise<void> {
   const sendProgress = (step: string, percent: number, error?: string) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('setup:install-progress', { step, percent, error })
+      mainWindow.webContents.send("setup:install-progress", {
+        step,
+        percent,
+        error,
+      });
     }
-  }
+  };
 
-  const userDataDir = app.getPath('userData')
-  const pythonDir = path.join(userDataDir, 'python')
-  const zipPath = path.join(userDataDir, 'python-embed.zip')
-  const getPipPath = path.join(pythonDir, 'get-pip.py')
+  const userDataDir = app.getPath("userData");
+  const pythonDir = path.join(userDataDir, "python");
+  const zipPath = path.join(userDataDir, "python-embed.zip");
+  const getPipPath = path.join(pythonDir, "get-pip.py");
 
   try {
-    sendProgress('Creating directories...', 0)
+    sendProgress("Creating directories...", 0);
     if (fs.existsSync(pythonDir)) {
-      fs.rmSync(pythonDir, { recursive: true, force: true })
+      fs.rmSync(pythonDir, { recursive: true, force: true });
     }
-    fs.mkdirSync(pythonDir, { recursive: true })
+    fs.mkdirSync(pythonDir, { recursive: true });
 
-    sendProgress('Downloading Python runtime...', 5)
-    const pythonUrl = 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip'
+    sendProgress("Downloading Python runtime...", 5);
+    const pythonUrl =
+      "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip";
     await downloadFile(pythonUrl, zipPath, (pct) => {
-      sendProgress('Downloading Python runtime...', 5 + Math.round(pct * 0.40)) // 5% -> 45%
-    })
+      sendProgress("Downloading Python runtime...", 5 + Math.round(pct * 0.4)); // 5% -> 45%
+    });
 
-    sendProgress('Extracting Python runtime...', 45)
+    sendProgress("Extracting Python runtime...", 45);
     await new Promise<void>((resolve, reject) => {
       execFile(
-        'powershell',
+        "powershell",
         [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-          `Expand-Archive -Path '${zipPath}' -DestinationPath '${pythonDir}' -Force`
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `Expand-Archive -Path '${zipPath}' -DestinationPath '${pythonDir}' -Force`,
         ],
         { timeout: 60000 },
-        (err) => (err ? reject(err) : resolve())
-      )
-    })
-    
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
+
     if (fs.existsSync(zipPath)) {
-      fs.unlinkSync(zipPath)
+      fs.unlinkSync(zipPath);
     }
 
-    sendProgress('Configuring Python environment...', 50)
-    const files = fs.readdirSync(pythonDir)
-    const pthFile = files.find(f => f.endsWith('._pth'))
+    sendProgress("Configuring Python environment...", 50);
+    const files = fs.readdirSync(pythonDir);
+    const pthFile = files.find((f) => f.endsWith("._pth"));
     if (!pthFile) {
-      throw new Error('Could not find ._pth file in extracted Python directory')
+      throw new Error(
+        "Could not find ._pth file in extracted Python directory",
+      );
     }
-    const pthPath = path.join(pythonDir, pthFile)
-    const zipLib = pthFile.replace('._pth', '.zip')
-    const pthContent = `${zipLib}\n.\nsite-packages\n\nimport site\n`
-    fs.writeFileSync(pthPath, pthContent)
+    const pthPath = path.join(pythonDir, pthFile);
+    const zipLib = pthFile.replace("._pth", ".zip");
+    const pthContent = `${zipLib}\n.\nsite-packages\n\nimport site\n`;
+    fs.writeFileSync(pthPath, pthContent);
 
-    const sitePackagesDir = path.join(pythonDir, 'site-packages')
-    fs.mkdirSync(sitePackagesDir, { recursive: true })
+    const sitePackagesDir = path.join(pythonDir, "site-packages");
+    fs.mkdirSync(sitePackagesDir, { recursive: true });
 
-    sendProgress('Downloading package manager (pip)...', 55)
-    const pipUrl = 'https://bootstrap.pypa.io/get-pip.py'
+    sendProgress("Downloading package manager (pip)...", 55);
+    const pipUrl = "https://bootstrap.pypa.io/get-pip.py";
     await downloadFile(pipUrl, getPipPath, (pct) => {
-      sendProgress('Downloading package manager (pip)...', 55 + Math.round(pct * 0.15)) // 55% -> 70%
-    })
+      sendProgress(
+        "Downloading package manager (pip)...",
+        55 + Math.round(pct * 0.15),
+      ); // 55% -> 70%
+    });
 
-    sendProgress('Bootstrapping pip...', 70)
-    const pythonExe = path.join(pythonDir, 'python.exe')
+    sendProgress("Bootstrapping pip...", 70);
+    const pythonExe = path.join(pythonDir, "python.exe");
     await new Promise<void>((resolve, reject) => {
       execFile(
         pythonExe,
-        [getPipPath, '--no-warn-script-location'],
+        [getPipPath, "--no-warn-script-location"],
         { timeout: 60000 },
-        (err) => (err ? reject(err) : resolve())
-      )
-    })
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
 
     if (fs.existsSync(getPipPath)) {
-      fs.unlinkSync(getPipPath)
+      fs.unlinkSync(getPipPath);
     }
 
-    sendProgress('Installing backend dependencies (pymobiledevice3, fastapi, pillow)...', 75)
-    const requirementsPath = isDev 
-      ? path.resolve(__dirname, '..', '..', '..', 'backend', 'requirements.txt')
-      : path.join(process.resourcesPath, 'backend', 'requirements.txt')
+    sendProgress(
+      "Installing backend dependencies (pymobiledevice3, fastapi, pillow)...",
+      75,
+    );
+    const requirementsPath = isDev
+      ? path.resolve(__dirname, "..", "..", "..", "backend", "requirements.txt")
+      : path.join(process.resourcesPath, "backend", "requirements.txt");
 
     await new Promise<void>((resolve, reject) => {
-      const pipProc = spawn(pythonExe, ['-m', 'pip', 'install', '--upgrade', '-r', requirementsPath])
-      
-      pipProc.on('error', (err) => reject(err))
-      pipProc.on('exit', (code) => {
-        if (code === 0) {
-          resolve()
-        } else {
-          reject(new Error(`pip install exited with code ${code}`))
-        }
-      })
-    })
+      const pipProc = spawn(pythonExe, [
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "-r",
+        requirementsPath,
+      ]);
 
-    sendProgress('Setup complete! Starting backend...', 95)
-    await startBackend()
-    
-    sendProgress('Completed', 100)
+      pipProc.on("error", (err) => reject(err));
+      pipProc.on("exit", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`pip install exited with code ${code}`));
+        }
+      });
+    });
+
+    sendProgress("Setup complete! Starting backend...", 95);
+    await startBackend();
+
+    sendProgress("Completed", 100);
   } catch (err: any) {
-    console.error('[setup] Installation failed:', err)
-    sendProgress('Failed', 0, err.message || String(err))
-    throw err
+    console.error("[setup] Installation failed:", err);
+    sendProgress("Failed", 0, err.message || String(err));
+    throw err;
   }
 }
 
 function registerIPC(): void {
-  ipcMain.handle('dialog:open', async (_event, options) => {
-    if (!mainWindow) return { canceled: true, filePaths: [] }
+  ipcMain.handle("dialog:open", async (_event, options) => {
+    if (!mainWindow) return { canceled: true, filePaths: [] };
     return dialog.showOpenDialog(mainWindow, {
       title: options.title,
       defaultPath: options.defaultPath,
-      properties: (options.properties ?? []) as Electron.OpenDialogOptions['properties'],
-    })
-  })
+      properties: (options.properties ??
+        []) as Electron.OpenDialogOptions["properties"],
+    });
+  });
 
-  ipcMain.handle('dialog:save', async (_event, options) => {
-    if (!mainWindow) return { canceled: true }
+  ipcMain.handle("dialog:save", async (_event, options) => {
+    if (!mainWindow) return { canceled: true };
     return dialog.showSaveDialog(mainWindow, {
       title: options.title,
       defaultPath: options.defaultPath,
       filters: options.filters,
-    })
-  })
+    });
+  });
 
-  ipcMain.handle('dialog:message', async (_event, options) => {
-    if (!mainWindow) return { response: 0, checkboxChecked: false }
+  ipcMain.handle("dialog:message", async (_event, options) => {
+    if (!mainWindow) return { response: 0, checkboxChecked: false };
     return dialog.showMessageBox(mainWindow, {
-      type: options.type as Electron.MessageBoxOptions['type'],
+      type: options.type as Electron.MessageBoxOptions["type"],
       title: options.title,
       message: options.message,
       detail: options.detail,
       buttons: options.buttons,
-    })
-  })
+    });
+  });
 
-  ipcMain.handle('dialog:open-directory', async (_event, defaultPath?: string) => {
-    console.log('[IPC] dialog:open-directory invoked', defaultPath ?? '')
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory'],
-      defaultPath,
-    })
-    return result.canceled ? null : result.filePaths[0]
-  })
+  ipcMain.handle(
+    "dialog:open-directory",
+    async (_event, defaultPath?: string) => {
+      console.log("[IPC] dialog:open-directory invoked", defaultPath ?? "");
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ["openDirectory"],
+        defaultPath,
+      });
+      return result.canceled ? null : result.filePaths[0];
+    },
+  );
 
   // Window controls — minimize to tray instead of taskbar
-  ipcMain.handle('window:minimize', () => mainWindow?.hide())
-  ipcMain.handle('window:maximize', () => {
+  ipcMain.handle("window:minimize", () => mainWindow?.hide());
+  ipcMain.handle("window:maximize", () => {
     if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize()
+      mainWindow.unmaximize();
     } else {
-      mainWindow?.maximize()
+      mainWindow?.maximize();
     }
-  })
+  });
 
   // Close window — triggers the normal Electron quit lifecycle
   // (window-all-closed → app.quit() → before-quit → backend cleanup → exit).
-  ipcMain.handle('window:close', () => mainWindow?.close())
+  ipcMain.handle("window:close", () => mainWindow?.close());
 
-  ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
+  ipcMain.handle(
+    "window:isMaximized",
+    () => mainWindow?.isMaximized() ?? false,
+  );
 
   // Tray progress — updates the Windows taskbar progress overlay (0.0–1.0, null to clear)
-  ipcMain.handle('tray:set-progress', (_event, value: number | null) => {
+  ipcMain.handle("tray:set-progress", (_event, value: number | null) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setProgressBar(value !== null ? value : -1)
+      mainWindow.setProgressBar(value !== null ? value : -1);
     }
-  })
+  });
 
-  ipcMain.handle('shell:showItemInFolder', (_event, fullPath: string) => {
-    shell.showItemInFolder(fullPath)
-  })
-  ipcMain.handle('shell:openPath', (_event, fullPath: string) => {
-    shell.openPath(fullPath)
-  })
+  ipcMain.handle("shell:showItemInFolder", (_event, fullPath: string) => {
+    if (!isExistingPath(fullPath)) {
+      throw new Error("Path does not exist");
+    }
+    shell.showItemInFolder(fullPath);
+  });
+  ipcMain.handle("shell:openPath", (_event, fullPath: string) => {
+    if (!isExistingPath(fullPath)) {
+      throw new Error("Path does not exist");
+    }
+    return shell.openPath(fullPath);
+  });
+  ipcMain.handle("shell:openExternal", (_event, url: string) => {
+    if (!isAllowedExternalUrl(url)) {
+      throw new Error("URL not allowed (https only)");
+    }
+    return shell.openExternal(url);
+  });
 
-  ipcMain.handle('system:platform', () => process.platform)
-  ipcMain.handle('system:version', () => app.getVersion())
+  ipcMain.handle("system:platform", () => process.platform);
+  ipcMain.handle("system:version", () => app.getVersion());
 
-  ipcMain.handle('backend:status', async () => {
+  ipcMain.handle("backend:status", async () => {
     try {
-      const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/health`)
+      const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/health`);
       if (res.ok) {
-        return { running: true, starting: false, port: BACKEND_PORT }
+        return { running: true, starting: false, port: BACKEND_PORT };
       }
     } catch {
       // not running
     }
-    return { running: false, starting: backendStarting, port: BACKEND_PORT }
-  })
+    return { running: false, starting: backendStarting, port: BACKEND_PORT };
+  });
 
   ipcMain.handle(
-    'notification:show',
+    "notification:show",
     (_event, opts: { title: string; body: string; sessionId: number }) => {
       if (!Notification.isSupported()) {
-        console.warn('[notification] OS notifications not supported')
-        return false
+        console.warn("[notification] OS notifications not supported");
+        return false;
       }
 
-      const iconPath = resolveIconPath()
+      const iconPath = resolveIconPath();
       const notification = new Notification({
         title: opts.title,
         body: opts.body,
         icon: iconPath,
         silent: false,
-      })
+      });
 
-      notification.on('click', () => {
+      notification.on("click", () => {
         if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore()
-          mainWindow.focus()
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.focus();
         }
-        mainWindow?.webContents.send('notification:click', opts.sessionId)
-      })
+        mainWindow?.webContents.send("notification:click", opts.sessionId);
+      });
 
-      notification.show()
-      return true
+      notification.show();
+      return true;
     },
-  )
+  );
 
-  ipcMain.handle('window:isFocused', () => mainWindow?.isFocused() ?? false)
+  ipcMain.handle("window:isFocused", () => mainWindow?.isFocused() ?? false);
 
   // -- Elevated driver installation ---------------------------------------------------
   ipcMain.handle(
-    'driver:installElevated',
+    "driver:installElevated",
     async (_event, opts: { executable: string; args: string[] }) => {
-      const argsString = opts.args.map((a) => `'${a.replace(/'/g, "''")}'`).join(',')
+      const validated = validateCommandOpts(opts);
+      if ("error" in validated) {
+        return {
+          success: false,
+          exitCode: null as number | null,
+          error: validated.error,
+        };
+      }
+      const { executable, args } = validated;
+      const argsString = args
+        .map((a) => `'${a.replace(/'/g, "''")}'`)
+        .join(",");
       const psCommand = [
-        `$p = Start-Process -FilePath '${opts.executable}'`,
+        `$p = Start-Process -FilePath '${executable}'`,
         `-ArgumentList @(${argsString})`,
-        '-Verb RunAs -Wait -PassThru',
-        '$p.ExitCode',
-      ].join(' ')
+        "-Verb RunAs -Wait -PassThru",
+        "$p.ExitCode",
+      ].join(" ");
 
-      return new Promise<{ success: boolean; exitCode: number | null; error?: string }>((resolve) => {
+      return new Promise<{
+        success: boolean;
+        exitCode: number | null;
+        error?: string;
+      }>((resolve) => {
         execFile(
-          'powershell',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', psCommand],
+          "powershell",
+          [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-NonInteractive",
+            "-Command",
+            psCommand,
+          ],
           { timeout: 300_000 },
           (error, stdout, stderr) => {
             if (error) {
               if (error.killed) {
-                resolve({ success: false, exitCode: null, error: 'Installation timed out' })
+                resolve({
+                  success: false,
+                  exitCode: null,
+                  error: "Installation timed out",
+                });
               } else {
-                const exitCode = (error as NodeJS.ErrnoException).code
-                if (exitCode === '1602' || exitCode === '1223') {
-                  resolve({ success: false, exitCode: null, error: 'Installation cancelled' })
+                const exitCode = (error as NodeJS.ErrnoException).code;
+                if (exitCode === "1602" || exitCode === "1223") {
+                  resolve({
+                    success: false,
+                    exitCode: null,
+                    error: "Installation cancelled",
+                  });
                 } else {
                   resolve({
                     success: false,
                     exitCode: exitCode != null ? Number(exitCode) : null,
                     error: stderr?.trim() || error.message,
-                  })
+                  });
                 }
               }
-              return
+              return;
             }
 
-            const exitCode = parseInt(stdout?.trim() || '0', 10)
-            resolve({ success: exitCode === 0, exitCode })
+            const exitCode = parseInt(stdout?.trim() || "0", 10);
+            resolve({ success: exitCode === 0, exitCode });
           },
-        )
-      })
+        );
+      });
     },
-  )
+  );
 
-  ipcMain.handle('driver:openStorePage', async () => {
-    const storeUri = 'ms-windows-store://pdp/?productid=9NMPJ99VJBWV'
-    const storeWebUrl = 'https://apps.microsoft.com/detail/apple-devices/9NMPJ99VJBWV'
+  ipcMain.handle("driver:openStorePage", async () => {
+    const storeUri = "ms-windows-store://pdp/?productid=9NMPJ99VJBWV";
+    const storeWebUrl =
+      "https://apps.microsoft.com/detail/apple-devices/9NMPJ99VJBWV";
     try {
-      await shell.openExternal(storeUri)
-      return { opened: true }
+      await shell.openExternal(storeUri);
+      return { opened: true };
     } catch {
       try {
-        await shell.openExternal(storeWebUrl)
-        return { opened: true }
+        await shell.openExternal(storeWebUrl);
+        return { opened: true };
       } catch {
-        return { opened: false }
+        return { opened: false };
       }
     }
-  })
+  });
 
   // -- Tier 2 (WSL2 + usbipd-win) IPC handlers ----------------------------------------
 
   ipcMain.handle(
-    'tier2:runElevated',
+    "tier2:runElevated",
     async (
       _event,
       opts: { executable: string; args: string[]; description: string },
-    ): Promise<{ success: boolean; exitCode: number | null; error?: string }> => {
-      const argsString = opts.args.map((a) => `'${a.replace(/'/g, "''")}'`).join(',')
+    ): Promise<{
+      success: boolean;
+      exitCode: number | null;
+      error?: string;
+    }> => {
+      const validated = validateCommandOpts(opts);
+      if ("error" in validated) {
+        return { success: false, exitCode: null, error: validated.error };
+      }
+      const { executable, args } = validated;
+      const argsString = args
+        .map((a) => `'${a.replace(/'/g, "''")}'`)
+        .join(",");
       const psCommand = [
-        `$p = Start-Process -FilePath '${opts.executable}'`,
+        `$p = Start-Process -FilePath '${executable}'`,
         `-ArgumentList @(${argsString})`,
-        '-Verb RunAs -Wait -PassThru',
-        '$p.ExitCode',
-      ].join(' ')
+        "-Verb RunAs -Wait -PassThru",
+        "$p.ExitCode",
+      ].join(" ");
 
-      return new Promise<{ success: boolean; exitCode: number | null; error?: string }>((resolve) => {
+      return new Promise<{
+        success: boolean;
+        exitCode: number | null;
+        error?: string;
+      }>((resolve) => {
         execFile(
-          'powershell',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', psCommand],
+          "powershell",
+          [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-NonInteractive",
+            "-Command",
+            psCommand,
+          ],
           { timeout: 300_000 },
           (error, stdout, stderr) => {
             if (error) {
-              const exitCode = (error as NodeJS.ErrnoException).code
-              if (exitCode === '1602' || exitCode === '1223') {
-                resolve({ success: false, exitCode: null, error: 'User cancelled elevation prompt' })
+              const exitCode = (error as NodeJS.ErrnoException).code;
+              if (exitCode === "1602" || exitCode === "1223") {
+                resolve({
+                  success: false,
+                  exitCode: null,
+                  error: "User cancelled elevation prompt",
+                });
               } else if (error.killed) {
-                resolve({ success: false, exitCode: null, error: 'Command timed out' })
+                resolve({
+                  success: false,
+                  exitCode: null,
+                  error: "Command timed out",
+                });
               } else {
                 resolve({
                   success: false,
                   exitCode: exitCode != null ? Number(exitCode) : null,
                   error: stderr?.trim() || error.message,
-                })
+                });
               }
-              return
+              return;
             }
-            const exitCode = parseInt(stdout?.trim() || '0', 10)
-            resolve({ success: exitCode === 0, exitCode })
+            const exitCode = parseInt(stdout?.trim() || "0", 10);
+            resolve({ success: exitCode === 0, exitCode });
           },
-        )
-      })
+        );
+      });
     },
-  )
+  );
 
   ipcMain.handle(
-    'tier2:runCommand',
+    "tier2:runCommand",
     async (
       _event,
-      opts: { executable: string; args: string[]; elevated?: boolean; timeoutMs?: number },
-    ): Promise<{ success: boolean; stdout: string; stderr: string; exitCode: number | null }> => {
-      const timeout = opts.timeoutMs ?? 120_000
+      opts: {
+        executable: string;
+        args: string[];
+        elevated?: boolean;
+        timeoutMs?: number;
+      },
+    ): Promise<{
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exitCode: number | null;
+    }> => {
+      const validated = validateCommandOpts(opts);
+      if ("error" in validated) {
+        return {
+          success: false,
+          stdout: "",
+          stderr: validated.error,
+          exitCode: null,
+        };
+      }
+      const { executable, args } = validated;
+      const timeout =
+        typeof opts.timeoutMs === "number" &&
+        Number.isFinite(opts.timeoutMs) &&
+        opts.timeoutMs > 0 &&
+        opts.timeoutMs <= 300_000
+          ? Math.floor(opts.timeoutMs)
+          : 120_000;
 
       if (opts.elevated) {
-        const argsString = opts.args.map((a) => `'${a.replace(/'/g, "''")}'`).join(',')
+        const argsString = args
+          .map((a) => `'${a.replace(/'/g, "''")}'`)
+          .join(",");
         const psCommand = [
-          `$p = Start-Process -FilePath '${opts.executable}'`,
+          `$p = Start-Process -FilePath '${executable}'`,
           `-ArgumentList @(${argsString})`,
-          '-Verb RunAs -Wait -PassThru',
+          "-Verb RunAs -Wait -PassThru",
           `$p.ExitCode`,
-        ].join(' ')
+        ].join(" ");
 
         return new Promise((resolve) => {
           execFile(
-            'powershell',
-            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', psCommand],
+            "powershell",
+            [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-NonInteractive",
+              "-Command",
+              psCommand,
+            ],
             { timeout },
             (error, stdout, stderr) => {
               if (error) {
-                const exitCode = (error as NodeJS.ErrnoException).code
-                if (exitCode === '1602' || exitCode === '1223') {
-                  resolve({ success: false, stdout: '', stderr: 'User cancelled elevation', exitCode: null })
+                const exitCode = (error as NodeJS.ErrnoException).code;
+                if (exitCode === "1602" || exitCode === "1223") {
+                  resolve({
+                    success: false,
+                    stdout: "",
+                    stderr: "User cancelled elevation",
+                    exitCode: null,
+                  });
                 } else {
                   resolve({
                     success: false,
-                    stdout: stdout?.trim() || '',
+                    stdout: stdout?.trim() || "",
                     stderr: stderr?.trim() || error.message,
                     exitCode: exitCode != null ? Number(exitCode) : null,
-                  })
+                  });
                 }
-                return
+                return;
               }
-              const exitCode = parseInt(stdout?.trim() || '0', 10)
-              resolve({ success: exitCode === 0, stdout: stdout?.trim() || '', stderr: stderr?.trim() || '', exitCode })
+              const exitCode = parseInt(stdout?.trim() || "0", 10);
+              resolve({
+                success: exitCode === 0,
+                stdout: stdout?.trim() || "",
+                stderr: stderr?.trim() || "",
+                exitCode,
+              });
             },
-          )
-        })
+          );
+        });
       }
 
       return new Promise((resolve) => {
-        execFile(
-          opts.executable,
-          opts.args,
-          { timeout },
-          (error, stdout, stderr) => {
-            if (error) {
-              const exitCode = (error as NodeJS.ErrnoException & { code?: string | number }).code
-              resolve({
-                success: false,
-                stdout: stdout?.trim() || '',
-                stderr: stderr?.trim() || error.message,
-                exitCode: typeof exitCode === 'number' ? exitCode : null,
-              })
-              return
-            }
-            const exitCode = parseInt(stdout?.trim() || '0', 10)
-            resolve({ success: exitCode === 0, stdout: stdout?.trim() || '', stderr: stderr?.trim() || '', exitCode })
-          },
-        )
-      })
+        execFile(executable, args, { timeout }, (error, stdout, stderr) => {
+          if (error) {
+            const exitCode = (
+              error as NodeJS.ErrnoException & { code?: string | number }
+            ).code;
+            resolve({
+              success: false,
+              stdout: stdout?.trim() || "",
+              stderr: stderr?.trim() || error.message,
+              exitCode: typeof exitCode === "number" ? exitCode : null,
+            });
+            return;
+          }
+          const exitCode = parseInt(stdout?.trim() || "0", 10);
+          resolve({
+            success: exitCode === 0,
+            stdout: stdout?.trim() || "",
+            stderr: stderr?.trim() || "",
+            exitCode,
+          });
+        });
+      });
     },
-  )
+  );
 
-  ipcMain.handle('tier2:checkVirtualization', async () => {
+  ipcMain.handle("tier2:checkVirtualization", async () => {
     return new Promise<{ available: boolean; details: string }>((resolve) => {
       execFile(
-        'powershell',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-Command', 'Get-ComputerInfo | Select-Object -ExpandProperty HyperVRequirementVirtualizationFirmwareEnabled'],
+        "powershell",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-NonInteractive",
+          "-Command",
+          "Get-ComputerInfo | Select-Object -ExpandProperty HyperVRequirementVirtualizationFirmwareEnabled",
+        ],
         { timeout: 30_000 },
         (error, stdout, stderr) => {
           if (error) {
-            resolve({ available: false, details: stderr?.trim() || error.message })
-            return
+            resolve({
+              available: false,
+              details: stderr?.trim() || error.message,
+            });
+            return;
           }
-          const val = stdout?.trim().toLowerCase()
-          if (val === 'true') {
-            resolve({ available: true, details: 'Hardware virtualization is enabled' })
-          } else if (val === 'false') {
-            resolve({ available: false, details: 'Hardware virtualization is disabled in BIOS. Enable VT-x/AMD-V in your firmware settings to use Tier 2 (WSL2).' })
+          const val = stdout?.trim().toLowerCase();
+          if (val === "true") {
+            resolve({
+              available: true,
+              details: "Hardware virtualization is enabled",
+            });
+          } else if (val === "false") {
+            resolve({
+              available: false,
+              details:
+                "Hardware virtualization is disabled in BIOS. Enable VT-x/AMD-V in your firmware settings to use Tier 2 (WSL2).",
+            });
           } else {
-            resolve({ available: false, details: `Unexpected output: ${stdout?.trim() || '(empty)'}` })
+            resolve({
+              available: false,
+              details: `Unexpected output: ${stdout?.trim() || "(empty)"}`,
+            });
           }
         },
-      )
-    })
-  })
+      );
+    });
+  });
 
   // Relaunch the app — shut down backend first so the new instance starts clean.
-  ipcMain.handle('tier2:restart', async () => {
-    isQuitting = true
-    await shutdownBackend()
-    app.relaunch({ args: [] })
-    app.exit(0)
-  })
+  ipcMain.handle("tier2:restart", async () => {
+    isQuitting = true;
+    await shutdownBackend();
+    app.relaunch({ args: [] });
+    app.exit(0);
+  });
 
-  ipcMain.handle('setup:check-python', async () => {
-    return { installed: isPythonInstalled() }
-  })
+  ipcMain.handle("setup:check-python", async () => {
+    return { installed: isPythonInstalled() };
+  });
 
-  ipcMain.handle('setup:install-python', async (event) => {
-    return runSetupInstall(event)
-  })
+  ipcMain.handle("setup:install-python", async (event) => {
+    return runSetupInstall(event);
+  });
 }
 
 // ---------------------------------------------------------------------------
 // App Lifecycle
 // ---------------------------------------------------------------------------
 
-process.on('uncaughtException', (error) => {
-  console.error('[lifecycle] Uncaught exception:', error)
+process.on("uncaughtException", (error) => {
+  console.error("[lifecycle] Uncaught exception:", error);
   if (!isQuitting) {
-    isQuitting = true
-    shutdownBackend().finally(() => app.exit(1))
+    isQuitting = true;
+    shutdownBackend().finally(() => app.exit(1));
   }
-})
+});
 
-process.on('unhandledRejection', (reason) => {
-  console.error('[lifecycle] Unhandled rejection:', reason)
-})
+process.on("unhandledRejection", (reason) => {
+  console.error("[lifecycle] Unhandled rejection:", reason);
+});
 
 // ---------------------------------------------------------------------------
 // Single Instance Lock
 // ---------------------------------------------------------------------------
-const gotTheLock = app.requestSingleInstanceLock()
+const gotTheLock = app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
-  console.log('[lifecycle] Another instance of Transfera is already running. Quitting.')
-  app.exit(0)
+  console.log(
+    "[lifecycle] Another instance of Transfera is already running. Quitting.",
+  );
+  app.exit(0);
 } else {
-  app.on('second-instance', () => {
+  app.on("second-instance", () => {
     if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      if (!mainWindow.isVisible()) mainWindow.show()
-      mainWindow.focus()
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
     }
-  })
+  });
 
   app.whenReady().then(async () => {
-    registerIPC()
+    registerIPC();
 
-    const envExternalBackend = process.env.TRANSFERA_EXTERNAL_BACKEND === '1'
+    const envExternalBackend = process.env.TRANSFERA_EXTERNAL_BACKEND === "1";
 
-    createWindow()
-    createTray()
-    startDriveWatcher()
+    createWindow();
+    createTray();
+    startDriveWatcher();
 
     if (envExternalBackend) {
-      externalBackend = true
-      console.log('[lifecycle] TRANSFERA_EXTERNAL_BACKEND set — skipping backend spawn')
+      externalBackend = true;
+      console.log(
+        "[lifecycle] TRANSFERA_EXTERNAL_BACKEND set — skipping backend spawn",
+      );
     } else {
       // Probe the backend port before spawning so we know whether
       // to manage our own subprocess or rely on an externally-launched one.
-      const alreadyRunning = await probeBackend()
+      const alreadyRunning = await probeBackend();
 
       if (alreadyRunning) {
-        externalBackend = true
-        console.log('[lifecycle] Detected external backend — skipping spawn')
+        externalBackend = true;
+        console.log("[lifecycle] Detected external backend — skipping spawn");
       } else {
         if (!isPythonInstalled()) {
           // Python runtime not found in the expected locations.
           // Signal the renderer so it can show the first-time setup UI.
-          console.log('[lifecycle] Python runtime not installed. Showing setup screen.')
+          console.log(
+            "[lifecycle] Python runtime not installed. Showing setup screen.",
+          );
           // Give the window a moment to finish loading before sending the IPC.
-          mainWindow?.webContents.once('did-finish-load', () => {
+          mainWindow?.webContents.once("did-finish-load", () => {
             if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('backend:down')
+              mainWindow.webContents.send("backend:down");
             }
-          })
+          });
           // Belt-and-suspenders: also send after a short delay in case the
           // window already finished loading before this code ran.
           setTimeout(() => {
             if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('backend:down')
+              mainWindow.webContents.send("backend:down");
             }
-          }, 3000)
+          }, 3000);
         } else {
           startBackend().catch((err) => {
-            console.error('[lifecycle] Backend startup error:', err)
+            console.error("[lifecycle] Backend startup error:", err);
             if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('backend:down')
+              mainWindow.webContents.send("backend:down");
             }
-          })
+          });
         }
       }
     }
 
-    app.on('activate', () => {
+    app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow()
+        createWindow();
       }
-    })
-  })
+    });
+  });
 
   // Window-all-closed: on non-macOS, tell the app to quit (which triggers
   // before-quit → backend shutdown → exit).
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-      app.quit()
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
     }
-  })
+  });
 
   // Before-quit: prevent the default quit so we can shut down the backend
   // asynchronously first.  After cleanup, call app.exit(0) which skips the
   // quit events and terminates immediately.
-  app.on('before-quit', (event) => {
+  app.on("before-quit", (event) => {
     if (driveWatcherInterval) {
-      clearInterval(driveWatcherInterval)
-      driveWatcherInterval = null
+      clearInterval(driveWatcherInterval);
+      driveWatcherInterval = null;
     }
-    if (isQuitting) return
-    event.preventDefault()
-    isQuitting = true
+    if (isQuitting) return;
+    event.preventDefault();
+    isQuitting = true;
 
     shutdownBackend().finally(() => {
-      app.exit(0)
-    })
-  })
+      app.exit(0);
+    });
+  });
 
   // Will-quit: last-resort safety net.  If the app reaches this point with
   // the backend still running (e.g. before-quit wasn't invoked on macOS,
   // or the async shutdown hangs), force-kill the process tree immediately.
-  app.on('will-quit', () => {
-    if (externalBackend) return
+  app.on("will-quit", () => {
+    if (externalBackend) return;
 
     if (backendProcess && !backendProcess.killed) {
-      console.log('[lifecycle] will-quit: force-killing backend as last resort')
-      const pid = backendProcess.pid
-      backendProcess = null
+      console.log(
+        "[lifecycle] will-quit: force-killing backend as last resort",
+      );
+      const pid = backendProcess.pid;
+      backendProcess = null;
       if (pid) {
-        if (process.platform === 'win32') {
-          execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 3000 }, () => {})
+        if (process.platform === "win32") {
+          execFile(
+            "taskkill",
+            ["/pid", String(pid), "/T", "/F"],
+            { timeout: 3000 },
+            () => {},
+          );
         } else {
-          try { process.kill(pid, 'SIGKILL') } catch { /* already dead */ }
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            /* already dead */
+          }
         }
       }
     }
-  })
+  });
 }

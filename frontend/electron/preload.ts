@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer } from "electron";
 
 // ---------------------------------------------------------------------------
 // Secure IPC bridge
@@ -6,123 +6,147 @@ import { contextBridge, ipcRenderer } from 'electron'
 // All calls are proxied through ipcRenderer.invoke which is safe with
 // contextIsolation enabled and nodeIntegration disabled.
 // ---------------------------------------------------------------------------
-contextBridge.exposeInMainWorld('electronAPI', {
+contextBridge.exposeInMainWorld("electronAPI", {
   // System
-  getPlatform: () => ipcRenderer.invoke('system:platform'),
-  getVersion: () => ipcRenderer.invoke('system:version'),
+  getPlatform: () => ipcRenderer.invoke("system:platform"),
+  getVersion: () => ipcRenderer.invoke("system:version"),
 
   // Dialogs
   showOpenDialog: (options: {
-    title?: string
-    defaultPath?: string
-    properties?: string[]
-  }) => ipcRenderer.invoke('dialog:open', options),
+    title?: string;
+    defaultPath?: string;
+    properties?: string[];
+  }) => ipcRenderer.invoke("dialog:open", options),
 
   showSaveDialog: (options: {
-    title?: string
-    defaultPath?: string
-    filters?: { name: string; extensions: string[] }[]
-  }) => ipcRenderer.invoke('dialog:save', options),
+    title?: string;
+    defaultPath?: string;
+    filters?: { name: string; extensions: string[] }[];
+  }) => ipcRenderer.invoke("dialog:save", options),
 
   showMessageBox: (options: {
-    type?: string
-    title?: string
-    message: string
-    detail?: string
-    buttons?: string[]
-  }) => ipcRenderer.invoke('dialog:message', options),
+    type?: string;
+    title?: string;
+    message: string;
+    detail?: string;
+    buttons?: string[];
+  }) => ipcRenderer.invoke("dialog:message", options),
 
   // Directory picker — returns selected folder path or null
   openDirectory: (defaultPath?: string) =>
-    ipcRenderer.invoke('dialog:open-directory', defaultPath),
+    ipcRenderer.invoke("dialog:open-directory", defaultPath),
 
   // Window controls
-  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
-  maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
-  closeWindow: () => ipcRenderer.invoke('window:close'),
-  isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
+  maximizeWindow: () => ipcRenderer.invoke("window:maximize"),
+  closeWindow: () => ipcRenderer.invoke("window:close"),
+  isMaximized: () => ipcRenderer.invoke("window:isMaximized"),
 
   // Backend status
-  getBackendStatus: () => ipcRenderer.invoke('backend:status'),
+  getBackendStatus: () => ipcRenderer.invoke("backend:status"),
 
   // Shell
   showItemInFolder: (fullPath: string) =>
-    ipcRenderer.invoke('shell:showItemInFolder', fullPath),
+    ipcRenderer.invoke("shell:showItemInFolder", fullPath),
   openPath: (fullPath: string) =>
-    ipcRenderer.invoke('shell:openPath', fullPath),
+    ipcRenderer.invoke("shell:openPath", fullPath),
+  // Open URL in default browser — main validates https: only
+  openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
 
   // Backend lifecycle events
   onBackendDown: (callback: () => void) => {
-    ipcRenderer.on('backend:down', callback)
-    return () => ipcRenderer.removeListener('backend:down', callback)
+    ipcRenderer.on("backend:down", callback);
+    return () => ipcRenderer.removeListener("backend:down", callback);
   },
 
   onBackendStarting: (callback: () => void) => {
-    ipcRenderer.on('backend:starting', callback)
-    return () => ipcRenderer.removeListener('backend:starting', callback)
+    ipcRenderer.on("backend:starting", callback);
+    return () => ipcRenderer.removeListener("backend:starting", callback);
   },
 
   onBackendReady: (callback: () => void) => {
-    ipcRenderer.on('backend:ready', callback)
-    return () => ipcRenderer.removeListener('backend:ready', callback)
+    ipcRenderer.on("backend:ready", callback);
+    return () => ipcRenderer.removeListener("backend:ready", callback);
   },
 
   // Native OS notification — returns true if shown, false if unsupported
-  showNotification: (opts: { title: string; body: string; sessionId: number }) =>
-    ipcRenderer.invoke('notification:show', opts),
+  showNotification: (opts: {
+    title: string;
+    body: string;
+    sessionId: number;
+  }) => ipcRenderer.invoke("notification:show", opts),
 
   // Notification click handler — fires when user clicks a notification toast
   onNotificationClick: (callback: (sessionId: number) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, sessionId: number) => callback(sessionId)
-    ipcRenderer.on('notification:click', handler)
-    return () => ipcRenderer.removeListener('notification:click', handler)
+    const handler = (_event: Electron.IpcRendererEvent, sessionId: number) =>
+      callback(sessionId);
+    ipcRenderer.on("notification:click", handler);
+    return () => ipcRenderer.removeListener("notification:click", handler);
   },
 
   // Window focus state
-  isWindowFocused: () => ipcRenderer.invoke('window:isFocused'),
+  isWindowFocused: () => ipcRenderer.invoke("window:isFocused"),
 
   // Elevated driver installation — runs winget with UAC elevation
   installDriverElevated: (opts: { executable: string; args: string[] }) =>
-    ipcRenderer.invoke('driver:installElevated', opts),
+    ipcRenderer.invoke("driver:installElevated", opts),
 
   // Open Microsoft Store page for Apple Mobile Device Support (winget fallback)
-  openDriverStorePage: () => ipcRenderer.invoke('driver:openStorePage'),
+  openDriverStorePage: () => ipcRenderer.invoke("driver:openStorePage"),
 
   // --- Tier 2 (WSL2 + usbipd-win) -----------------------------------------
   // Run an elevated command via UAC prompt
-  runElevated: (opts: { executable: string; args: string[]; description: string }) =>
-    ipcRenderer.invoke('tier2:runElevated', opts),
+  runElevated: (opts: {
+    executable: string;
+    args: string[];
+    description: string;
+  }) => ipcRenderer.invoke("tier2:runElevated", opts),
 
   // Run an arbitrary command (usbipd, wsl.exe, etc.)
   runCommand: (opts: {
-    executable: string
-    args: string[]
-    elevated?: boolean
-    timeoutMs?: number
-  }) => ipcRenderer.invoke('tier2:runCommand', opts),
+    executable: string;
+    args: string[];
+    elevated?: boolean;
+    timeoutMs?: number;
+  }) => ipcRenderer.invoke("tier2:runCommand", opts),
 
   // Check hardware virtualization status
-  checkVirtualization: () => ipcRenderer.invoke('tier2:checkVirtualization'),
+  checkVirtualization: () => ipcRenderer.invoke("tier2:checkVirtualization"),
 
   // Restart the app (relaunch + exit)
-  restartApp: () => ipcRenderer.invoke('tier2:restart'),
+  restartApp: () => ipcRenderer.invoke("tier2:restart"),
 
   // Tray progress — updates Windows taskbar progress overlay
-  setTrayProgress: (value: number | null) => ipcRenderer.invoke('tray:set-progress', value),
+  setTrayProgress: (value: number | null) =>
+    ipcRenderer.invoke("tray:set-progress", value),
 
   // Removable drive detection — fires when a new USB drive is connected
-  onNewRemovableDrive: (callback: (data: { driveLetter: string; volumeName: string | null }) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { driveLetter: string; volumeName: string | null }) => callback(data)
-    ipcRenderer.on('device:new-removable-drive', handler)
-    return () => ipcRenderer.removeListener('device:new-removable-drive', handler)
+  onNewRemovableDrive: (
+    callback: (data: {
+      driveLetter: string;
+      volumeName: string | null;
+    }) => void,
+  ) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      data: { driveLetter: string; volumeName: string | null },
+    ) => callback(data);
+    ipcRenderer.on("device:new-removable-drive", handler);
+    return () =>
+      ipcRenderer.removeListener("device:new-removable-drive", handler);
   },
 
   // Setup / python installer
-  checkPythonInstalled: () => ipcRenderer.invoke('setup:check-python'),
-  installPython: () => ipcRenderer.invoke('setup:install-python'),
-  onInstallProgress: (callback: (data: { step: string; percent: number; error?: string }) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { step: string; percent: number; error?: string }) => callback(data)
-    ipcRenderer.on('setup:install-progress', handler)
-    return () => ipcRenderer.removeListener('setup:install-progress', handler)
+  checkPythonInstalled: () => ipcRenderer.invoke("setup:check-python"),
+  installPython: () => ipcRenderer.invoke("setup:install-python"),
+  onInstallProgress: (
+    callback: (data: { step: string; percent: number; error?: string }) => void,
+  ) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      data: { step: string; percent: number; error?: string },
+    ) => callback(data);
+    ipcRenderer.on("setup:install-progress", handler);
+    return () => ipcRenderer.removeListener("setup:install-progress", handler);
   },
-})
+});

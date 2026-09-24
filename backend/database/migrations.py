@@ -59,28 +59,54 @@ _MIGRATIONS: list[tuple[int, str]] = [
 async def _ensure_migrations_table(conn: AsyncConnection) -> None:
     """Create the schema_migrations ledger table if it does not exist."""
     await conn.execute(
-        text(
-            "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "  id INTEGER PRIMARY KEY,"
-            "  applied_at DATETIME NOT NULL"
-            ")"
-        )
+        text("CREATE TABLE IF NOT EXISTS schema_migrations (  id INTEGER PRIMARY KEY,  applied_at DATETIME NOT NULL)")
     )
 
 
 async def run_pending_migrations(conn: AsyncConnection) -> None:
     """Apply any unapplied migrations in order.
 
-    Must be called inside an ``engine.begin()`` transaction so each migration
-    is committed atomically with its ledger entry.
+    Uses the applied-ID SET (not MAX) so a missed middle migration backfills.
+    Runs ``PRAGMA integrity_check`` first and backs up the DB file before DDL.
+    Must be called inside an ``engine.begin()`` transaction.
     """
     await _ensure_migrations_table(conn)
 
-    result = await conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM schema_migrations"))
-    max_applied = result.scalar() or 0
+    try:
+        chk = await conn.execute(text("PRAGMA integrity_check"))
+        row = chk.scalar() or chk.fetchone()
+        status = str(row[0] if isinstance(row, (list, tuple)) else row or "").lower()
+        if status and status != "ok":
+            logger.error("DB integrity_check failed before migrations: %s", row)
+            raise RuntimeError(f"Database integrity check failed: {row}")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning("integrity_check skipped: %s", exc)
+
+    # Best-effort pre-migrate backup (same dir, timestamped)
+    try:
+        from backend.config import DB_DIR as _db_dir
+
+        db_file = _db_dir / "transfera.db"
+        if db_file.is_file():
+            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            backup = _db_dir / f"transfera.pre-migrate-{ts}.bak"
+            try:
+                import shutil as _shutil
+
+                _shutil.copy2(str(db_file), str(backup))
+                logger.info("Pre-migration backup written: %s", backup.name)
+            except OSError as exc:
+                logger.warning("Pre-migration backup failed: %s", exc)
+    except Exception as exc:
+        logger.debug("Backup probe skipped: %s", exc)
+
+    result = await conn.execute(text("SELECT id FROM schema_migrations"))
+    applied: set[int] = {row[0] for row in result.all()}
 
     for mid, sql in _MIGRATIONS:
-        if mid <= max_applied:
+        if mid in applied:
             continue
         try:
             await conn.execute(text(sql))
@@ -94,8 +120,13 @@ async def run_pending_migrations(conn: AsyncConnection) -> None:
                 raise
         now = datetime.now(UTC).isoformat()
         await conn.execute(
-            text("INSERT INTO schema_migrations (id, applied_at) VALUES (:id, :applied_at)"),
+            text("INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (:id, :applied_at)"),
             {"id": mid, "applied_at": now},
         )
 
-    logger.info("Schema migrations up to date (latest_id=%d)", max(max_applied, len(_MIGRATIONS)))
+    _latest_migration_id = _MIGRATIONS[-1][0] if _MIGRATIONS else 0
+    logger.info(
+        "Schema migrations up to date (latest_id=%d, applied=%d)",
+        _latest_migration_id,
+        len(applied),
+    )

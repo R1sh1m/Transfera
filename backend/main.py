@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
@@ -22,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from backend.api.device_preview import router as device_preview_router
 from backend.api.routes import _run_transfer_background, router, ws_transfer
 from backend.api.tier2_routes import router as tier2_router
-from backend.config import CACHE_DIR, HOST, PORT
+from backend.config import CACHE_DIR, HOST, LOG_DIR, LOG_FORMAT, PORT
+from backend.config import LOG_LEVEL as _LOG_LEVEL
 from backend.database.manager import create_all_tables, dispose_engine, session_scope
 from backend.engines.recovery import recover_interrupted_batches
 
@@ -34,12 +36,24 @@ from backend.engines.recovery import recover_interrupted_batches
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+_log_level = getattr(logging, _LOG_LEVEL.upper(), logging.INFO)
+_log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+try:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _file = RotatingFileHandler(
+        str(LOG_DIR / "transfera.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _log_handlers.append(_file)
+except OSError:
+    pass
+
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ],
+    level=_log_level,
+    format=LOG_FORMAT,
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("transfera")
 
@@ -70,6 +84,7 @@ class SPAStaticFiles(StaticFiles):
         # connection is properly closed rather than left hanging.
         if path.startswith("/api/") or path.startswith("/ws/"):
             from starlette.responses import JSONResponse
+
             response = JSONResponse(
                 {"detail": f"Not found: {path}"},
                 status_code=404,
@@ -124,6 +139,7 @@ async def lifespan(app: FastAPI):
     # generation and AFC I/O don't queue behind each other.
     # Default is min(32, cpu_count + 4) — we double that, capped at 32.
     import concurrent.futures
+
     _cpu = os.cpu_count() or 4
     _pool_size = min(32, max(16, _cpu * 2))
     loop = asyncio.get_event_loop()
@@ -136,9 +152,7 @@ async def lifespan(app: FastAPI):
     logger.info("Asyncio executor expanded to %d threads (%d CPUs)", _pool_size, _cpu)
 
     if not FRONTEND_DIST.is_dir():
-        logger.warning(
-            "Frontend dist not found at %s — API-only mode", FRONTEND_DIST
-        )
+        logger.warning("Frontend dist not found at %s — API-only mode", FRONTEND_DIST)
     else:
         logger.info("Serving frontend from %s", FRONTEND_DIST)
 
@@ -153,6 +167,7 @@ async def lifespan(app: FastAPI):
     from typing import cast
 
     from sqlalchemy import CursorResult, text
+
     async with session_scope() as session:
         result = await session.execute(
             text("UPDATE media_items SET thumbnail_path = NULL WHERE thumbnail_path = 'memory'")
@@ -165,8 +180,7 @@ async def lifespan(app: FastAPI):
     # Run crash recovery
     stats = await recover_interrupted_batches(cache_dir=CACHE_DIR)
     logger.info(
-        "Recovery complete: %d LOADING, %d ARCHIVED batches handled "
-        "(%d orphaned partials removed)",
+        "Recovery complete: %d LOADING, %d ARCHIVED batches handled (%d orphaned partials removed)",
         stats.get("loading_recovered", 0),
         stats.get("archived_recovered", 0),
         stats.get("orphaned_partials_removed", 0),
@@ -182,6 +196,7 @@ async def lifespan(app: FastAPI):
     # Check if Tier 2 setup needs to resume after restart
     try:
         from backend.wsl_orchestrator import Tier2PersistedState
+
         tier2_state = Tier2PersistedState.load()
         if tier2_state and tier2_state.pending_step:
             logger.info(
@@ -194,6 +209,7 @@ async def lifespan(app: FastAPI):
     # Pre-warm ExifTool so it's ready for the first transfer
     try:
         from backend.engines.metadata_extractor import _bootstrap_exiftool, _exiftool_session
+
         exiftool_path = _bootstrap_exiftool()
         if exiftool_path:
             _exiftool_session._ensure_running()
@@ -205,29 +221,55 @@ async def lifespan(app: FastAPI):
 
     # Fire up device manager in background — don't block server startup
     from backend.tier2_manager import get_device_manager
+
     manager = get_device_manager()
-    app.state.device_manager_init_task = asyncio.create_task(
-        _init_device_manager_background(manager)
-    )
+    app.state.device_manager_init_task = asyncio.create_task(_init_device_manager_background(manager))
     yield
 
-    # Shutdown
+    # Shutdown — drain in-flight transfers before disposing the engine.
     task = getattr(app.state, "device_manager_init_task", None)
     if task is not None and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+    try:
+        from backend.api.routes import _active_tasks, _cancellation_events
+
+        for sid in list(_active_tasks.keys()):
+            try:
+                ev = _cancellation_events.get(sid)
+                if ev is not None:
+                    ev.set()
+            except Exception:
+                pass
+        if _active_tasks:
+            tasks = list(_active_tasks.values())
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Shutdown timed out waiting for %d transfer task(s)",
+                    len(tasks),
+                )
+                for t in tasks:
+                    t.cancel()
+    except Exception as exc:
+        logger.debug("Transfer drain skipped: %s", exc)
+
     # Close the persistent ExifTool session (if it was ever started)
     try:
         from backend.engines.metadata_extractor import _exiftool_session
+
         _exiftool_session.close()
     except Exception:
         pass
 
     await dispose_engine()
     logger.info("Transfera v2 shutdown complete")
-
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +287,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "http://127.0.0.1:5173",   # Vite dev server
+            "http://127.0.0.1:5173",  # Vite dev server
             "http://localhost:5173",
             f"http://127.0.0.1:{PORT}",
             f"http://localhost:{PORT}",
@@ -255,14 +297,39 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Consistent error envelope (validation errors + unhandled 500s without leaks)
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(request, exc):  # type: ignore[no-untyped-def]
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Validation error", "errors": exc.errors()},
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_handler(request, exc):  # type: ignore[no-untyped-def]
+        logger.error("Unhandled error on %s: %s", request.url.path, exc, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+        )
+
     # Register API routes FIRST -- these take priority over the SPA catch-all
     app.include_router(router)
     app.include_router(tier2_router)
     app.include_router(device_preview_router)
 
-    # WebSocket endpoint
+    # WebSocket endpoint — token required via ?token= (X-Local-Token value)
     @app.websocket("/ws/transfer/{session_id}")
     async def websocket_endpoint(websocket: WebSocket, session_id: int):
+        from backend.api.auth import verify_ws_token
+
+        token = websocket.query_params.get("token")
+        if not await verify_ws_token(token):
+            await websocket.close(code=4403, reason="Forbidden")
+            return
         await ws_transfer(websocket, session_id)
 
     # Mount compiled React frontend (SPA catch-all)

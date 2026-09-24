@@ -30,7 +30,7 @@ from backend.database.models import (
 from backend.engines.batch_manager import get_batch_items, mark_batch_status
 from backend.engines.cache_manager import get_cache_path
 from backend.engines.capture_time import extract_capture_datetime
-from backend.engines.organizer import resolve_archive_path
+from backend.engines.organizer import claim_archive_path, locate_archive_file, resolve_archive_path
 from backend.engines.thumbnail_cache import thumbnail_cache
 from backend.engines.thumbnail_ops import mark_thumbnail_ready
 from backend.engines.thumbnailer import generate_thumbnail_bytes
@@ -41,14 +41,16 @@ logger = logging.getLogger(__name__)
 MAX_IMMEDIATE_RETRIES = 2
 COPY_CONCURRENCY = 4  # safe for HDD; increase to 8 for NVMe source
 
-# BLAKE3 import with fallback
-_BLAKE3_AVAILABLE = False
-try:
-    import blake3 as _blake3
+# BLAKE3 import — use the centralised flag from utils.hashing to ensure a
+# single source of truth. This prevents algorithm mismatches if blake3 is
+# installed/uninstalled between Hop 1 and Hop 2 (Q-1 fix).
+from backend.utils.hashing import _BLAKE3_AVAILABLE
 
-    _BLAKE3_AVAILABLE = True
+try:
+    import blake3 as _blake3  # type: ignore[import-untyped]
 except ImportError:
-    pass
+    _blake3 = None  # type: ignore[assignment]
+
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 FileProgressCallback = Optional[Callable[[int, int, str, int], Awaitable[None]]]
@@ -91,6 +93,11 @@ def _copy_and_hash_sync(src: Path, partial: Path, chunk_size: int) -> str:
                 break
             hasher.update(chunk)
             dst_fh.write(chunk)
+        try:
+            dst_fh.flush()
+            os.fsync(dst_fh.fileno())
+        except OSError:
+            pass
 
     return hasher.hexdigest()
 
@@ -99,19 +106,23 @@ async def _copy_cache_to_dest(
     src: Path,
     dst: Path,
     *,
-    chunk_size: int = BATCH_SIZE * 1024,
+    chunk_size: int = 4 * 1024 * 1024,
 ) -> str:
     """
     Copy *src* to *dst* through a ``.partial`` intermediate while computing
     a BLAKE3 (or SHA-256) hash of the *cached* data.
 
+    Durable: fsync file before atomic replace, then fsync parent dir.
     Returns the hex digest.
     """
+    from backend.utils.durability import durable_replace, fsync_file
+
     partial = dst.with_suffix(dst.suffix + PARTIAL_SUFFIX)
-    partial.unlink(missing_ok=True)
 
     computed = await asyncio.to_thread(_copy_and_hash_sync, src, partial, chunk_size)
-    partial.rename(dst)
+    fsync_file(partial)
+    durable_replace(partial, dst)
+    fsync_file(dst)
     return computed
 
 
@@ -155,9 +166,10 @@ async def _import_single_item(
     # Step A: Try ExifTool on cache file for EMBEDDED metadata.
     # Embedded EXIF/metadata is preserved through file copy, so ExifTool
     # results from the cache file are valid for files that have EXIF.
-    if ext in {'.heic', '.jpg', '.jpeg', '.png', '.mov', '.mp4', '.m4v', '.3gp'}:
+    if ext in {".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4", ".m4v", ".3gp"}:
         try:
             from backend.engines.metadata_extractor import extract_metadata_batch
+
             meta_results = extract_metadata_batch([cache_file])
             meta = meta_results.get(str(cache_file.resolve()))
             if meta and meta.date_taken:
@@ -193,7 +205,8 @@ async def _import_single_item(
             except OSError as exc:
                 logger.debug(
                     "Could not stat source file %s for timestamp recovery: %s",
-                    item.source_path, exc,
+                    item.source_path,
+                    exc,
                 )
 
     # Step C: Last resort — extract from cache file's embedded metadata only
@@ -205,6 +218,7 @@ async def _import_single_item(
     #     so compute_archive_path uses the real EXIF capture date for folder placement.
     if capture_dt is not None and item.date_taken is None:
         from backend.engines.date_resolver import is_date_sane
+
         if is_date_sane(capture_dt):
             async with session_scope() as session:
                 db_item = await session.get(MediaItem, item.id)
@@ -213,33 +227,62 @@ async def _import_single_item(
                     db_item.date_source = "exif"
                     db_item.touch()
             item.date_taken = capture_dt
+    # Check destination disk space before copying
+    from backend.utils.durability import check_free_space
 
-    # 3. Compute destination (now uses the correct capture date for iOS files)
-    dst = compute_archive_path(dest_root, item, layout=folder_layout)
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    is_ok, free_b, req_b = check_free_space(dest_root, item.file_size or 0)
+    if not is_ok:
+        err = (
+            f"Insufficient disk space on destination drive: {free_b // (1024 * 1024)}MB free, "
+            f"need {req_b // (1024 * 1024)}MB for {item.file_name}"
+        )
+        logger.error("Item %d: %s", item.id, err)
+        await _mark_item_hop2(item, HopStatus.FAILED, err)
+        return False
 
-    # Skip if destination already matches cache_hash
-    if dst.is_file() and item.source_hash:
-        if await asyncio.to_thread(verify_file_hash, dst, item.source_hash):
-            logger.debug("Destination already verified: %s", dst.name)
-            await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt)
-            await cleanup_cache_file(cache_dir, item)
-            if move_mode:
-                await _unlink_source(item)
-            # Restore mtime on verified destination
-            _restore_mtime(dst, capture_dt, source_created_ts=source_created_ts)
-            # Generate thumbnail for verified items too
-            try:
-                data = await asyncio.to_thread(generate_thumbnail_bytes, dst)
-                if data:
-                    thumbnail_cache.put(item.id, data)
-                    await mark_thumbnail_ready(item.id)
-            except Exception as exc:
-                logger.warning("Thumbnail generation skipped (verified dest) for item %d: %s", item.id, exc)
-            return True
-        else:
-            logger.info("Destination hash mismatch for %s — re-importing", dst.name)
-            dst.unlink(missing_ok=True)
+    # Check if file was already safely archived (e.g. resumption after pause/crash)
+    existing = locate_archive_file(dest_root, item, layout=folder_layout, verify_hash=True)
+    if existing and existing.is_file() and item.source_hash:
+        logger.debug("Destination already verified: %s", existing.name)
+        await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt)
+        await cleanup_cache_file(cache_dir, item)
+        if move_mode:
+            await _unlink_source(item)
+        # Restore mtime on verified destination
+        _restore_mtime(existing, capture_dt, source_created_ts=source_created_ts)
+        # Generate thumbnail for verified items too
+        try:
+            data = await asyncio.to_thread(generate_thumbnail_bytes, existing)
+            if data:
+                thumbnail_cache.put(item.id, data)
+                await mark_thumbnail_ready(item.id)
+        except Exception as exc:
+            logger.warning("Thumbnail generation skipped (verified dest) for item %d: %s", item.id, exc)
+        return True
+
+    # 3. Abort (don't mkdir a shadow dir) if the destination vanished/unmounted
+    try:
+        if not dest_root.is_dir():
+            err = f"Destination unavailable (unmounted or removed): {dest_root} — reconnect the drive and resume"
+            logger.error("Item %d: %s", item.id, err)
+            await _mark_item_hop2(item, HopStatus.FAILED, err)
+            return False
+    except OSError as exc:
+        await _mark_item_hop2(item, HopStatus.FAILED, f"Destination check failed: {exc}")
+        return False
+
+    # 3b. Atomically claim a destination path via O_CREAT|O_EXCL reservation (.partial)
+    try:
+        dst = claim_archive_path(dest_root, item, layout=folder_layout)
+    except FileExistsError:
+        err_msg = (
+            f"Conflict resolution exhausted for '{item.file_name}' — "
+            "over 999 files with this name already exist in the same date folder. "
+            "Consider using a more granular folder layout (e.g. year/month/day)."
+        )
+        logger.error("Item %d: %s", item.id, err_msg)
+        await _mark_item_hop2(item, HopStatus.FAILED, err_msg)
+        return False
 
     # 4-5. Copy cache -> destination with hash verification (with retry on mismatch)
     max_attempts = MAX_IMMEDIATE_RETRIES + 1
@@ -247,9 +290,22 @@ async def _import_single_item(
         try:
             computed_hash = await _copy_cache_to_dest(cache_file, dst)
         except Exception as exc:
-            logger.error("Import failed for item %d: %s", item.id, exc)
+            import errno as _errno
+
+            is_disk_full = isinstance(exc, OSError) and (
+                exc.errno == _errno.ENOSPC
+                or getattr(exc, "winerror", None) == 112
+                or "no space" in str(exc).lower()
+                or "disk full" in str(exc).lower()
+            )
+            msg = (
+                f"Destination disk full during import of {item.file_name} — free space and retry"
+                if is_disk_full
+                else str(exc)
+            )
+            logger.error("Import failed for item %d: %s", item.id, msg)
             _cleanup_partial(dst)
-            await _mark_item_hop2(item, HopStatus.FAILED, str(exc))
+            await _mark_item_hop2(item, HopStatus.FAILED, msg)
             return False
 
         # Verify against cache_hash (source_hash computed during Hop 1)
@@ -257,13 +313,17 @@ async def _import_single_item(
             if attempt < max_attempts:
                 logger.warning(
                     "Hash mismatch for %s on attempt %d/%d — retrying",
-                    dst.name, attempt, max_attempts,
+                    dst.name,
+                    attempt,
+                    max_attempts,
                 )
             else:
                 logger.error(
-                    "Import hash mismatch for %s after %d attempts: "
-                    "expected %s, got %s",
-                    dst.name, max_attempts, item.source_hash, computed_hash,
+                    "Import hash mismatch for %s after %d attempts: expected %s, got %s",
+                    dst.name,
+                    max_attempts,
+                    item.source_hash,
+                    computed_hash,
                 )
                 dst.unlink(missing_ok=True)
                 await _mark_item_hop2(item, HopStatus.FAILED, "Import hash mismatch after all retries")
@@ -282,15 +342,21 @@ async def _import_single_item(
                 if attempt < max_attempts:
                     logger.warning(
                         "Post-copy read failed for %s on attempt %d/%d — retrying",
-                        dst.name, attempt, max_attempts,
+                        dst.name,
+                        attempt,
+                        max_attempts,
                     )
                 else:
                     logger.error(
                         "Post-copy verification read failed for %s after %d attempts: %s",
-                        dst.name, max_attempts, exc,
+                        dst.name,
+                        max_attempts,
+                        exc,
                     )
                     dst.unlink(missing_ok=True)
-                    await _mark_item_hop2(item, HopStatus.FAILED, f"Post-copy verification read error after all retries: {exc}")
+                    await _mark_item_hop2(
+                        item, HopStatus.FAILED, f"Post-copy verification read error after all retries: {exc}"
+                    )
                     return False
 
                 dst.unlink(missing_ok=True)
@@ -302,18 +368,25 @@ async def _import_single_item(
                 if attempt < max_attempts:
                     logger.warning(
                         "Post-copy hash mismatch for %s on attempt %d/%d — retrying",
-                        dst.name, attempt, max_attempts,
+                        dst.name,
+                        attempt,
+                        max_attempts,
                     )
                 else:
                     logger.error(
                         "POST-COPY VERIFICATION FAILED for %s after %d attempts: "
                         "destination hash %s does not match expected %s "
                         "(copy hash was %s)",
-                        dst.name, max_attempts, dest_hash, item.source_hash, computed_hash,
+                        dst.name,
+                        max_attempts,
+                        dest_hash,
+                        item.source_hash,
+                        computed_hash,
                     )
                     dst.unlink(missing_ok=True)
                     await _mark_item_hop2(
-                        item, HopStatus.FAILED,
+                        item,
+                        HopStatus.FAILED,
                         f"Post-copy verification failed after all retries: "
                         f"destination hash {dest_hash[:16]}… "
                         f"does not match expected {item.source_hash[:16]}…",
@@ -371,7 +444,8 @@ def _restore_mtime(
         if (now - capture_dt).total_seconds() < 60:
             logger.debug(
                 "Skipping mtime restore for %s: capture_dt looks like transfer time (%s)",
-                dst.name, capture_dt,
+                dst.name,
+                capture_dt,
             )
             return
 
@@ -485,10 +559,7 @@ async def import_batch(
             ts_obj = await db_session.get(TransferSession, session_id)
             if ts_obj is not None:
                 folder_layout = ts_obj.folder_layout
-                is_local = not (
-                    ts_obj.source_root.startswith("ios://")
-                    or ts_obj.source_root.startswith("wpd://")
-                )
+                is_local = not (ts_obj.source_root.startswith("ios://") or ts_obj.source_root.startswith("wpd://"))
 
     # For local sources, use parallel copy with batched DB writes.
     # iOS/WPD sources and move mode stay sequential (AFC driver constraint).
@@ -504,11 +575,13 @@ async def import_batch(
     SPEED_SAMPLE_MAX_FILES = 5
     last_speed_sample_time: float = 0.0
 
+    cancelled = False
     if use_parallel:
         chunk_size = COPY_CONCURRENCY * 2
         sem = asyncio.Semaphore(COPY_CONCURRENCY)
 
-        async def _import_one(item: MediaItem, idx: int) -> tuple[bool, int]:
+        async def _import_one(item: MediaItem, idx: int) -> tuple[bool, int, bool]:
+            was_completed = item.hop2_status == HopStatus.COMPLETED.value
             async with sem:
                 try:
                     success = await _import_single_item(
@@ -521,30 +594,38 @@ async def import_batch(
                         file_total=total,
                         folder_layout=folder_layout,
                     )
-                    return success, item.id
+                    return success, item.id, was_completed
                 except Exception as exc:
                     logger.error("Import failed for item %d (%s): %s", item.id, item.source_path, exc)
                     await _mark_item_hop2(item, HopStatus.FAILED, str(exc))
-                    return False, item.id
+                    return False, item.id, was_completed
 
         for chunk_start in range(0, total, chunk_size):
             if cancel_event is not None and cancel_event.is_set():
                 logger.info(
                     "Batch %d interrupted at item %d/%d",
-                    batch_id, chunk_start, total,
+                    batch_id,
+                    chunk_start,
+                    total,
                 )
+                cancelled = True
                 break
 
-            chunk = items[chunk_start:chunk_start + chunk_size]
+            chunk = items[chunk_start : chunk_start + chunk_size]
             tasks = [_import_one(item, chunk_start + i) for i, item in enumerate(chunk)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for result in results:
                 if isinstance(result, tuple):
-                    success, item_id = result
+                    if len(result) == 3:
+                        success, item_id, was_completed = result  # type: ignore[misc]
+                    else:
+                        success, item_id = result  # type: ignore[misc]
+                        was_completed = False
                     if success:
                         imported += 1
-                        imported_delta += 1
+                        if not was_completed:
+                            imported_delta += 1
                         completed_ids.append(item_id)
                     else:
                         failed_delta += 1
@@ -571,10 +652,14 @@ async def import_batch(
             if cancel_event is not None and cancel_event.is_set():
                 logger.info(
                     "Batch %d interrupted (pause or cancel) at item %d/%d",
-                    batch_id, idx + 1, total,
+                    batch_id,
+                    idx + 1,
+                    total,
                 )
+                cancelled = True
                 break
 
+            was_completed = item.hop2_status == HopStatus.COMPLETED.value
             success = False
             try:
                 success = await _import_single_item(
@@ -595,7 +680,8 @@ async def import_batch(
 
             if session_id is not None:
                 if success:
-                    imported_delta += 1
+                    if not was_completed:
+                        imported_delta += 1
                     completed_ids.append(item.id)
                 else:
                     failed_delta += 1
@@ -617,25 +703,19 @@ async def import_batch(
             if on_file_progress is not None:
                 await on_file_progress(idx + 1, total, item.file_name, item.id)
 
-    # Bulk-update MediaItem statuses for all completed items
-    if completed_ids:
-        from sqlalchemy import update
-        async with session_scope() as db_session:
-            await db_session.execute(
-                update(MediaItem)
-                .where(MediaItem.id.in_(completed_ids))
-                .values(
-                    hop2_status=HopStatus.COMPLETED.value,
-                    final_status=HopStatus.COMPLETED.value,
-                )
-            )
+    # NOTE: MediaItem hop2_status and final_status are already set per-item by
+    # _mark_item_hop2() during the loop above. A second bulk UPDATE here would
+    # be redundant (BUG-4 fix — removes unnecessary DB round-trip).
 
     async with session_scope() as session:
         db_batch = await session.get(TransferBatch, batch_id)
         if db_batch is not None:
             db_batch.completed_items = imported
             db_batch.failed_items = total - imported
-            if imported == 0:
+            if cancelled:
+                # Interrupted: leave resumable (recovery re-runs ARCHIVED)
+                db_batch.status = BatchStatus.ARCHIVED.value
+            elif imported == 0:
                 db_batch.status = BatchStatus.FAILED.value
             elif imported < total:
                 db_batch.status = BatchStatus.PARTIAL.value
@@ -645,7 +725,6 @@ async def import_batch(
 
     logger.info("Batch %d imported: %d/%d succeeded", batch_id, imported, total)
     return imported
-
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +740,7 @@ async def _unlink_source(item: MediaItem) -> None:
 
     if is_ios_source(item.source_path):
         from backend.ios_device import _get_afc_service, parse_ios_source
+
         try:
             serial, afc_path = parse_ios_source(item.source_path)
             afc, lockdown = await _get_afc_service(serial)
@@ -673,7 +753,9 @@ async def _unlink_source(item: MediaItem) -> None:
         except Exception as exc:
             logger.warning("Failed to unlink iOS source %s: %s", item.source_path, exc)
     elif item.source_path.startswith("wpd://"):
-        logger.warning("WPD device sources do not support file deletion (Move Mode is read-only for WPD): %s", item.source_path)
+        logger.warning(
+            "WPD device sources do not support file deletion (Move Mode is read-only for WPD): %s", item.source_path
+        )
     else:
         src = Path(item.source_path).resolve()
         try:
@@ -681,7 +763,6 @@ async def _unlink_source(item: MediaItem) -> None:
             logger.debug("Source unlinked (move mode): %s", src)
         except OSError as exc:
             logger.warning("Failed to unlink source %s: %s", src, exc)
-
 
 
 async def cleanup_cache_file(
@@ -713,27 +794,28 @@ async def cleanup_cache_file(
         try:
             cache_file.unlink(missing_ok=True)
             if not cache_file.exists():
-                logger.debug(
-                    "Cache file removed (Hop 2 confirmed): %s", cache_file
-                )
+                logger.debug("Cache file removed (Hop 2 confirmed): %s", cache_file)
             return
         except OSError as exc:
             is_windows_lock = (
-                sys.platform == "win32"
-                and hasattr(exc, "winerror")
-                and exc.winerror == 32  # ERROR_SHARING_VIOLATION
+                sys.platform == "win32" and hasattr(exc, "winerror") and exc.winerror == 32  # ERROR_SHARING_VIOLATION
             )
             if is_windows_lock and attempt < max_attempts:
                 delay = 0.1 * attempt  # 100ms, then 200ms
                 logger.debug(
                     "Cache file locked (attempt %d/%d), retrying in %.0fms: %s",
-                    attempt, max_attempts, delay * 1000, cache_file.name,
+                    attempt,
+                    max_attempts,
+                    delay * 1000,
+                    cache_file.name,
                 )
                 await asyncio.sleep(delay)
             else:
                 logger.warning(
                     "Failed to remove cache file %s after %d attempt(s): %s",
-                    cache_file, attempt, exc,
+                    cache_file,
+                    attempt,
+                    exc,
                 )
                 return
 
@@ -744,16 +826,19 @@ async def cleanup_cache_file(
 def _maybe_sample_speed(ts_obj: TransferSession, now: float) -> None:
     """Sample transfer speed if enough time/files have passed."""
     import json as _json
+
     samples: list[dict] = []
     if ts_obj.speed_samples:
         try:
             samples = _json.loads(ts_obj.speed_samples)
         except _json.JSONDecodeError:
             samples = []
-    samples.append({
-        "ts": now,
-        "count": ts_obj.imported_files,
-    })
+    samples.append(
+        {
+            "ts": now,
+            "count": ts_obj.imported_files,
+        }
+    )
     if len(samples) > 20:
         samples = samples[-20:]
     ts_obj.speed_samples = _json.dumps(samples)
@@ -829,9 +914,7 @@ async def purge_hop1_cache_for_completed_items(
 
     removed = 0
     async with session_scope() as session:
-        result = await session.execute(
-            select(MediaItem).where(MediaItem.final_status == HopStatus.COMPLETED.value)
-        )
+        result = await session.execute(select(MediaItem).where(MediaItem.final_status == HopStatus.COMPLETED.value))
         items = list(result.scalars().all())
 
     logger.info(

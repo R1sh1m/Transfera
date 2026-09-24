@@ -27,7 +27,19 @@ jobs:
               Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but frontend/package.json version is '$version'."
               exit 1
           }
-          Write-Host "Version verification successful: tag '$tag' matches package.json version '$version'."
+          $pyLine = Get-Content pyproject.toml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1
+          $pyVersion = ($pyLine -replace '.*"([^"]+)".*', '$1')
+          if ($tagVersion -ne $pyVersion) {
+              Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but pyproject.toml version is '$pyVersion'."
+              exit 1
+          }
+          $wingetLine = Get-Content winget/Transfera.Transfera.yaml | Where-Object { $_ -match '^PackageVersion:' } | Select-Object -First 1
+          $wingetVersion = ($wingetLine -replace '^PackageVersion:\s*', '').Trim()
+          if ($tagVersion -ne $wingetVersion) {
+              Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but winget PackageVersion is '$wingetVersion'."
+              exit 1
+          }
+          Write-Host "Version verification successful: tag '$tag' matches package.json, pyproject.toml, and winget manifest ('$version')."
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -54,6 +66,9 @@ jobs:
       - name: Audit Production Dependencies
         working-directory: frontend
         run: npm audit --omit=dev
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Compile Native C++ WPD Helper
         working-directory: frontend

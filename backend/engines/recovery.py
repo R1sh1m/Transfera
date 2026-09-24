@@ -24,18 +24,19 @@ from backend.database.models import (
     TransferSession,
 )
 from backend.engines.cache_manager import _partial_path, get_cache_path
-from backend.engines.importer import cleanup_cache_file, compute_archive_path
+from backend.engines.importer import cleanup_cache_file
+from backend.engines.organizer import locate_archive_file
 
 logger = logging.getLogger(__name__)
 
-# BLAKE3 import with fallback
-_BLAKE3_AVAILABLE = False
-try:
-    import blake3 as _blake3
+# BLAKE3 import — centralised flag from utils.hashing (Q-1 fix: single source of truth)
+from backend.utils.hashing import _BLAKE3_AVAILABLE
 
-    _BLAKE3_AVAILABLE = True
+try:
+    import blake3 as _blake3  # type: ignore[import-untyped]
 except ImportError:
-    pass
+    _blake3 = None  # type: ignore[assignment]
+
 
 def _clean_orphaned_partials(cache_dir: Path) -> int:
     """Scan cache_dir for .partial files and remove them."""
@@ -55,6 +56,35 @@ def _clean_orphaned_partials(cache_dir: Path) -> int:
                 logger.warning("Failed to remove orphaned partial file %s: %s", entry, e)
     return count
 
+
+async def _clean_orphaned_dest_partials_async() -> int:
+    """Async dest-partial sweep across all known session dest_roots."""
+    from sqlalchemy import select as _select
+
+    count = 0
+    try:
+        async with session_scope() as session:
+            result = await session.execute(_select(TransferSession.dest_root).distinct())
+            roots = [row[0] for row in result.all() if row[0]]
+    except Exception:
+        return 0
+    for root in roots:
+        try:
+            dest = Path(root)
+            if not dest.is_dir():
+                continue
+            for entry in dest.rglob(f"*{PARTIAL_SUFFIX}"):
+                try:
+                    if entry.is_file():
+                        entry.unlink()
+                        count += 1
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    if count:
+        logger.info("Cleaned up %d orphaned .partial destination files.", count)
+    return count
 
 
 def _clean_orphaned_thumbnails() -> int:
@@ -90,13 +120,18 @@ async def recover_interrupted_batches(
     known_thumbnails: set[str] = set()
 
     async with session_scope() as session:
-        # Find all stuck batches
+        # Find all stuck batches — LOADING/ARCHIVED are crash-interrupted;
+        # PROCESSING/PARTIAL orphaned at boot means the worker died mid-batch.
         result = await session.execute(
             select(TransferBatch).where(
-                TransferBatch.status.in_([
-                    BatchStatus.LOADING.value,
-                    BatchStatus.ARCHIVED.value,
-                ])
+                TransferBatch.status.in_(
+                    [
+                        BatchStatus.LOADING.value,
+                        BatchStatus.ARCHIVED.value,
+                        BatchStatus.PROCESSING.value,
+                        BatchStatus.PARTIAL.value,
+                    ]
+                )
             )
         )
         stuck_batches = list(result.scalars().all())
@@ -110,12 +145,30 @@ async def recover_interrupted_batches(
                 await _recover_archived_batch(batch, cache_dir=cache_dir)
                 stats["archived_recovered"] = int(stats["archived_recovered"]) + 1  # type: ignore[arg-type]
                 resumable.add(batch.session_id)
+            else:  # PROCESSING / PARTIAL orphaned at boot -> re-queue
+                db_batch = await session.get(TransferBatch, batch.id)
+                if db_batch is not None:
+                    logger.info(
+                        "Resetting orphaned %s batch %d to PENDING",
+                        batch.status,
+                        batch.id,
+                    )
+                    db_batch.status = BatchStatus.PENDING.value
+                    db_batch.error_message = None
+                    db_batch.touch()
+                resumable.add(batch.session_id)
 
     # Orphaned partials cleanup (sync, no DB session needed — runs every startup)
     orphaned_partials_removed = _clean_orphaned_partials(cache_dir=cache_dir)
     if orphaned_partials_removed > 0:
         logger.info("Cleaned up %d orphaned .partial cache files.", orphaned_partials_removed)
     stats["orphaned_partials_removed"] = orphaned_partials_removed  # type: ignore[index]
+    # Destination partial sweep (crash with renamed dest_root previously leaked)
+    try:
+        dest_partials_removed = await _clean_orphaned_dest_partials_async()
+    except Exception:
+        dest_partials_removed = 0
+    stats["orphaned_dest_partials_removed"] = dest_partials_removed  # type: ignore[index]
 
     orphaned_thumbnails_removed = _clean_orphaned_thumbnails()
     stats["orphaned_thumbnails_removed"] = orphaned_thumbnails_removed  # type: ignore[index]
@@ -152,16 +205,16 @@ async def _recover_loading_batch(
 
     async with session_scope() as session:
         # Get all items in this batch
-        result = await session.execute(
-            select(MediaItem).where(MediaItem.batch_id == batch.id)
-        )
+        result = await session.execute(select(MediaItem).where(MediaItem.batch_id == batch.id))
         items = list(result.scalars().all())
 
         for item in items:
             # Delete .partial cache file
             from backend.ios_device import is_ios_source
+
             if is_ios_source(item.source_path):
                 from backend.ios_device import parse_ios_source
+
                 serial, afc_path = parse_ios_source(item.source_path)
                 src_filename = afc_path.rsplit("/", 1)[-1] if "/" in afc_path else afc_path
                 dst = get_cache_path(cache_dir, item.source_path, src_filename)
@@ -207,39 +260,72 @@ async def _recover_archived_batch(
     """
     logger.info("Recovering ARCHIVED batch %d (session %d)", batch.id, batch.session_id)
 
+    # Items verified as fully imported — cache cleaned up after the session closes
+    # to avoid holding the outer DB connection open during file I/O (BUG-3 fix).
+    verified_items_for_cleanup: list[MediaItem] = []
+
     async with session_scope() as session:
         # Get session to find dest_root
         ts = await session.get(TransferSession, batch.session_id)
         dest_root = Path(ts.dest_root) if ts else Path(".")
 
-        result = await session.execute(
-            select(MediaItem).where(MediaItem.batch_id == batch.id)
-        )
+        result = await session.execute(select(MediaItem).where(MediaItem.batch_id == batch.id))
         items = list(result.scalars().all())
 
         folder_layout = ts.folder_layout if ts else "year/month"
 
         for item in items:
-            # Check destination (use compute_archive_path to match importer layout)
-            dst = compute_archive_path(dest_root, item, layout=folder_layout)
-            partial = dst.with_suffix(dst.suffix + PARTIAL_SUFFIX)
+            # Locate the actual archived file (base or _001.._999 suffix),
+            # hash-verified so size-collisions never mark the wrong file.
+            # NEVER use compute_archive_path here: it always returns a
+            # non-existing path, which previously caused verified archives
+            # to be deleted and re-copied on every crash-recovery.
+            existing = locate_archive_file(dest_root, item, layout=folder_layout, verify_hash=True)
 
-            # Clean up any .partial files
-            partial.unlink(missing_ok=True)
+            # Clean up any .partial siblings for base + located file
+            try:
+                from backend.engines.organizer import build_folder, derive_timestamp
 
-            if dst.is_file() and item.source_hash:
-                if _verify_hash(dst, item.source_hash):
-                    # Destination verified — clean up cache, mark complete
-                    await cleanup_cache_file(cache_dir, item)
-                    item.hop2_status = HopStatus.COMPLETED.value
-                    item.final_status = HopStatus.COMPLETED.value
-                    item.error_message = None
-                    item.touch()
-                    continue
+                dt = derive_timestamp(item)
+                folder = build_folder(dest_root, dt, folder_layout)
+                base = folder / item.file_name
+                base.with_suffix(base.suffix + PARTIAL_SUFFIX).unlink(missing_ok=True)
+            except OSError:
+                pass
+            if existing is not None:
+                try:
+                    existing.with_suffix(existing.suffix + PARTIAL_SUFFIX).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
-            # No match or hash mismatch — reset for retry
-            if dst.is_file():
-                dst.unlink(missing_ok=True)
+            if existing is not None and existing.is_file() and item.source_hash:
+                # locate_archive_file with verify_hash=True already confirmed
+                # size (+hash when available). Re-verify cheaply for safety.
+                try:
+                    if _verify_hash(existing, item.source_hash):
+                        verified_items_for_cleanup.append(item)
+                        item.hop2_status = HopStatus.COMPLETED.value
+                        item.final_status = HopStatus.COMPLETED.value
+                        item.error_message = None
+                        item.touch()
+                        continue
+                except OSError as exc:
+                    logger.warning("Recovery hash read failed for %s: %s", existing, exc)
+
+            # No verified destination — reset for retry WITHOUT deleting
+            # anything: only the located file (if hash-mismatched) is junk.
+            if existing is not None and existing.is_file():
+                # Hash mismatch means a stale/corrupt file occupies the slot;
+                # remove it so re-import can reclaim the name. Verified files
+                # never reach here.
+                try:
+                    existing.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "Recovery could not remove mismatched %s: %s",
+                        existing,
+                        exc,
+                    )
 
             item.hop2_status = HopStatus.PENDING.value
             item.final_status = HopStatus.PENDING.value
@@ -251,12 +337,14 @@ async def _recover_archived_batch(
         if db_batch is not None:
             db_batch.status = BatchStatus.PENDING.value
             db_batch.error_message = None
-            completed = sum(
-                1 for i in items if i.hop2_status == HopStatus.COMPLETED.value
-            )
+            completed = sum(1 for i in items if i.hop2_status == HopStatus.COMPLETED.value)
             db_batch.completed_items = completed
             db_batch.failed_items = len(items) - completed
             db_batch.touch()
+
+    # Clean up Hop 1 cache files AFTER closing the outer session.
+    for item in verified_items_for_cleanup:
+        await cleanup_cache_file(cache_dir, item)
 
     logger.info("ARCHIVED batch %d recovered: items verified or reset", batch.id)
 

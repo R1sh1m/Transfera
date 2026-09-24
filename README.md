@@ -173,7 +173,7 @@ The orchestrator runs through a self-bootstrapping sequence on first launch (tak
 [STEP 3]   Launching Electron + Vite dev shell
 ```
 
-Subsequent launches skip all setup steps automatically (only runs again when `requirements.txt` or `package.json` change).
+Subsequent launches skip all setup steps automatically (only runs again when `requirements.txt` or `package.json`/`package-lock.json` change).
 
 Press **Ctrl+C** at any time for a clean teardown of all processes.
 
@@ -355,10 +355,26 @@ Transfera/
 | `Port 47821 already in use` | A previous run may not have shut down cleanly. The orchestrator auto-sweeps stray processes on startup; if it still fails, kill the process occupying the port manually. |
 | `npm install` permission error | Run your terminal as Administrator (right-click → Run as administrator). |
 | iPhone not detected | Ensure MSVC is installed and `npm run build:native` has completed (look for `wpd_helper.exe` in `backend/bin/`). Trust the computer on your iPhone when prompted. |
-| Blank page after navigating | Known bug — fixed in the current branch. See [issue tracker](https://github.com/R1sh1m/Transfera/issues). |
-| Thumbnails showing wrong images | Known bug — fixed in the current branch. Caused by a stale negative-cache between sessions. |
 | ExifTool not found | First-run auto-bootstrap handles this. If it fails, check internet connectivity; ExifTool is downloaded from `exiftool.org` on first launch. |
 | `wpd_helper build failed: LNK1104` | The `.exe` is locked by a running Transfera backend. Fully close the app (`Ctrl+C` in the terminal) and retry. |
+
+---
+
+## Environment Variables & Logs
+
+The backend has no dotenv loader — these are read via plain `os.environ` / `process.env` (see `.env.example` for a template):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `TRANSFERA_DATA_DIR` | `backend/data/` | Override the runtime data directory (DB, cache, exports, logs). |
+| `TRANSFERA_LOG_LEVEL` | `INFO` | Backend log level (e.g. `DEBUG`, `WARNING`). |
+| `TRANSFERA_EXTERNAL_BACKEND` | unset | Set to `1` when Electron should NOT spawn its own backend (`run.py --frontend` / `npm run electron:dev` sets this automatically). |
+
+Application logs are written to `backend/data/logs/transfera.log` (or `<TRANSFERA_DATA_DIR>/logs/transfera.log` when the data dir is overridden).
+
+### Offline first-launch limitation
+
+The first launch is **not fully offline**: the orchestrator downloads Python packages from PyPI (`pip install -r backend/requirements.txt`), `npm install` fetches frontend dependencies, and the backend auto-bootstraps ExifTool from `exiftool.org`. The portable-packaging helper (`frontend/scripts/build-portable-python.cjs`, output in `frontend/python-bin/`, git-ignored) likewise downloads an embeddable Python from `python.org`. Run the first launch (or the portable-Python build) on a connected machine; subsequent runs work offline. Backend test files (`backend/tests/`) are excluded from the packaged installer.
 
 ---
 

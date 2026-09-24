@@ -555,7 +555,10 @@ def _schedule_local_thumbnails(
                 thumbnail_cache.put(row_id, data)
                 return row_id
         except Exception as exc:
-            logger.warning("Pre-scan thumbnail failed for item %d: %s", row_id, exc)
+            try:
+                logger.warning("Pre-scan thumbnail failed for item %d: %s", row_id, exc)
+            except Exception:
+                pass
         return None
 
     def _generate_all() -> None:

@@ -3,9 +3,9 @@
 // Live system metrics, directory analysis, session management.
 // ---------------------------------------------------------------------------
 
-import { useState, useEffect } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   HardDrive,
   Play,
@@ -29,92 +29,162 @@ import {
   Smartphone,
   Wifi,
   Terminal,
-} from 'lucide-react'
-import { useSessionList, useRecovery, useFolderMetadata, useHealth, useDiskSpace, useClearSessions, useDeviceBackendStatus, useInstallDriver, useInstallPymobiledevice3 } from '@/lib/queries'
-import { useTransferStore } from '@/store/transfer'
-import { cn, extractErrorMessage, isElectron } from '@/lib/utils'
-import type { SessionInfo, SessionStatus } from '@/types/api'
+} from "lucide-react";
+import {
+  useSessionList,
+  useRecovery,
+  useFolderMetadata,
+  useHealth,
+  useDiskSpace,
+  useClearSessions,
+  useDeviceBackendStatus,
+  useInstallDriver,
+  useInstallPymobiledevice3,
+} from "@/lib/queries";
+import { useTransferStore } from "@/store/transfer";
+import { cn, extractErrorMessage, isElectron } from "@/lib/utils";
+import type { SessionInfo, SessionStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return `${(bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${units[i]}`
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
 function timeAgo(dateStr: string): string {
-  const now = Date.now()
-  const then = new Date(dateStr).getTime()
-  const diffMs = now - then
-  const seconds = Math.floor(diffMs / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days}d ago`
-  return new Date(dateStr).toLocaleDateString()
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diffMs = now - then;
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(dateStr).toLocaleDateString();
 }
 
 // ---------------------------------------------------------------------------
 // Status Badge
 // ---------------------------------------------------------------------------
-const fallbackBadge = { color: 'text-muted-foreground', bg: 'bg-muted', icon: <Clock className="w-3.5 h-3.5" /> }
+const fallbackBadge = {
+  color: "text-muted-foreground",
+  bg: "bg-muted",
+  icon: <Clock className="w-3.5 h-3.5" />,
+};
 
-const statusConfig: Record<SessionStatus, { color: string; bg: string; icon: React.ReactNode }> = {
-  created:   { color: 'text-muted-foreground', bg: 'bg-muted',               icon: <Clock className="w-3.5 h-3.5" /> },
-  running:   { color: 'text-blue-600 dark:text-blue-400',   bg: 'bg-blue-50 dark:bg-blue-950',   icon: <Play className="w-3.5 h-3.5" /> },
-  paused:    { color: 'text-amber-600 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-950', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
-  completed: { color: 'text-green-600 dark:text-green-400', bg: 'bg-green-50 dark:bg-green-950', icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
-  completed_with_errors: { color: 'text-amber-600 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-950', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
-  failed:    { color: 'text-red-600 dark:text-red-400',     bg: 'bg-red-50 dark:bg-red-950',     icon: <AlertTriangle className="w-3.5 h-3.5" /> },
-  cancelled: { color: 'text-muted-foreground', bg: 'bg-muted',               icon: <Clock className="w-3.5 h-3.5" /> },
-}
+const statusConfig: Record<
+  SessionStatus,
+  { color: string; bg: string; icon: React.ReactNode }
+> = {
+  created: {
+    color: "text-muted-foreground",
+    bg: "bg-muted",
+    icon: <Clock className="w-3.5 h-3.5" />,
+  },
+  running: {
+    color: "text-blue-600 dark:text-blue-400",
+    bg: "bg-blue-50 dark:bg-blue-950",
+    icon: <Play className="w-3.5 h-3.5" />,
+  },
+  paused: {
+    color: "text-amber-600 dark:text-amber-400",
+    bg: "bg-amber-50 dark:bg-amber-950",
+    icon: <AlertTriangle className="w-3.5 h-3.5" />,
+  },
+  completed: {
+    color: "text-green-600 dark:text-green-400",
+    bg: "bg-green-50 dark:bg-green-950",
+    icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+  },
+  completed_with_errors: {
+    color: "text-amber-600 dark:text-amber-400",
+    bg: "bg-amber-50 dark:bg-amber-950",
+    icon: <AlertTriangle className="w-3.5 h-3.5" />,
+  },
+  failed: {
+    color: "text-red-600 dark:text-red-400",
+    bg: "bg-red-50 dark:bg-red-950",
+    icon: <AlertTriangle className="w-3.5 h-3.5" />,
+  },
+  cancelled: {
+    color: "text-muted-foreground",
+    bg: "bg-muted",
+    icon: <Clock className="w-3.5 h-3.5" />,
+  },
+};
 
 export function StatusBadge({ status }: { status: SessionStatus }) {
-  const c = statusConfig[status] ?? fallbackBadge
+  const c = statusConfig[status] ?? fallbackBadge;
   return (
-    <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', c.bg, c.color)}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium",
+        c.bg,
+        c.color,
+      )}
+    >
       {c.icon}
       {status.charAt(0).toUpperCase() + status.slice(1)}
     </span>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Directory Metrics Card
 // ---------------------------------------------------------------------------
 interface DirMetricsCardProps {
-  label: string
-  sublabel: string
-  icon: React.ReactNode
-  iconBg: string
-  path: string | null
-  sessionName?: string
-  transferMode?: 'copy' | 'move'
+  label: string;
+  sublabel: string;
+  icon: React.ReactNode;
+  iconBg: string;
+  path: string | null;
+  sessionName?: string;
+  transferMode?: "copy" | "move";
 }
 
-function DirMetricsCard({ label, sublabel, icon, iconBg, path, sessionName, transferMode }: DirMetricsCardProps) {
-  const { data: metrics, isLoading } = useFolderMetadata(path)
+function DirMetricsCard({
+  label,
+  sublabel,
+  icon,
+  iconBg,
+  path,
+  sessionName,
+  transferMode,
+}: DirMetricsCardProps) {
+  const { data: metrics, isLoading } = useFolderMetadata(path);
 
   return (
     <div className="bg-card border border-border rounded-lg p-4">
       <div className="flex items-center gap-3 mb-3">
-        <div className={cn('w-9 h-9 rounded-lg flex items-center justify-center', iconBg)}>
+        <div
+          className={cn(
+            "w-9 h-9 rounded-lg flex items-center justify-center",
+            iconBg,
+          )}
+        >
           {icon}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-xs font-medium text-foreground">{label}</p>
-          <p className="text-[11px] text-muted-foreground truncate" title={path ?? undefined}>
-            {path || 'No path selected'}
+          <p
+            className="text-[11px] text-muted-foreground truncate"
+            title={path ?? undefined}
+          >
+            {path || "No path selected"}
           </p>
         </div>
         {sessionName && (
-          <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]" title={sessionName}>
+          <span
+            className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]"
+            title={sessionName}
+          >
             {sessionName}
           </span>
         )}
@@ -129,26 +199,36 @@ function DirMetricsCard({ label, sublabel, icon, iconBg, path, sessionName, tran
         <div className="space-y-2">
           <div className="grid grid-cols-2 gap-2">
             <div className="text-center">
-              <p className="text-sm font-bold text-foreground">{metrics.size_gb} GB</p>
+              <p className="text-sm font-bold text-foreground">
+                {metrics.size_gb} GB
+              </p>
               <p className="text-[10px] text-muted-foreground">Total Size</p>
             </div>
             <div className="text-center">
-              <p className="text-sm font-bold text-foreground">{metrics.file_count.toLocaleString()}</p>
+              <p className="text-sm font-bold text-foreground">
+                {metrics.file_count.toLocaleString()}
+              </p>
               <p className="text-[10px] text-muted-foreground">Files</p>
             </div>
           </div>
           {transferMode && (
             <div className="flex items-center justify-center gap-1.5 pt-1 border-t border-border">
-              {transferMode === 'copy' ? (
+              {transferMode === "copy" ? (
                 <Copy className="w-3 h-3 text-blue-500 dark:text-blue-400" />
               ) : (
                 <ArrowRightLeft className="w-3 h-3 text-amber-500 dark:text-amber-400" />
               )}
-              <span className={cn(
-                'text-[10px] font-medium',
-                transferMode === 'copy' ? 'text-blue-600 dark:text-blue-400' : 'text-amber-600 dark:text-amber-400',
-              )}>
-                {transferMode === 'copy' ? 'Backup (Copy)' : 'Space Saver (Move)'}
+              <span
+                className={cn(
+                  "text-[10px] font-medium",
+                  transferMode === "copy"
+                    ? "text-blue-600 dark:text-blue-400"
+                    : "text-amber-600 dark:text-amber-400",
+                )}
+              >
+                {transferMode === "copy"
+                  ? "Backup (Copy)"
+                  : "Space Saver (Move)"}
               </span>
             </div>
           )}
@@ -157,28 +237,29 @@ function DirMetricsCard({ label, sublabel, icon, iconBg, path, sessionName, tran
         <p className="text-xs text-muted-foreground py-2">{sublabel}</p>
       )}
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Resume Alert
 // ---------------------------------------------------------------------------
 function ResumeAlert() {
-  const { data: sessionList } = useSessionList(1, 100)
-  const recovery = useRecovery()
-  const [expanded, setExpanded] = useState(false)
-  const [dismissed, setDismissed] = useState(false)
-  const pausedSessions = sessionList?.sessions?.filter(
-    (s) => s.status === 'paused' || s.status === 'created',
-  ) ?? []
+  const { data: sessionList } = useSessionList(1, 100);
+  const recovery = useRecovery();
+  const [expanded, setExpanded] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const pausedSessions =
+    sessionList?.sessions?.filter(
+      (s) => s.status === "paused" || s.status === "created",
+    ) ?? [];
 
   // Reset dismiss when the underlying list changes (new sessions appear on
   // a fresh page load after a prior dismiss).
   useEffect(() => {
-    setDismissed(false)
-  }, [pausedSessions.length])
+    setDismissed(false);
+  }, [pausedSessions.length]);
 
-  if (pausedSessions.length === 0 || dismissed) return null
+  if (pausedSessions.length === 0 || dismissed) return null;
 
   return (
     <motion.div
@@ -203,7 +284,8 @@ function ResumeAlert() {
             Interrupted Workloads Detected
           </h3>
           <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
-            {pausedSessions.length} session{pausedSessions.length > 1 ? 's' : ''} can be resumed.
+            {pausedSessions.length} session
+            {pausedSessions.length > 1 ? "s" : ""} can be resumed.
           </p>
 
           {/* Expandable session list */}
@@ -216,7 +298,7 @@ function ResumeAlert() {
             ) : (
               <ChevronRight className="w-3 h-3" />
             )}
-            {expanded ? 'Hide details' : 'Show details'}
+            {expanded ? "Hide details" : "Show details"}
           </button>
 
           {expanded && (
@@ -230,13 +312,15 @@ function ResumeAlert() {
                     <span className="font-medium text-amber-800 dark:text-amber-200 truncate">
                       {s.session_name}
                     </span>
-                    <span className={cn(
-                      'text-[10px] font-mono px-1.5 py-0.5 rounded',
-                      s.transfer_mode === 'copy'
-                        ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300'
-                        : 'bg-amber-100 dark:bg-amber-800 text-amber-700 dark:text-amber-300',
-                    )}>
-                      {s.transfer_mode === 'copy' ? 'COPY' : 'MOVE'}
+                    <span
+                      className={cn(
+                        "text-[10px] font-mono px-1.5 py-0.5 rounded",
+                        s.transfer_mode === "copy"
+                          ? "bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300"
+                          : "bg-amber-100 dark:bg-amber-800 text-amber-700 dark:text-amber-300",
+                      )}
+                    >
+                      {s.transfer_mode === "copy" ? "COPY" : "MOVE"}
                     </span>
                   </div>
                   <span className="text-amber-600 dark:text-amber-400 ml-2 shrink-0">
@@ -252,19 +336,21 @@ function ResumeAlert() {
               onClick={() => {
                 recovery.mutate(undefined, {
                   onSuccess: () => setDismissed(true),
-                })
+                });
               }}
               disabled={recovery.isPending}
               className="no-drag inline-flex items-center gap-1 px-3 py-1.5 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors disabled:opacity-50"
             >
-              <RefreshCw className={cn('w-3 h-3', recovery.isPending && 'animate-spin')} />
+              <RefreshCw
+                className={cn("w-3 h-3", recovery.isPending && "animate-spin")}
+              />
               Recover All
             </button>
           </div>
         </div>
       </div>
     </motion.div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -279,13 +365,13 @@ function ConfirmDialog({
   onCancel,
   loading,
 }: {
-  open: boolean
-  title: string
-  description: string
-  confirmLabel: string
-  onConfirm: () => void
-  onCancel: () => void
-  loading: boolean
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  loading: boolean;
 }) {
   return (
     <AnimatePresence>
@@ -301,10 +387,14 @@ function ConfirmDialog({
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
-            className="relative bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 shadow-lg"
+            className="relative bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4"
           >
-            <h3 className="text-lg font-semibold text-foreground mb-2">{title}</h3>
-            <p className="text-sm text-muted-foreground mb-6 whitespace-pre-line">{description}</p>
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              {title}
+            </h3>
+            <p className="text-sm text-muted-foreground mb-6 whitespace-pre-line">
+              {description}
+            </p>
             <div className="flex justify-end gap-3">
               <button
                 onClick={onCancel}
@@ -326,23 +416,23 @@ function ConfirmDialog({
         </motion.div>
       )}
     </AnimatePresence>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Clear Sessions Button
 // ---------------------------------------------------------------------------
 function ClearSessionsButton({ sessionCount }: { sessionCount: number }) {
-  const [showDialog, setShowDialog] = useState(false)
-  const clearSessions = useClearSessions()
+  const [showDialog, setShowDialog] = useState(false);
+  const clearSessions = useClearSessions();
 
   const handleConfirm = () => {
     clearSessions.mutate(undefined, {
       onSettled: () => setShowDialog(false),
-    })
-  }
+    });
+  };
 
-  if (sessionCount === 0) return null
+  if (sessionCount === 0) return null;
 
   return (
     <>
@@ -364,33 +454,37 @@ function ClearSessionsButton({ sessionCount }: { sessionCount: number }) {
         loading={clearSessions.isPending}
       />
     </>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Backend Status Card
 // ---------------------------------------------------------------------------
 function BackendStatusCard() {
-  const { data: health, isLoading: healthLoading, isError: healthError } = useHealth()
-  const wsConnected = useTransferStore((s) => s.wsConnected)
-  const sessionId = useTransferStore((s) => s.transfer.sessionId)
+  const {
+    data: health,
+    isLoading: healthLoading,
+    isError: healthError,
+  } = useHealth();
+  const wsConnected = useTransferStore((s) => s.wsConnected);
+  const sessionId = useTransferStore((s) => s.transfer.sessionId);
 
-  const restOnline = !healthLoading && !healthError && health?.status === 'ok'
+  const restOnline = !healthLoading && !healthError && health?.status === "ok";
   const restColor = healthLoading
-    ? 'bg-muted'
+    ? "bg-muted"
     : restOnline
-      ? 'bg-green-500'
-      : 'bg-red-500'
+      ? "bg-green-500"
+      : "bg-red-500";
   const wsColor = wsConnected
-    ? 'bg-green-500'
+    ? "bg-green-500"
     : sessionId !== null
-      ? 'bg-red-500'
-      : 'bg-muted-foreground/40'
+      ? "bg-red-500"
+      : "bg-muted-foreground/40";
   const wsTooltip = wsConnected
-    ? 'WebSocket connected'
+    ? "WebSocket connected"
     : sessionId !== null
-      ? 'WebSocket disconnected'
-      : 'No active transfer'
+      ? "WebSocket disconnected"
+      : "No active transfer";
 
   return (
     <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
@@ -401,11 +495,14 @@ function BackendStatusCard() {
         <p className="text-xs text-muted-foreground">Backend Status</p>
         <div className="flex items-center gap-3 mt-1">
           <div className="flex items-center gap-1.5">
-            <span className={cn('w-2 h-2 rounded-full', restColor)} />
+            <span className={cn("w-2 h-2 rounded-full", restColor)} />
             <span className="text-[11px] text-muted-foreground">REST</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className={cn('w-2 h-2 rounded-full', wsColor)} title={wsTooltip} />
+            <span
+              className={cn("w-2 h-2 rounded-full", wsColor)}
+              title={wsTooltip}
+            />
             <span className="text-[11px] text-muted-foreground">WS</span>
           </div>
         </div>
@@ -416,19 +513,22 @@ function BackendStatusCard() {
         </span>
       )}
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Aggregate Stats Card
 // ---------------------------------------------------------------------------
 function AggregateStatsCard({ sessions }: { sessions: SessionInfo[] }) {
-  const totalSessions = sessions.length
-  const totalFiles = sessions.reduce((sum, s) => sum + s.completed_items, 0)
-  const totalVolume = sessions.reduce((sum, s) => sum + (s.total_bytes_volume ?? 0), 0)
+  const totalSessions = sessions.length;
+  const totalFiles = sessions.reduce((sum, s) => sum + s.completed_items, 0);
+  const totalVolume = sessions.reduce(
+    (sum, s) => sum + (s.total_bytes_volume ?? 0),
+    0,
+  );
   const activeCount = sessions.filter(
-    (s) => s.status === 'running' || s.status === 'paused',
-  ).length
+    (s) => s.status === "running" || s.status === "paused",
+  ).length;
 
   return (
     <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
@@ -438,39 +538,47 @@ function AggregateStatsCard({ sessions }: { sessions: SessionInfo[] }) {
       <div className="min-w-0 flex-1">
         <p className="text-xs text-muted-foreground">Aggregate Stats</p>
         <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1">
-          <span className="text-[11px] text-muted-foreground">{totalSessions} sessions</span>
-          <span className="text-[11px] text-muted-foreground">{totalFiles.toLocaleString()} files</span>
-          <span className="text-[11px] text-muted-foreground">{formatBytes(totalVolume)} vol.</span>
+          <span className="text-[11px] text-muted-foreground">
+            {totalSessions} sessions
+          </span>
+          <span className="text-[11px] text-muted-foreground">
+            {totalFiles.toLocaleString()} files
+          </span>
+          <span className="text-[11px] text-muted-foreground">
+            {formatBytes(totalVolume)} vol.
+          </span>
           <span className="text-[11px] text-muted-foreground">
             {activeCount > 0 ? (
-              <span className="text-blue-600 dark:text-blue-400">{activeCount} active</span>
+              <span className="text-blue-600 dark:text-blue-400">
+                {activeCount} active
+              </span>
             ) : (
-              'No active'
+              "No active"
             )}
           </span>
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Storage Health Card
 // ---------------------------------------------------------------------------
 function StorageHealthCard({ destPath }: { destPath: string | null }) {
-  const { data: diskSpace, isLoading } = useDiskSpace(destPath)
+  const { data: diskSpace, isLoading } = useDiskSpace(destPath);
 
   const freePct = diskSpace
     ? Math.round((diskSpace.free_bytes / diskSpace.total_bytes) * 100)
-    : null
+    : null;
 
   const healthColor = !diskSpace
-    ? 'text-muted-foreground'
+    ? "text-muted-foreground"
     : freePct !== null && freePct < 10
-      ? 'text-red-600 dark:text-red-400'
+      ? "text-red-600 dark:text-red-400"
       : freePct !== null && freePct < 25
-        ? 'text-amber-600 dark:text-amber-400'
-        : 'text-green-600 dark:text-green-400'
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-green-600 dark:text-green-400";
 
   return (
     <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
@@ -482,11 +590,13 @@ function StorageHealthCard({ destPath }: { destPath: string | null }) {
         {isLoading && destPath ? (
           <div className="flex items-center gap-1.5 mt-1">
             <Loader2 className="w-3 h-3 text-muted-foreground animate-spin" />
-            <span className="text-[11px] text-muted-foreground">Checking...</span>
+            <span className="text-[11px] text-muted-foreground">
+              Checking...
+            </span>
           </div>
         ) : diskSpace ? (
           <div className="mt-1">
-            <p className={cn('text-sm font-semibold', healthColor)}>
+            <p className={cn("text-sm font-semibold", healthColor)}>
               {formatBytes(diskSpace.free_bytes)} free
             </p>
             <p className="text-[10px] text-muted-foreground">
@@ -495,19 +605,19 @@ function StorageHealthCard({ destPath }: { destPath: string | null }) {
           </div>
         ) : (
           <p className="text-[11px] text-muted-foreground mt-1">
-            {destPath ? 'Unable to read disk' : 'No destination set'}
+            {destPath ? "Unable to read disk" : "No destination set"}
           </p>
         )}
       </div>
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Last Backup Card
 // ---------------------------------------------------------------------------
 function LastBackupCard({ sessions }: { sessions: SessionInfo[] }) {
-  const lastCompleted = sessions.find((s) => s.status === 'completed')
+  const lastCompleted = sessions.find((s) => s.status === "completed");
 
   return (
     <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
@@ -518,12 +628,17 @@ function LastBackupCard({ sessions }: { sessions: SessionInfo[] }) {
         <p className="text-xs text-muted-foreground">Last Backup</p>
         {lastCompleted ? (
           <div className="mt-1">
-            <p className="text-sm font-semibold text-foreground truncate" title={lastCompleted.session_name}>
+            <p
+              className="text-sm font-semibold text-foreground truncate"
+              title={lastCompleted.session_name}
+            >
               {lastCompleted.session_name}
             </p>
             <div className="flex items-center gap-2">
               <span className="text-[10px] text-muted-foreground">
-                {lastCompleted.completed_at ? timeAgo(lastCompleted.completed_at) : 'unknown'}
+                {lastCompleted.completed_at
+                  ? timeAgo(lastCompleted.completed_at)
+                  : "unknown"}
               </span>
               {lastCompleted.failed_items > 0 && (
                 <span className="text-[10px] font-medium text-amber-600 dark:text-amber-400">
@@ -533,33 +648,35 @@ function LastBackupCard({ sessions }: { sessions: SessionInfo[] }) {
             </div>
           </div>
         ) : (
-          <p className="text-[11px] text-muted-foreground mt-1">No backups yet</p>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            No backups yet
+          </p>
         )}
       </div>
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Session Table Row
 // ---------------------------------------------------------------------------
 function SessionRow({ session }: { session: SessionInfo }) {
-  const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
-  const initTransfer = useTransferStore((s) => s.initTransfer)
+  const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
+  const initTransfer = useTransferStore((s) => s.initTransfer);
 
   const handleResume = () => {
-    initTransfer(session)
-    setCurrentPage('transfer')
-  }
+    initTransfer(session);
+    setCurrentPage("transfer");
+  };
 
   const handleViewReport = () => {
-    if (!session.session_report_path) return
+    if (!session.session_report_path) return;
     if (isElectron && window.electronAPI?.openPath) {
-      window.electronAPI.openPath(session.session_report_path)
+      window.electronAPI.openPath(session.session_report_path);
     } else {
-      window.open(`/api/sessions/${session.id}/report?fmt=html`, '_blank')
+      window.open(`/api/sessions/${session.id}/report?fmt=html`, "_blank");
     }
-  }
+  };
 
   return (
     <tr className="border-b border-border hover:bg-muted/30 transition-colors">
@@ -567,30 +684,41 @@ function SessionRow({ session }: { session: SessionInfo }) {
         <StatusBadge status={session.status} />
       </td>
       <td className="py-2.5 pr-3">
-        <p className="text-sm font-medium text-foreground truncate max-w-[180px]" title={session.session_name}>
+        <p
+          className="text-sm font-medium text-foreground truncate max-w-[180px]"
+          title={session.session_name}
+        >
           {session.session_name}
         </p>
       </td>
       <td className="py-2.5 pr-3">
-        <p className="text-xs text-muted-foreground truncate max-w-[220px]" title={session.source_root}>
+        <p
+          className="text-xs text-muted-foreground truncate max-w-[220px]"
+          title={session.source_root}
+        >
           {session.source_root}
         </p>
       </td>
       <td className="py-2.5 pr-3">
-        <p className="text-xs text-muted-foreground truncate max-w-[220px]" title={session.dest_root}>
+        <p
+          className="text-xs text-muted-foreground truncate max-w-[220px]"
+          title={session.dest_root}
+        >
           {session.dest_root}
         </p>
       </td>
       <td className="py-2.5 pr-3">
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">
-            {session.completed_items.toLocaleString()} / {session.total_items.toLocaleString()}
+            {session.completed_items.toLocaleString()} /{" "}
+            {session.total_items.toLocaleString()}
           </span>
-          {session.total_bytes_volume != null && session.total_bytes_volume > 0 && (
-            <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-              {formatBytes(session.total_bytes_volume)}
-            </span>
-          )}
+          {session.total_bytes_volume != null &&
+            session.total_bytes_volume > 0 && (
+              <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                {formatBytes(session.total_bytes_volume)}
+              </span>
+            )}
         </div>
       </td>
       <td className="py-2.5 pr-3">
@@ -600,7 +728,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
       </td>
       <td className="py-2.5">
         <div className="flex items-center gap-1.5">
-          {session.status === 'paused' && (
+          {session.status === "paused" && (
             <button
               onClick={handleResume}
               className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors"
@@ -609,22 +737,33 @@ function SessionRow({ session }: { session: SessionInfo }) {
               Resume
             </button>
           )}
-          {['completed', 'completed_with_errors', 'failed'].includes(session.status) && session.session_report_path && (
-            <button
-              onClick={handleViewReport}
-              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
-              title="Open HTML report"
-            >
-              <FileText className="w-3 h-3" />
-              Report
-            </button>
-          )}
-          {['failed', 'cancelled', 'completed_with_errors'].includes(session.status) && !session.session_report_path && (
-            <span className="text-[10px] text-muted-foreground italic" title="Report not generated — session did not complete">
-              No report
-            </span>
-          )}
-          {['completed', 'completed_with_errors', 'failed'].includes(session.status) && (
+          {["completed", "completed_with_errors", "failed"].includes(
+            session.status,
+          ) &&
+            session.session_report_path && (
+              <button
+                onClick={handleViewReport}
+                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
+                title="Open HTML report"
+              >
+                <FileText className="w-3 h-3" />
+                Report
+              </button>
+            )}
+          {["failed", "cancelled", "completed_with_errors"].includes(
+            session.status,
+          ) &&
+            !session.session_report_path && (
+              <span
+                className="text-[10px] text-muted-foreground italic"
+                title="Report not generated — session did not complete"
+              >
+                No report
+              </span>
+            )}
+          {["completed", "completed_with_errors", "failed"].includes(
+            session.status,
+          ) && (
             <button
               onClick={handleResume}
               className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
@@ -636,51 +775,87 @@ function SessionRow({ session }: { session: SessionInfo }) {
         </div>
       </td>
     </tr>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Setup Cards (auto-activation prompts)
 // ---------------------------------------------------------------------------
-function DriverSetupCard({ name, version, onDismiss }: { name: string | null; version: string | null; onDismiss: () => void }) {
-  const installDriver = useInstallDriver()
-  const queryClient = useQueryClient()
+function DriverSetupCard({
+  name,
+  version,
+  onDismiss,
+}: {
+  name: string | null;
+  version: string | null;
+  onDismiss: () => void;
+}) {
+  const installDriver = useInstallDriver();
+  const queryClient = useQueryClient();
   const handleInstall = async () => {
     try {
       // Try non-elevated install via backend API first
-      const result = await installDriver.mutateAsync()
+      const result = await installDriver.mutateAsync();
       if (!result.success) {
         // If winget failed and Electron is available, try elevated install
         if (isElectron && window.electronAPI?.installDriverElevated) {
           const elevated = await window.electronAPI.installDriverElevated({
-            executable: 'winget',
+            executable: "winget",
             args: [
-              'install', '-e', '--id', 'Apple.AppleMobileDeviceSupport',
-              '--accept-package-agreements', '--accept-source-agreements', '--silent',
+              "install",
+              "-e",
+              "--id",
+              "Apple.AppleMobileDeviceSupport",
+              "--accept-package-agreements",
+              "--accept-source-agreements",
+              "--silent",
             ],
-          })
+          });
           if (elevated.success) {
-            queryClient.invalidateQueries({ queryKey: ['device-backend-status'] })
-            queryClient.invalidateQueries({ queryKey: ['ios-devices'] })
-            useTransferStore.getState().showNotification('success', 'Apple Mobile Device Support installed. Please reconnect your iPhone.')
-            onDismiss()
-            return
+            queryClient.invalidateQueries({
+              queryKey: ["device-backend-status"],
+            });
+            queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
+            useTransferStore
+              .getState()
+              .showNotification(
+                "success",
+                "Apple Mobile Device Support installed. Please reconnect your iPhone.",
+              );
+            onDismiss();
+            return;
           }
-          useTransferStore.getState().showNotification(
-            'error',
-            elevated.error || `Installation failed (exit code: ${elevated.exitCode})`,
-          )
-          return
+          useTransferStore
+            .getState()
+            .showNotification(
+              "error",
+              elevated.error ||
+                `Installation failed (exit code: ${elevated.exitCode})`,
+            );
+          return;
         }
-        useTransferStore.getState().showNotification('error', result.error || `Installation failed (exit code: ${result.exit_code})`)
-        return
+        useTransferStore
+          .getState()
+          .showNotification(
+            "error",
+            result.error ||
+              `Installation failed (exit code: ${result.exit_code})`,
+          );
+        return;
       }
-      useTransferStore.getState().showNotification('success', 'Apple Mobile Device Support installed. Please reconnect your iPhone.')
-      onDismiss()
+      useTransferStore
+        .getState()
+        .showNotification(
+          "success",
+          "Apple Mobile Device Support installed. Please reconnect your iPhone.",
+        );
+      onDismiss();
     } catch (err) {
-      useTransferStore.getState().showNotification('error', extractErrorMessage(err))
+      useTransferStore
+        .getState()
+        .showNotification("error", extractErrorMessage(err));
     }
-  }
+  };
 
   return (
     <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
@@ -688,9 +863,12 @@ function DriverSetupCard({ name, version, onDismiss }: { name: string | null; ve
         <Smartphone className="w-4 h-4 text-purple-700 dark:text-purple-400" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-foreground">Enable iPhone support</p>
+        <p className="text-sm font-semibold text-foreground">
+          Enable iPhone support
+        </p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          {name ?? 'Apple Mobile Device Support'} {version ? `(${version}) ` : ''}
+          {name ?? "Apple Mobile Device Support"}{" "}
+          {version ? `(${version}) ` : ""}
           is available via winget. Install it now for faster iPhone access.
         </p>
         <div className="flex items-center gap-2 mt-2">
@@ -699,7 +877,7 @@ function DriverSetupCard({ name, version, onDismiss }: { name: string | null; ve
             disabled={installDriver.isPending}
             className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
-            {installDriver.isPending ? 'Preparing...' : 'Install Driver'}
+            {installDriver.isPending ? "Preparing..." : "Install Driver"}
           </button>
           <button
             onClick={onDismiss}
@@ -710,24 +888,29 @@ function DriverSetupCard({ name, version, onDismiss }: { name: string | null; ve
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 function WslSetupCard({ onDismiss }: { onDismiss: () => void }) {
-  const goToSetup = useTransferStore((s) => s.setCurrentPage)
+  const goToSetup = useTransferStore((s) => s.setCurrentPage);
   return (
     <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
       <div className="shrink-0 w-8 h-8 rounded-lg bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center">
         <Wifi className="w-4 h-4 text-teal-700 dark:text-teal-400" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-foreground">Set up WSL bridge for iPhone</p>
+        <p className="text-sm font-semibold text-foreground">
+          Set up WSL bridge for iPhone
+        </p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          WSL2 + usbipd-win gives you an open-source path to access iPhones when the Apple driver is not available.
+          WSL2 + usbipd-win gives you an open-source path to access iPhones when
+          the Apple driver is not available.
         </p>
         <div className="flex items-center gap-2 mt-2">
           <button
-            onClick={() => { goToSetup('setup') }}
+            onClick={() => {
+              goToSetup("setup");
+            }}
             className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors"
           >
             Open Setup Wizard
@@ -741,7 +924,7 @@ function WslSetupCard({ onDismiss }: { onDismiss: () => void }) {
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 function BridgeAutoStartedNotice() {
@@ -751,30 +934,45 @@ function BridgeAutoStartedNotice() {
         <CheckCircle2 className="w-4 h-4 text-green-700 dark:text-green-400" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-foreground">WSL bridge started</p>
+        <p className="text-sm font-semibold text-foreground">
+          WSL bridge started
+        </p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          The WSL bridge was auto-started. iPhone devices connected via the open-source bridge are now accessible.
+          The WSL bridge was auto-started. iPhone devices connected via the
+          open-source bridge are now accessible.
         </p>
       </div>
     </div>
-  )
+  );
 }
 
 function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
-  const installPymobiledevice3 = useInstallPymobiledevice3()
+  const installPymobiledevice3 = useInstallPymobiledevice3();
   const handleInstall = async () => {
     try {
-      const result = await installPymobiledevice3.mutateAsync()
+      const result = await installPymobiledevice3.mutateAsync();
       if (!result.success) {
-        useTransferStore.getState().showNotification('error', result.message || 'pymobiledevice3 install failed')
-        return
+        useTransferStore
+          .getState()
+          .showNotification(
+            "error",
+            result.message || "pymobiledevice3 install failed",
+          );
+        return;
       }
-      useTransferStore.getState().showNotification('success', 'pymobiledevice3 installed. Open-source AFC is now available.')
-      onDismiss()
+      useTransferStore
+        .getState()
+        .showNotification(
+          "success",
+          "pymobiledevice3 installed. Open-source AFC is now available.",
+        );
+      onDismiss();
     } catch (err) {
-      useTransferStore.getState().showNotification('error', extractErrorMessage(err))
+      useTransferStore
+        .getState()
+        .showNotification("error", extractErrorMessage(err));
     }
-  }
+  };
 
   return (
     <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
@@ -782,10 +980,12 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
         <Terminal className="w-4 h-4 text-amber-700 dark:text-amber-400" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-foreground">Install open-source iOS library</p>
+        <p className="text-sm font-semibold text-foreground">
+          Install open-source iOS library
+        </p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          pymobiledevice3 provides driverless iPhone access via AFC. Install it now for
-          open-source device support without Apple's driver.
+          pymobiledevice3 provides driverless iPhone access via AFC. Install it
+          now for open-source device support without Apple's driver.
         </p>
         <div className="flex items-center gap-2 mt-2">
           <button
@@ -793,7 +993,9 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
             disabled={installPymobiledevice3.isPending}
             className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
-            {installPymobiledevice3.isPending ? 'Installing...' : 'Install pymobiledevice3'}
+            {installPymobiledevice3.isPending
+              ? "Installing..."
+              : "Install pymobiledevice3"}
           </button>
           <button
             onClick={onDismiss}
@@ -804,43 +1006,53 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 export default function DashboardPage() {
-  const { data: sessionList, isLoading } = useSessionList(1, 20)
-  const setCurrentPage = useTransferStore((s) => s.setCurrentPage)
-  const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot)
-  const destRoot = useTransferStore((s) => s.transfer.destRoot)
+  const { data: sessionList, isLoading } = useSessionList(1, 20);
+  const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
+  const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot);
+  const destRoot = useTransferStore((s) => s.transfer.destRoot);
 
-  const { data: backendStatus } = useDeviceBackendStatus()
-  const [dismissedCards, setDismissedCards] = useState<string[]>([])
+  const { data: backendStatus } = useDeviceBackendStatus();
+  const [dismissedCards, setDismissedCards] = useState<string[]>([]);
 
   const dismissCard = (id: string) => {
-    setDismissedCards((prev) => [...prev, id])
-  }
+    setDismissedCards((prev) => [...prev, id]);
+  };
 
-  const showAppleCard = backendStatus?.apple_driver_installable && !dismissedCards.includes('apple-driver')
-  const showPymobileCard = backendStatus?.pymobiledevice3_installable && !dismissedCards.includes('pymobiledevice3')
-  const showWslCard = backendStatus?.wsl_setup_suggested && !dismissedCards.includes('wsl-setup')
-  const showBridgeCard = backendStatus?.bridge_auto_started && !dismissedCards.includes('bridge-started')
-  const showAnySetupCard = showAppleCard || showPymobileCard || showWslCard || showBridgeCard
+  const showAppleCard =
+    backendStatus?.apple_driver_installable &&
+    !dismissedCards.includes("apple-driver");
+  const showPymobileCard =
+    backendStatus?.pymobiledevice3_installable &&
+    !dismissedCards.includes("pymobiledevice3");
+  const showWslCard =
+    backendStatus?.wsl_setup_suggested && !dismissedCards.includes("wsl-setup");
+  const showBridgeCard =
+    backendStatus?.bridge_auto_started &&
+    !dismissedCards.includes("bridge-started");
+  const showAnySetupCard =
+    showAppleCard || showPymobileCard || showWslCard || showBridgeCard;
 
-  const latestSession = sessionList?.sessions?.[0]
-  const activeSource = sourceRoot || latestSession?.source_root || null
-  const activeDest = destRoot || latestSession?.dest_root || null
-  const activeSessionName = latestSession?.session_name
-  const activeTransferMode = latestSession?.transfer_mode
+  const latestSession = sessionList?.sessions?.[0];
+  const activeSource = sourceRoot || latestSession?.source_root || null;
+  const activeDest = destRoot || latestSession?.dest_root || null;
+  const activeSessionName = latestSession?.session_name;
+  const activeTransferMode = latestSession?.transfer_mode;
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
-        <p className="text-sm text-muted-foreground mt-1">Live system metrics and session management</p>
+        <p className="text-sm text-muted-foreground mt-1">
+          Live system metrics and session management
+        </p>
       </div>
 
       {/* Resume Alert */}
@@ -853,18 +1065,18 @@ export default function DashboardPage() {
             <DriverSetupCard
               name={backendStatus?.apple_driver_package_name ?? null}
               version={backendStatus?.apple_driver_package_version ?? null}
-              onDismiss={() => dismissCard('apple-driver')}
+              onDismiss={() => dismissCard("apple-driver")}
             />
           )}
           {showPymobileCard && (
-            <Pymobiledevice3InstallCard onDismiss={() => dismissCard('pymobiledevice3')} />
+            <Pymobiledevice3InstallCard
+              onDismiss={() => dismissCard("pymobiledevice3")}
+            />
           )}
           {showWslCard && (
-            <WslSetupCard onDismiss={() => dismissCard('wsl-setup')} />
+            <WslSetupCard onDismiss={() => dismissCard("wsl-setup")} />
           )}
-          {showBridgeCard && (
-            <BridgeAutoStartedNotice />
-          )}
+          {showBridgeCard && <BridgeAutoStartedNotice />}
         </div>
       )}
 
@@ -873,7 +1085,9 @@ export default function DashboardPage() {
         <DirMetricsCard
           label="Source Directory"
           sublabel="Select a source path to analyze"
-          icon={<Folder className="w-4.5 h-4.5 text-blue-600 dark:text-blue-400" />}
+          icon={
+            <Folder className="w-4.5 h-4.5 text-blue-600 dark:text-blue-400" />
+          }
           iconBg="bg-blue-50 dark:bg-blue-950"
           path={activeSource}
           sessionName={activeSessionName}
@@ -882,7 +1096,9 @@ export default function DashboardPage() {
         <DirMetricsCard
           label="Backup Destination"
           sublabel="Select a destination path to analyze"
-          icon={<Archive className="w-4.5 h-4.5 text-green-600 dark:text-green-400" />}
+          icon={
+            <Archive className="w-4.5 h-4.5 text-green-600 dark:text-green-400" />
+          }
           iconBg="bg-green-50 dark:bg-green-950"
           path={activeDest}
           sessionName={activeSessionName}
@@ -902,14 +1118,16 @@ export default function DashboardPage() {
       <motion.button
         whileHover={{ scale: 1.01 }}
         whileTap={{ scale: 0.99 }}
-        onClick={() => setCurrentPage('setup')}
+        onClick={() => setCurrentPage("setup")}
         className="no-drag w-full bg-primary text-primary-foreground rounded-lg p-4 flex items-center justify-between hover:bg-primary/90 transition-colors"
       >
         <div className="flex items-center gap-3">
           <HardDrive className="w-5 h-5" />
           <div className="text-left">
             <p className="text-sm font-semibold">Start New Backup</p>
-            <p className="text-xs opacity-80">Select source and destination directories</p>
+            <p className="text-xs opacity-80">
+              Select source and destination directories
+            </p>
           </div>
         </div>
         <ArrowRight className="w-5 h-5" />
@@ -918,12 +1136,18 @@ export default function DashboardPage() {
       {/* Session History Table */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold text-foreground">Recent Sessions</h2>
+          <h2 className="text-lg font-semibold text-foreground">
+            Recent Sessions
+          </h2>
           <div className="flex items-center gap-2">
             {sessionList && sessionList.total > 20 && (
-              <button className="text-xs text-primary hover:underline">View All</button>
+              <button className="text-xs text-primary hover:underline">
+                View All
+              </button>
             )}
-            {sessionList && <ClearSessionsButton sessionCount={sessionList.total} />}
+            {sessionList && (
+              <ClearSessionsButton sessionCount={sessionList.total} />
+            )}
           </div>
         </div>
 
@@ -943,20 +1167,36 @@ export default function DashboardPage() {
         ) : (sessionList?.sessions?.length ?? 0) === 0 ? (
           <div className="bg-card border border-border rounded-lg p-8 text-center">
             <HardDrive className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">No sessions yet. Start your first backup!</p>
+            <p className="text-sm text-muted-foreground">
+              No sessions yet. Start your first backup!
+            </p>
           </div>
         ) : (
           <div className="bg-card border border-border rounded-lg overflow-hidden">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-border bg-muted/30">
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 px-4 pr-3 w-[100px]">Status</th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[180px]">Session</th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">Source</th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">Destination</th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[160px]">Progress</th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[90px]">Date</th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 w-[120px]">Actions</th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 px-4 pr-3 w-[100px]">
+                    Status
+                  </th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[180px]">
+                    Session
+                  </th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+                    Source
+                  </th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+                    Destination
+                  </th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[160px]">
+                    Progress
+                  </th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[90px]">
+                    Date
+                  </th>
+                  <th className="text-left text-xs font-medium text-muted-foreground py-2 w-[120px]">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -969,5 +1209,5 @@ export default function DashboardPage() {
         )}
       </div>
     </div>
-  )
+  );
 }

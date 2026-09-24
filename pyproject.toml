@@ -44,3 +44,16 @@ ignore = [
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pyright]
+include = ["backend"]
+extraPaths = [".", "backend", ".venv/Lib/site-packages"]
+venvPath = "."
+venv = ".venv"
+pythonPlatform = "Windows"
+
+[tool.pyrefly]
+python-interpreter-path = ".venv/Scripts/python.exe"
+search-path = [".", "backend"]
+
+
