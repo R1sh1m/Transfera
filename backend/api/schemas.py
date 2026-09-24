@@ -198,7 +198,20 @@ class MediaItemInfo(BaseModel):
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime
-
+    # Intelligence fields (all optional for backward compat)
+    phash: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_s: float | None = None
+    camera_make: str | None = None
+    camera_model: str | None = None
+    gps_lat: float | None = None
+    gps_lon: float | None = None
+    favorite: bool = False
+    trashed: bool = False
+    blur_score: float | None = None
+    tags: list[str] = []
+    caption: str | None = None
 
 
 class MediaList(BaseModel):
@@ -207,6 +220,168 @@ class MediaList(BaseModel):
     page: int
     page_size: int
     pages: int
+
+
+# ---------------------------------------------------------------------------
+# Intelligence (offline-first: perceptual dedup, people, timeline, search)
+# ---------------------------------------------------------------------------
+class CapabilitiesResponse(BaseModel):
+    phash_available: bool = False
+    faces_available: bool = False
+    clip_available: bool = False
+    onnx_available: bool = False
+    models_dir: str = ""
+    face_models: list[str] = []
+    clip_models: list[str] = []
+    semantic_mode: str = "keyword"
+
+
+class NearDuplicateItemSchema(BaseModel):
+    id: int
+    file_name: str
+    file_size: int
+    phash: str | None = None
+    width: int | None = None
+    height: int | None = None
+    date_taken: datetime | None = None
+    favorite: bool = False
+    thumbnail_url: str | None = None
+
+
+class NearDuplicateGroupSchema(BaseModel):
+    members: list[NearDuplicateItemSchema]
+    suggested_keeper_id: int | None = None
+    threshold: int = 8
+
+
+class NearDuplicateGroupsResponse(BaseModel):
+    groups: list[NearDuplicateGroupSchema]
+    total_groups: int
+    threshold: int
+
+
+class DuplicateGroupResolveRequest(BaseModel):
+    keep_id: int = Field(..., gt=0)
+    trash_ids: list[int] = Field(default_factory=list)
+
+
+class TimelineBucketSchema(BaseModel):
+    key: str  # "2026-09" / "2026-09-24"
+    count: int
+    cover_id: int | None = None
+    start: str
+    end: str
+
+
+class TimelineResponse(BaseModel):
+    granularity: str
+    buckets: list[TimelineBucketSchema]
+    total: int
+
+
+class MomentSchema(BaseModel):
+    start: str
+    end: str
+    count: int
+    cover_id: int | None = None
+    item_ids: list[int]
+
+
+class MomentsResponse(BaseModel):
+    moments: list[MomentSchema]
+    total: int
+
+
+class PersonSchema(BaseModel):
+    id: int
+    name: str | None = None
+    face_count: int = 0
+    cover_face_id: int | None = None
+    hidden: bool = False
+
+
+class PeopleListResponse(BaseModel):
+    people: list[PersonSchema]
+    total: int
+
+
+class PersonRenameRequest(BaseModel):
+    name: str | None = Field(None, max_length=255)
+
+
+class PeopleMergeRequest(BaseModel):
+    source_ids: list[int] = Field(..., min_length=1)
+    target_id: int = Field(..., gt=0)
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    limit: int = Field(50, ge=1, le=200)
+
+
+class SemanticSearchResponse(BaseModel):
+    query: str
+    mode: str
+    results: list[MediaItemInfo]
+    total: int
+
+
+class MediaPatchRequest(BaseModel):
+    favorite: bool | None = None
+    trashed: bool | None = None
+
+
+class BackfillResponse(BaseModel):
+    scanned: int = 0
+    phash_filled: int = 0
+    dims_filled: int = 0
+    tags_filled: int = 0
+    message: str = ""
+
+
+class ManifestItemSchema(BaseModel):
+    id: int
+    file_name: str
+    file_size: int
+    blake3: str | None = None
+    phash: str | None = None
+    date_taken: datetime | None = None
+
+
+class SessionManifestResponse(BaseModel):
+    session_id: int
+    session_name: str
+    item_count: int
+    total_bytes: int
+    chain_hash: str  # sha256 over ordered per-item hashes (tamper-evident)
+    generated_at: datetime
+    items: list[ManifestItemSchema]
+
+
+class SessionVerifyResponse(BaseModel):
+    session_id: int
+    item_count: int
+    chain_hash: str
+    chain_valid: bool
+    missing_hashes: int
+    message: str
+
+
+class VaultStatsResponse(BaseModel):
+    items: int = 0
+    bytes: int = 0
+    favorites: int = 0
+    trashed_items: int = 0
+    trashed_bytes: int = 0
+    near_duplicate_groups: int = 0
+    recoverable_bytes: int = 0
+    screenshots: int = 0
+
+
+class ReviewQueueResponse(BaseModel):
+    blurry_ids: list[int] = []
+    screenshot_ids: list[int] = []
+    untagged_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +547,7 @@ class PreflightValidateResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class PathValidateRequest(BaseModel):
     path: str = Field(..., min_length=1)
+
 
 class PathValidateResponse(BaseModel):
     path: str
@@ -554,8 +730,7 @@ class ClearSessionsRequest(BaseModel):
     older_than_days: int | None = Field(
         None,
         ge=1,
-        description="If set, only clear sessions created more than N days ago. "
-                    "If omitted, all sessions are cleared.",
+        description="If set, only clear sessions created more than N days ago. If omitted, all sessions are cleared.",
     )
 
 

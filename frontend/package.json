@@ -1,12 +1,12 @@
 {
   "name": "transfera-frontend",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "type": "module",
   "description": "Transfera v2 - Local media backup desktop app",
   "main": "electron/dist-electron/main.cjs",
   "author": "Transfera Team",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/R1sh1m/Transfera.git"

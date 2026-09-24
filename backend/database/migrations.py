@@ -53,6 +53,57 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (19, "CREATE INDEX IF NOT EXISTS ix_media_items_filename_size ON media_items (file_name, file_size)"),
     (20, "CREATE INDEX IF NOT EXISTS ix_media_items_source_path_session ON media_items (source_path, session_id)"),
     (21, "ALTER TABLE transfer_sessions ADD COLUMN selected_files_json TEXT DEFAULT NULL"),
+    (22, "ALTER TABLE media_items ADD COLUMN phash VARCHAR(16) DEFAULT NULL"),
+    (23, "ALTER TABLE media_items ADD COLUMN width INTEGER DEFAULT NULL"),
+    (24, "ALTER TABLE media_items ADD COLUMN height INTEGER DEFAULT NULL"),
+    (25, "ALTER TABLE media_items ADD COLUMN duration_s FLOAT DEFAULT NULL"),
+    (26, "ALTER TABLE media_items ADD COLUMN camera_make VARCHAR(128) DEFAULT NULL"),
+    (27, "ALTER TABLE media_items ADD COLUMN camera_model VARCHAR(128) DEFAULT NULL"),
+    (28, "ALTER TABLE media_items ADD COLUMN gps_lat FLOAT DEFAULT NULL"),
+    (29, "ALTER TABLE media_items ADD COLUMN gps_lon FLOAT DEFAULT NULL"),
+    (30, "ALTER TABLE media_items ADD COLUMN favorite BOOLEAN NOT NULL DEFAULT 0"),
+    (31, "ALTER TABLE media_items ADD COLUMN trashed BOOLEAN NOT NULL DEFAULT 0"),
+    (32, "ALTER TABLE media_items ADD COLUMN trashed_at DATETIME DEFAULT NULL"),
+    (33, "ALTER TABLE media_items ADD COLUMN blur_score FLOAT DEFAULT NULL"),
+    (34, "ALTER TABLE media_items ADD COLUMN tags_json TEXT DEFAULT NULL"),
+    (35, "ALTER TABLE media_items ADD COLUMN caption TEXT DEFAULT NULL"),
+    (36, "CREATE INDEX IF NOT EXISTS ix_media_items_phash ON media_items (phash)"),
+    (37, "CREATE INDEX IF NOT EXISTS ix_media_items_favorite ON media_items (favorite)"),
+    (38, "CREATE INDEX IF NOT EXISTS ix_media_items_trashed ON media_items (trashed)"),
+    (39, "CREATE INDEX IF NOT EXISTS ix_media_items_date_taken ON media_items (date_taken)"),
+    (
+        40,
+        "CREATE TABLE IF NOT EXISTS persons ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name VARCHAR(255) DEFAULT NULL, "
+        "face_count INTEGER NOT NULL DEFAULT 0, "
+        "cover_face_id INTEGER DEFAULT NULL, "
+        "hidden BOOLEAN NOT NULL DEFAULT 0, "
+        "created_at DATETIME NOT NULL, "
+        "updated_at DATETIME NOT NULL)",
+    ),
+    (
+        41,
+        "CREATE TABLE IF NOT EXISTS faces ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "person_id INTEGER DEFAULT NULL REFERENCES persons(id) ON DELETE SET NULL, "
+        "bbox_json TEXT DEFAULT NULL, "
+        "embedding_json TEXT DEFAULT NULL, "
+        "confidence FLOAT DEFAULT NULL, "
+        "created_at DATETIME NOT NULL)",
+    ),
+    (
+        42,
+        "CREATE TABLE IF NOT EXISTS media_embeddings ("
+        "media_id INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE, "
+        "model VARCHAR(64) NOT NULL DEFAULT 'keyword-v1', "
+        "dim INTEGER NOT NULL DEFAULT 0, "
+        "vector_json TEXT DEFAULT NULL, "
+        "updated_at DATETIME NOT NULL)",
+    ),
+    (43, "CREATE INDEX IF NOT EXISTS ix_faces_media_id ON faces (media_id)"),
+    (44, "CREATE INDEX IF NOT EXISTS ix_faces_person_id ON faces (person_id)"),
 ]
 
 

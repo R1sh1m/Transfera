@@ -22,9 +22,17 @@ import {
   Trash2,
   AlertTriangle,
 } from "lucide-react";
-import { useMediaList, useClearLibrary } from "@/lib/queries";
+import { useMediaList, useClearLibrary, useTrash, useSemanticSearch } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import TransferHistoryTable from "@/components/TransferHistoryTable";
+import {
+  CapabilitiesBadge,
+  DuplicatesPanel,
+  MomentsGrid,
+  PeoplePanel,
+  SemanticSearchBar,
+  TimelineStrip,
+} from "@/components/Intelligence";
 import apiClient from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
 import { cn } from "@/lib/utils";
@@ -359,6 +367,32 @@ function ConfirmDialog({
 }
 
 // ---------------------------------------------------------------------------
+// RestoreTrashButton
+// ---------------------------------------------------------------------------
+function RestoreTrashButton({ id }: { id: number }) {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      disabled={busy}
+      onClick={() => {
+        setBusy(true);
+        apiClient
+          .post(`/media/${id}/restore`)
+          .then(() => {
+            queryClient.invalidateQueries({ queryKey: ["trash"] });
+            queryClient.invalidateQueries({ queryKey: ["media"] });
+          })
+          .finally(() => setBusy(false));
+      }}
+      className="px-3 py-1.5 text-xs rounded-pill bg-action text-white hover:bg-action/90 active:scale-[0.95] disabled:opacity-40 shrink-0"
+    >
+      {busy ? "Restoring…" : "Restore"}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // MediaGridBoundary
 // ---------------------------------------------------------------------------
 class MediaGridBoundary extends Component<
@@ -404,6 +438,10 @@ export default function LibraryPage() {
   const [viewMode, setViewMode] = useState<"masonry" | "list" | "history">(
     "masonry",
   );
+  type LibrarySection = "vault" | "timeline" | "moments" | "duplicates" | "people" | "trash";
+  const [section, setSection] = useState<LibrarySection>("vault");
+  const [semanticQuery, setSemanticQuery] = useState("");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [regenStatus, setRegenStatus] = useState<"idle" | "loading" | "done">(
     "idle",
   );
@@ -458,7 +496,12 @@ export default function LibraryPage() {
     extension: extension || undefined,
     finalStatus: finalStatus || undefined,
     search: search || undefined,
+    favorite: favoritesOnly ? true : undefined,
   });
+
+  const trashQuery = useTrash(1);
+  const semanticActive = semanticQuery.trim().length > 1;
+  const semanticResults = useSemanticSearch(semanticQuery, section === "vault" && semanticActive);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -476,7 +519,7 @@ export default function LibraryPage() {
     resetLibrary();
     setFetchPage(1);
     setFilterKey(myKey);
-  }, [search, extension, finalStatus, sessionFilter, resetLibrary]);
+  }, [search, extension, finalStatus, sessionFilter, favoritesOnly, resetLibrary]);
 
   useEffect(() => {
     if (!data || data.items.length === 0) return;
@@ -602,12 +645,60 @@ export default function LibraryPage() {
   return (
     <div className="h-full flex flex-col space-y-4">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Library</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          {library.total} items completed
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Library</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {library.total} items completed
+          </p>
+        </div>
+        <CapabilitiesBadge />
       </div>
+
+      {/* Section tabs — Vault / Timeline / Moments / Duplicates / People / Trash */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {(
+          [
+            ["vault", "Vault"],
+            ["timeline", "Timeline"],
+            ["moments", "Moments"],
+            ["duplicates", "Duplicates"],
+            ["people", "People"],
+            ["trash", "Trash"],
+          ] as [LibrarySection, string][]
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setSection(id)}
+            className={cn(
+              "px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]",
+              section === id
+                ? "bg-action text-white"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+        <div className="flex-1" />
+        <button
+          onClick={() => setFavoritesOnly((v) => !v)}
+          className={cn(
+            "px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]",
+            favoritesOnly
+              ? "bg-action text-white"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+          title="Show favorites only"
+        >
+          ★ Favorites
+        </button>
+      </div>
+
+      {/* Semantic search (offline keyword today, CLIP when models installed) */}
+      {section === "vault" && (
+        <SemanticSearchBar onResults={(q) => setSemanticQuery(q)} />
+      )}
 
       {/* Toolbar */}
       <div className="flex items-center gap-3">
@@ -755,9 +846,71 @@ export default function LibraryPage() {
         loading={clearLibrary.isPending}
       />
 
+      {/* Intelligence sections */}
+      {section === "timeline" && (
+        <div className="rounded-lg border border-border bg-card/50 p-4">
+          <TimelineStrip />
+        </div>
+      )}
+      {section === "moments" && (
+        <div className="rounded-lg border border-border bg-card/50 p-4">
+          <MomentsGrid />
+        </div>
+      )}
+      {section === "duplicates" && (
+        <div className="rounded-lg border border-border bg-card/50 p-4">
+          <DuplicatesPanel />
+        </div>
+      )}
+      {section === "people" && (
+        <div className="rounded-lg border border-border bg-card/50 p-4">
+          <PeoplePanel />
+        </div>
+      )}
+      {section === "trash" && (
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            {trashQuery.data ? `${trashQuery.data.total} items in Trash — restore from here, or empty to delete records.` : "Loading trash…"}
+          </p>
+          {(trashQuery.data?.items ?? []).map((item) => (
+            <div
+              key={item.id}
+              className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md"
+            >
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-foreground truncate">{item.file_name}</p>
+                <p className="text-xs text-muted-foreground truncate">{item.source_path}</p>
+              </div>
+              <RestoreTrashButton id={item.id} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Semantic hits strip */}
+      {section === "vault" && semanticActive && (
+        <div className="rounded-lg border border-action/30 bg-action/5 p-3">
+          <p className="text-xs text-muted-foreground mb-2">
+            {semanticResults.data
+              ? `${semanticResults.data.total} semantic hits (${semanticResults.data.mode}) for “${semanticQuery}”`
+              : `Searching for “${semanticQuery}”…`}
+          </p>
+          <div className="flex gap-2 overflow-x-auto">
+            {(semanticResults.data?.results ?? []).slice(0, 12).map((m) => (
+              <div key={m.id} className="w-20 shrink-0 text-center">
+                <div className="aspect-square rounded-md bg-muted flex items-center justify-center text-[10px] text-muted-foreground px-1">
+                  {m.file_name.slice(0, 18)}
+                </div>
+                <p className="text-[10px] text-muted-foreground truncate mt-1">{m.file_name}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <div ref={containerRef} className="flex-1 overflow-y-auto">
-        {viewMode === "history" ? (
+        {section !== "vault" ? null : viewMode === "history" ? (
           <TransferHistoryTable />
         ) : isLoading && library.items.length === 0 ? (
           <div className="grid grid-cols-3 gap-3">

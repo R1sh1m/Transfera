@@ -76,6 +76,15 @@ class FileMetadata:
     # Raw EXIF tags (if available)
     exif_tags: dict[str, str] = field(default_factory=dict)
 
+    # Structured intelligence fields (persisted to media_items when present)
+    width: int | None = None
+    height: int | None = None
+    duration_s: float | None = None
+    camera_make: str | None = None
+    camera_model: str | None = None
+    gps_lat: float | None = None
+    gps_lon: float | None = None
+
 
 # ---------------------------------------------------------------------------
 # Timestamp helpers

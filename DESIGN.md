@@ -677,6 +677,43 @@ Primary action button using the Action Blue token.
 - Disabled: `bg-muted text-muted-foreground opacity-40 cursor-default`
 - Used for: "Transfer selected" button in `component.source-preview-panel`
 
+### `component.library-section-tabs`
+
+Pill tab row switching the Library page between Vault / Timeline / Moments / Duplicates / People / Trash.
+
+**Specs:**
+- Container: `flex items-center gap-1.5 flex-wrap`
+- Tab: `px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]` — active `bg-action text-white`, inactive `text-muted-foreground hover:bg-muted hover:text-foreground`
+- Favorites toggle shares the same pill grammar (★ prefix, `bg-action` when on)
+- Follows the single-accent rule: no per-section colors; selection is signaled by the Action Blue fill only
+
+### `component.capabilities-badge`
+
+Offline-capability indicator + one-click indexer in the Library header.
+
+**Structure:**
+- Mode pill: `px-2 py-0.5 rounded-pill border border-border text-xs` — "CLIP on-device" in green when semantic embeddings exist, otherwise "Keyword search" in muted + "Faces on/off"
+- Action: `component.action-button` at `text-xs` — "Index library" triggers idempotent backfill (phash/dims/tags), shows "Indexing…" while pending, fires a success toast with counts
+
+### `component.duplicate-group-card`
+
+One near-duplicate group in the Duplicate Center (`component.duplicates-panel`).
+
+**Structure:**
+- Outer: `rounded-lg border border-border bg-card p-3 space-y-2`
+- Meta line: `text-xs text-muted-foreground` — "Group N · M similar · suggested keeper #id"
+- Member grid: `grid grid-cols-3 sm:grid-cols-5 gap-2`; each member a button with thumbnail + `text-[10px]` id line; keeper candidate gets `border-action ring-2 ring-action/30` + `Star` icon in `{colors.primary}`
+- Resolve action: `component.action-button` — "Keep #id, move rest to Trash" (soft-delete, always recoverable)
+
+### `component.semantic-hits-strip`
+
+Horizontal result rail shown above the vault grid while a semantic query is active.
+
+**Structure:**
+- Outer: `rounded-lg border border-action/30 bg-action/5 p-3`
+- Count line: `text-xs text-muted-foreground` — "N semantic hits (keyword|clip) for “query”"
+- Rail: `flex gap-2 overflow-x-auto` of `w-20 shrink-0` cells (`aspect-square rounded-md bg-muted` thumb + `text-[10px] truncate` filename)
+
 ## Known Gaps
 
 - Form validation and error states were not surfaced on the analyzed pages; only the neutral search input is documented.

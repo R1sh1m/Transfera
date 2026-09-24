@@ -11,7 +11,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -130,6 +132,50 @@ class MediaItem(Base):
         String(64), nullable=True
     )
 
+    # --- Intelligence: perceptual + semantic identity (offline-first) ---
+    phash: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, default=None
+    )
+    width: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
+    height: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
+    duration_s: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    camera_make: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, default=None
+    )
+    camera_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, default=None
+    )
+    gps_lat: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    gps_lon: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    favorite: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    trashed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    trashed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    blur_score: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    tags_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True, default=None
+    )
+    caption: Mapped[str | None] = mapped_column(
+        Text, nullable=True, default=None
+    )
+
     # --- Original capture time (extracted pre-copy for sort order) ---
     original_capture_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -161,6 +207,11 @@ class MediaItem(Base):
         Index("ix_media_items_source_path", "source_path"),
         Index("ix_media_items_source_path_session", "source_path", "session_id"),
         Index("ix_media_items_filename_size", "file_name", "file_size"),
+        Index("ix_media_items_phash", "phash"),
+        Index("ix_media_items_favorite", "favorite"),
+        Index("ix_media_items_trashed", "trashed"),
+        Index("ix_media_items_date_taken", "date_taken"),
+        Index("ix_media_items_camera", "camera_make", "camera_model"),
     )
 
     def __init__(self, **kwargs: object) -> None:
@@ -418,3 +469,68 @@ class DeviceImportState(Base):
 
     def __repr__(self) -> str:
         return f"<DeviceImportState device_id={self.device_id!r} cutoff={self.last_successful_cutoff}>"
+
+# ---------------------------------------------------------------------------
+# persons / faces (offline face clustering — SCRFD + ArcFace via ONNX,
+# gracefully disabled when models are absent)
+# ---------------------------------------------------------------------------
+class Person(Base):
+    __tablename__ = "persons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    face_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cover_face_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+    faces: Mapped[list[Face]] = relationship(back_populates="person", lazy="selectin")
+
+    __table_args__ = (Index("ix_persons_name", "name"),)
+
+
+class Face(Base):
+    __tablename__ = "faces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    media_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
+    )
+    person_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("persons.id", ondelete="SET NULL"), nullable=True
+    )
+    bbox_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    embedding_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    person: Mapped[Person | None] = relationship(back_populates="faces", lazy="selectin")
+
+    __table_args__ = (
+        Index("ix_faces_media_id", "media_id"),
+        Index("ix_faces_person_id", "person_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# media_embeddings (semantic search — MobileCLIP/SigLIP via ONNX, optional)
+# ---------------------------------------------------------------------------
+class MediaEmbedding(Base):
+    __tablename__ = "media_embeddings"
+
+    media_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("media_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(String(64), nullable=False, default="keyword-v1")
+    dim: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vector_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
