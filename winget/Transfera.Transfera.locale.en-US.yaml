@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 PackageIdentifier: Transfera.Transfera
-PackageVersion: 2.4.0
+PackageVersion: 2.5.0
 PackageLocale: en-US
 PackageName: Transfera
 Publisher: Transfera Team
@@ -9,7 +9,7 @@ PublisherSupportUrl: https://github.com/R1sh1m/Transfera/issues
 Author: Rishi Misra
 ShortDescription: Local media backup and deduplication desktop app.
 Description: Transfera v2 is a desktop application that lets you move and organize photos and videos from local folders and connected iOS devices into a clean, deduplicated, and organized library.
-License: MIT
+License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)
 LicenseUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
 Copyright: Copyright © 2026 Rishi Misra
 CopyrightUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE

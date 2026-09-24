@@ -25,13 +25,17 @@ async def test_migrations_fresh_db() -> None:
 
     async with engine.begin() as conn:
         # Verify ledger exists
-        result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"))
+        result = await conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+        )
         assert result.fetchone() is not None, "schema_migrations table must exist"
 
         # Verify all migrations were recorded
         result = await conn.execute(text("SELECT COUNT(*) FROM schema_migrations"))
         count = result.scalar()
-        assert count == 21, f"Expected 21 migrations, got {count}"
+        from backend.database.migrations import _MIGRATIONS
+
+        assert count == len(_MIGRATIONS), f"Expected {len(_MIGRATIONS)} migrations, got {count}"
 
         # Verify a sample of the columns actually exist
         for table, col in [
@@ -40,6 +44,11 @@ async def test_migrations_fresh_db() -> None:
             ("transfer_sessions", "selected_files_json"),
             ("media_items", "thumbnail_status"),
             ("media_items", "original_capture_time"),
+            ("media_items", "phash"),
+            ("media_items", "favorite"),
+            ("media_items", "trashed"),
+            ("media_items", "camera_model"),
+            ("media_items", "caption"),
         ]:
             result = await conn.execute(
                 text("SELECT name FROM pragma_table_info(:table) WHERE name=:col"),

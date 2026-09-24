@@ -150,6 +150,20 @@ export interface MediaItemInfo {
   error_message?: string
   created_at: string
   updated_at: string
+  // Intelligence fields (optional for backward compat)
+  phash?: string | null
+  width?: number | null
+  height?: number | null
+  duration_s?: number | null
+  camera_make?: string | null
+  camera_model?: string | null
+  gps_lat?: number | null
+  gps_lon?: number | null
+  favorite?: boolean
+  trashed?: boolean
+  blur_score?: number | null
+  tags?: string[]
+  caption?: string | null
 }
 
 export interface MediaList {
@@ -159,6 +173,98 @@ export interface MediaList {
   page_size: number
   pages: number
 }
+
+// --- Intelligence (offline-first) ---------------------------------------
+export interface CapabilitiesResponse {
+  phash_available: boolean
+  faces_available: boolean
+  clip_available: boolean
+  onnx_available: boolean
+  models_dir: string
+  face_models: string[]
+  clip_models: string[]
+  semantic_mode: 'keyword' | 'clip'
+}
+
+export interface NearDuplicateItem {
+  id: number
+  file_name: string
+  file_size: number
+  phash?: string | null
+  width?: number | null
+  height?: number | null
+  date_taken?: string | null
+  favorite: boolean
+  thumbnail_url?: string | null
+}
+
+export interface NearDuplicateGroup {
+  members: NearDuplicateItem[]
+  suggested_keeper_id?: number | null
+  threshold: number
+}
+
+export interface NearDuplicateGroupsResponse {
+  groups: NearDuplicateGroup[]
+  total_groups: number
+  threshold: number
+}
+
+export interface TimelineBucket {
+  key: string
+  count: number
+  cover_id?: number | null
+  start: string
+  end: string
+}
+
+export interface TimelineResponse {
+  granularity: string
+  buckets: TimelineBucket[]
+  total: number
+}
+
+export interface Moment {
+  start: string
+  end: string
+  count: number
+  cover_id?: number | null
+  item_ids: number[]
+}
+
+export interface MomentsResponse {
+  moments: Moment[]
+  total: number
+}
+
+export interface Person {
+  id: number
+  name?: string | null
+  face_count: number
+  cover_face_id?: number | null
+  hidden: boolean
+}
+
+export interface PeopleListResponse {
+  people: Person[]
+  total: number
+}
+
+export interface SemanticSearchResponse {
+  query: string
+  mode: 'keyword' | 'clip'
+  results: MediaItemInfo[]
+  total: number
+}
+
+export interface BackfillResponse {
+  scanned: number
+  phash_filled: number
+  dims_filled: number
+  tags_filled: number
+  message: string
+}
+
 
 // --- Duplicate ------------------------------------------------------------
 export interface DuplicateEntry {

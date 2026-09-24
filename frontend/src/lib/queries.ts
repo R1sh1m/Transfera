@@ -433,6 +433,9 @@ export function useMediaList(params: {
   finalStatus?: string
   extension?: string
   search?: string
+  favorite?: boolean
+  trashed?: boolean
+  camera?: string
 }) {
   const { page = 1, pageSize = 50, ...rest } = params
   return useQuery({
@@ -935,5 +938,165 @@ export function useTier2Resume() {
       return data
     },
     staleTime: 60000,
+  })
+}
+// ---------------------------------------------------------------------------
+// Intelligence (offline-first: perceptual dedup, timeline, people, search)
+// ---------------------------------------------------------------------------
+export function useCapabilities() {
+  return useQuery({
+    queryKey: ['intelligence-capabilities'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<import('@/types/api').CapabilitiesResponse>('/intelligence/capabilities')
+      return data
+    },
+    staleTime: 60000,
+    retry: 1,
+  })
+}
+
+export function useDuplicateGroups(threshold = 8) {
+  return useQuery({
+    queryKey: ['duplicate-groups', threshold],
+    queryFn: async () => {
+      const { data } = await apiClient.get<import('@/types/api').NearDuplicateGroupsResponse>(
+        '/intelligence/duplicates/groups',
+        { params: { threshold } },
+      )
+      return data
+    },
+    staleTime: 30000,
+    retry: 1,
+  })
+}
+
+export function useResolveDuplicateGroup() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (req: { keep_id: number; trash_ids: number[] }) => {
+      const { data } = await apiClient.post('/intelligence/duplicates/groups/resolve', req)
+      return data
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['duplicate-groups'] })
+      qc.invalidateQueries({ queryKey: ['media'] })
+    },
+    onError: (error) => {
+      useTransferStore.getState().showNotification('error', extractErrorMessage(error))
+    },
+  })
+}
+
+export function useTimeline(granularity: 'month' | 'day' = 'month') {
+  return useQuery({
+    queryKey: ['timeline', granularity],
+    queryFn: async () => {
+      const { data } = await apiClient.get<import('@/types/api').TimelineResponse>('/intelligence/timeline', {
+        params: { granularity },
+      })
+      return data
+    },
+    staleTime: 30000,
+    retry: 1,
+  })
+}
+
+export function useMoments() {
+  return useQuery({
+    queryKey: ['moments'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<import('@/types/api').MomentsResponse>('/intelligence/moments')
+      return data
+    },
+    staleTime: 30000,
+    retry: 1,
+  })
+}
+
+export function usePeople() {
+  return useQuery({
+    queryKey: ['people'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<import('@/types/api').PeopleListResponse>('/intelligence/people')
+      return data
+    },
+    staleTime: 30000,
+    retry: 1,
+  })
+}
+
+export function useRenamePerson() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (req: { id: number; name: string | null }) => {
+      const { data } = await apiClient.patch(`/intelligence/people/${req.id}`, { name: req.name })
+      return data
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['people'] }),
+  })
+}
+
+export function useSemanticSearch(query: string, enabled = true) {
+  return useQuery({
+    queryKey: ['semantic-search', query],
+    queryFn: async () => {
+      const { data } = await apiClient.post<import('@/types/api').SemanticSearchResponse>(
+        '/intelligence/search/semantic',
+        { query, limit: 50 },
+      )
+      return data
+    },
+    enabled: enabled && query.trim().length > 1,
+    staleTime: 30000,
+    retry: 1,
+  })
+}
+
+export function usePatchMedia() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (req: { id: number; favorite?: boolean; trashed?: boolean }) => {
+      const { data } = await apiClient.patch(`/media/${req.id}`, {
+        ...(req.favorite !== undefined ? { favorite: req.favorite } : {}),
+        ...(req.trashed !== undefined ? { trashed: req.trashed } : {}),
+      })
+      return data
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['media'] })
+      qc.invalidateQueries({ queryKey: ['trash'] })
+    },
+  })
+}
+
+export function useTrash(page = 1) {
+  return useQuery({
+    queryKey: ['trash', page],
+    queryFn: async () => {
+      const { data } = await apiClient.get<import('@/types/api').MediaList>('/trash', {
+        params: { page, page_size: 50 },
+      })
+      return data
+    },
+    staleTime: 15000,
+    retry: 1,
+  })
+}
+
+export function useBackfill() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post<import('@/types/api').BackfillResponse>('/intelligence/backfill')
+      return data
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['media'] })
+      qc.invalidateQueries({ queryKey: ['duplicate-groups'] })
+      useTransferStore.getState().showNotification('success', data.message)
+    },
+    onError: (error) => {
+      useTransferStore.getState().showNotification('error', extractErrorMessage(error))
+    },
   })
 }

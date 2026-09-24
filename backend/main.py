@@ -21,6 +21,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.api.device_preview import router as device_preview_router
+from backend.api.intelligence_routes import curation_router, trash_router
+from backend.api.intelligence_routes import router as intelligence_router
 from backend.api.routes import _run_transfer_background, router, ws_transfer
 from backend.api.tier2_routes import router as tier2_router
 from backend.config import CACHE_DIR, HOST, LOG_DIR, LOG_FORMAT, PORT
@@ -320,6 +322,9 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(tier2_router)
     app.include_router(device_preview_router)
+    app.include_router(intelligence_router)
+    app.include_router(curation_router)
+    app.include_router(trash_router)
 
     # WebSocket endpoint — token required via ?token= (X-Local-Token value)
     @app.websocket("/ws/transfer/{session_id}")

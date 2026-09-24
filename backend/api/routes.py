@@ -2049,6 +2049,12 @@ async def list_media(
     final_status: str | None = Query(None),
     extension: str | None = Query(None),
     search: str | None = Query(None),
+    favorite: bool | None = Query(None),
+    trashed: bool | None = Query(None),
+    camera: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    has_gps: bool | None = Query(None),
 ) -> MediaList:
     async with session_scope() as session:
         # Build base query
@@ -2071,6 +2077,32 @@ async def list_media(
             # Escape LIKE wildcards so user input can't inject %/_ patterns
             escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             filters.append(MediaItem.file_name.ilike(f"%{escaped}%", escape="\\"))
+        if favorite is not None:
+            filters.append(MediaItem.favorite == favorite)
+        # Trash: hidden by default (library shows vault only); opt-in via trashed=true.
+        if trashed is None:
+            filters.append(MediaItem.trashed == False)  # noqa: E712
+        else:
+            filters.append(MediaItem.trashed == trashed)
+        if camera:
+            c = f"%{camera}%"
+            filters.append((MediaItem.camera_make.ilike(c)) | (MediaItem.camera_model.ilike(c)))
+        if date_from:
+            try:
+                from datetime import datetime as _dt
+
+                filters.append(MediaItem.date_taken >= _dt.fromisoformat(date_from))
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                from datetime import datetime as _dt2
+
+                filters.append(MediaItem.date_taken <= _dt2.fromisoformat(date_to))
+            except ValueError:
+                pass
+        if has_gps is True:
+            filters.append(MediaItem.gps_lat.is_not(None))
 
         for f in filters:
             q = q.where(f)
@@ -3247,6 +3279,12 @@ async def backfill_metadata(_: None = Depends(require_local_token)):
 
 
 def _media_to_info(mi: MediaItem) -> MediaItemInfo:
+    import json as _json
+
+    try:
+        _tags = _json.loads(mi.tags_json or "[]") if mi.tags_json else []
+    except Exception:
+        _tags = []
     return MediaItemInfo(
         id=mi.id,
         source_path=mi.source_path,
@@ -3265,6 +3303,19 @@ def _media_to_info(mi: MediaItem) -> MediaItemInfo:
         error_message=mi.error_message,
         created_at=mi.created_at,
         updated_at=mi.updated_at,
+        phash=mi.phash,
+        width=mi.width,
+        height=mi.height,
+        duration_s=mi.duration_s,
+        camera_make=mi.camera_make,
+        camera_model=mi.camera_model,
+        gps_lat=mi.gps_lat,
+        gps_lon=mi.gps_lon,
+        favorite=bool(mi.favorite),
+        trashed=bool(mi.trashed),
+        blur_score=mi.blur_score,
+        tags=_tags,
+        caption=mi.caption,
     )
 
 
