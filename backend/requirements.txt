@@ -12,3 +12,5 @@ aiofiles>=23.2,<25.0
 aiohttp>=3.9,<4.0
 pydantic>=2.7,<3.0
 pymobiledevice3>=5.0,<6.0
+exifread>=3.0,<4.0
+

@@ -144,11 +144,13 @@ async def scan_batch_duplicates(
             if batch_names:
                 conditions.append(func.lower(MediaItem.file_name).in_(batch_names))
 
-            # Build lookup of matching items in this session (archive = completed items)
+            # Build lookup of matching items across the entire DB for dedup.
+            # CRITICAL: Only items with final_status == COMPLETED represent safely vaulted media.
+            # Incomplete, cancelled, or failed transfers from other sessions must NEVER be flagged as
+            # vaulted duplicates.
             archive_result = await session.execute(
                 select(MediaItem)
                 .where(
-                    MediaItem.session_id == batch.session_id,
                     MediaItem.id.notin_([i.id for i in items]),
                     MediaItem.final_status == HopStatus.COMPLETED.value,
                     or_(*conditions),
@@ -156,21 +158,10 @@ async def scan_batch_duplicates(
             )
             archive_items = list(archive_result.scalars().all())
 
-            # Also fetch matching items across the entire DB for cross-session dedup
-            all_items_result = await session.execute(
-                select(MediaItem)
-                .where(
-                    MediaItem.id.notin_([i.id for i in items]),
-                    MediaItem.source_hash.isnot(None),
-                    or_(*conditions),
-                )
-            )
-            all_archived = list(all_items_result.scalars().all())
-
     # Run detection (outside session to avoid long-lived connections)
     report = _detect_duplicates(
         items=items,
-        archive_items=archive_items + all_archived,
+        archive_items=archive_items,
         batch_id=batch_id,
         session_id=batch.session_id,
         archive_root=archive_root,

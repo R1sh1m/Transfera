@@ -20,8 +20,19 @@ _MAX_SUFFIX = 999
 
 # Fixed English month names — locale-independent
 MONTH_NAMES = [
-    "", "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ]
 
 
@@ -90,11 +101,13 @@ def resolve_archive_path(
     Path
         A **non-existing** path guaranteed safe to write to.
     """
+    from backend.utils.durability import sanitize_filename
+
     dt = derive_timestamp(item)
-    name = item.file_name
+    safe_name = sanitize_filename(item.file_name)
 
     folder = build_folder(dest_root, dt, layout)
-    base = folder / name
+    base = folder / safe_name
 
     # Conflict resolution — never overwrite
     return _safe_path(base)
@@ -105,19 +118,42 @@ def locate_archive_file(
     item: MediaItem,
     *,
     layout: str = "year/month/day",
+    verify_hash: bool = False,
 ) -> Path | None:
     """
     Locate the existing destination path for *item* under *dest_root*.
     Checks the base path and sequential conflict paths, verifying that
-    the file exists and matches the item's file size.
+    the file exists and matches the item's file size (and optionally hash).
+
+    When ``verify_hash`` is True and ``item.source_hash`` is set, candidates
+    with matching size are hash-verified to avoid size-collision false hits.
+    Size-only fast path is kept for hot loops; recovery passes verify_hash=True.
     """
+    from backend.utils.durability import sanitize_filename
+    from backend.utils.hashing import verify_hash as _verify_hash_fn
+
     dt = derive_timestamp(item)
-    name = item.file_name
+    safe_name = sanitize_filename(item.file_name)
     folder = build_folder(dest_root, dt, layout)
-    base = folder / name
+    base = folder / safe_name
+
+    def _matches(p: Path) -> bool:
+        try:
+            if not p.is_file():
+                return False
+            if p.stat().st_size != item.file_size:
+                return False
+            if verify_hash and item.source_hash:
+                try:
+                    return bool(_verify_hash_fn(p, item.source_hash))
+                except OSError:
+                    return False
+            return True
+        except OSError:
+            return False
 
     # 1. Check if the base path is the correct file
-    if base.is_file() and base.stat().st_size == item.file_size:
+    if _matches(base):
         return base
 
     # 2. Check conflict-resolution sequential suffixes (stem_001, stem_002, etc.)
@@ -128,18 +164,13 @@ def locate_archive_file(
     for i in range(1, _MAX_SUFFIX + 1):
         candidate = parent / f"{stem}_{i:03d}{suffix}"
         if candidate.is_file():
-            if candidate.stat().st_size == item.file_size:
+            if _matches(candidate):
                 return candidate
         else:
             # Break early as organizer._safe_path allocates suffixes sequentially.
             break
 
-    # Fallback: if base exists but size doesn't match, return base just in case
-    if base.is_file():
-        return base
-
     return None
-
 
 
 def resolve_live_photo_folder(
@@ -230,10 +261,63 @@ def _safe_path(base: Path) -> Path:
             logger.info("Conflict resolved: %s -> %s", base.name, candidate.name)
             return candidate
 
-    raise FileExistsError(
-        f"Cannot resolve conflict for {base.name}: "
-        f"all slots {_MAX_SUFFIX} exhausted."
-    )
+    raise FileExistsError(f"Cannot resolve conflict for {base.name}: all slots {_MAX_SUFFIX} exhausted.")
+
+
+def claim_archive_path(
+    dest_root: Path,
+    item: MediaItem,
+    *,
+    layout: str = "year/month/day",
+) -> Path:
+    """
+    Atomically claim a free destination path via O_CREAT|O_EXCL reservation.
+
+    Closes the TOCTOU between parallel Hop-2 workers: the ``.partial``
+    reservation file is created exclusively; the winner keeps the slot,
+    losers advance to the next suffix. Returns the clean (non-partial)
+    path whose ``.partial`` sibling is reserved by the caller.
+    """
+    import os
+
+    from backend.config import PARTIAL_SUFFIX
+    from backend.utils.durability import sanitize_filename
+
+    dt = derive_timestamp(item)
+    safe_name = sanitize_filename(item.file_name)
+    folder = build_folder(dest_root, dt, layout)
+    folder.mkdir(parents=True, exist_ok=True)
+    base = folder / safe_name
+
+    candidates: list[Path] = [base]
+    stem = base.stem
+    suffix = base.suffix
+    parent = base.parent
+    for i in range(1, _MAX_SUFFIX + 1):
+        candidates.append(parent / f"{stem}_{i:03d}{suffix}")
+
+    last_exc: Exception | None = None
+    for clean in candidates:
+        if clean.exists():
+            continue
+        reservation = clean.with_suffix(clean.suffix + PARTIAL_SUFFIX)
+        if reservation.exists():
+            continue
+        try:
+            fd = os.open(str(reservation), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            # Reservation created on disk — caller holds this slot until copy completes
+            # or fails. Do NOT unlink here: keeping it guarantees mutual exclusion against
+            # concurrent workers attempting to claim the same filename.
+            return clean
+        except FileExistsError as exc:
+            last_exc = exc
+            continue
+        except OSError as exc:
+            last_exc = exc
+            continue
+
+    raise FileExistsError(f"Cannot resolve conflict for {base.name}: all slots {_MAX_SUFFIX} exhausted.") from last_exc
 
 
 def unique_folder(base: Path) -> Path:

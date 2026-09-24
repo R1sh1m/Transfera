@@ -113,4 +113,3 @@ test_source/
 opencode.json
 .pytest_cache/
 .ruff_cache/
-WINDOWS_RELEASE_GUIDE.md

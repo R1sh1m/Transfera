@@ -50,11 +50,13 @@ def _ensure_thumb_worker() -> None:
 def _thumb_worker_loop() -> None:
     """Drain the thumbnail update queue in a single persistent event loop."""
     from backend.engines.thread_runner import submit_and_wait
+
     batch: list[tuple[int, str]] = []
 
     async def _flush(items: list[tuple[int, str]]) -> None:
         from backend.database.manager import session_scope
         from backend.database.models import MediaItem
+
         try:
             async with session_scope() as session:
                 for item_id, status in items:
@@ -68,12 +70,25 @@ def _thumb_worker_loop() -> None:
             # Sleep briefly in case it's a transient lock/connection error
             await asyncio.sleep(1.0)
 
+    def _safe_flush(items: list[tuple[int, str]]) -> None:
+        try:
+            submit_and_wait(_flush(items))
+        except TimeoutError:
+            logger.warning("Thumb worker flush timed out — re-queueing %d update(s)", len(items))
+            for entry in items:
+                try:
+                    _thumb_update_queue.put_nowait(entry)
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.error("Thumb worker flush failed, re-queueing: %s", exc)
+
     while True:
         try:
             item = _thumb_update_queue.get(timeout=0.1)
         except _queue.Empty:
             if batch:
-                submit_and_wait(_flush(batch))
+                _safe_flush(batch)
                 batch.clear()
             continue
 
@@ -81,49 +96,56 @@ def _thumb_worker_loop() -> None:
             break
         batch.append(item)
         if len(batch) >= 20:  # flush in batches of 20
-            submit_and_wait(_flush(batch))
+            _safe_flush(batch)
             batch.clear()
 
     if batch:
-        submit_and_wait(_flush(batch))
+        _safe_flush(batch)
+
 
 logger = logging.getLogger(__name__)
 
-# BLAKE3 import with fallback
-_BLAKE3_AVAILABLE = False
-try:
-    import blake3 as _blake3
+# BLAKE3 import with fallback (centralized in utils.hashing)
+from backend.utils.hashing import _BLAKE3_AVAILABLE
 
-    _BLAKE3_AVAILABLE = True
+try:
+    import blake3 as _blake3  # type: ignore[import-untyped]
 except ImportError:
-    pass
+    _blake3 = None  # type: ignore[assignment]
 
 # Maximum number of times to retry a transient device read failure on Hop 1.
 # This covers: momentary USB drop, WPD COM "device busy", AFC ECONNRESET,
 # and iOS Live Photo coalescing delays.
 HOP1_MAX_RETRIES: int = 2
-HOP1_RETRY_BASE_DELAY: float = 1.0   # seconds; multiplied by attempt number
+HOP1_RETRY_BASE_DELAY: float = 1.0  # seconds; multiplied by attempt number
 
 # Exception types (by name string) that are considered transient and safe to retry.
 # Using name-matching to avoid hard importing platform-specific exception types
 # (WPD COM errors, pymobiledevice3 AFC errors) that may not be present on all systems.
-_TRANSIENT_EXC_NAMES: frozenset[str] = frozenset({
-    "AFCError",
-    "ConnectionResetError",
-    "BrokenPipeError",
-    "TimeoutError",
-    "OSError",
-    "IOError",
-    "ConnectionError",
-})
+_TRANSIENT_EXC_NAMES: frozenset[str] = frozenset(
+    {
+        "AFCError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+        "TimeoutError",
+        "OSError",
+        "IOError",
+        "ConnectionError",
+    }
+)
 
 
 # Exception types (by name string) that indicate the device was disconnected
 # (as opposed to a transient USB blip that is safe to retry).
-_DISCONNECT_EXC_NAMES: frozenset[str] = frozenset({
-    "AFCError", "ConnectionResetError", "BrokenPipeError",
-    "DeviceDisconnectedError", "MuxError",
-})
+_DISCONNECT_EXC_NAMES: frozenset[str] = frozenset(
+    {
+        "AFCError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+        "DeviceDisconnectedError",
+        "MuxError",
+    }
+)
 
 
 def _looks_like_disconnect(exc: BaseException) -> bool:
@@ -136,19 +158,31 @@ def _looks_like_disconnect(exc: BaseException) -> bool:
         if name in _DISCONNECT_EXC_NAMES:
             return True
         msg = str(e).lower()
-        if any(kw in msg for kw in ("disconnected", "device not found", "no device", "connection refused", "broken pipe")):
+        if any(
+            kw in msg for kw in ("disconnected", "device not found", "no device", "connection refused", "broken pipe")
+        ):
             return True
     return False
 
 
 def _is_transient_exc(exc: BaseException) -> bool:
     """Return True if the exception looks like a transient device/IO error safe to retry."""
+    import errno
+
     to_check: list[BaseException] = [exc]
     if exc.__cause__ is not None:
         to_check.append(exc.__cause__)
     if exc.__context__ is not None:
         to_check.append(exc.__context__)
     for e in to_check:
+        # Disk full is a fatal condition that will not clear on immediate retry
+        if isinstance(e, OSError):
+            if e.errno == errno.ENOSPC or getattr(e, "winerror", None) == 112:
+                return False
+        msg = str(e).lower()
+        if "no space left" in msg or "disk full" in msg:
+            return False
+
         if type(e).__name__ in _TRANSIENT_EXC_NAMES:
             return True
         # OSError subclasses (errno-based) and WPD COM errors often surface as
@@ -213,12 +247,34 @@ async def _copy_and_hash(
             bytes_read += len(chunk)
             if on_progress is not None:
                 on_progress(bytes_read, file_size, str(src))
+        try:
+            await dst_fh.flush()
+            # fsync through the underlying binary buffer when available
+            raw = getattr(dst_fh, "buffer", None)
+            fileno = None
+            try:
+                fileno = dst_fh.fileno() if hasattr(dst_fh, "fileno") else None
+            except Exception:
+                fileno = None
+            if fileno is not None:
+                try:
+                    await asyncio.to_thread(os.fsync, fileno)
+                except OSError:
+                    pass
+            elif raw is not None:
+                try:
+                    await asyncio.to_thread(os.fsync, raw.fileno())
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     return hasher.hexdigest()
 
 
 class _afc_reader_context:
     """Async context manager wrapper for a reader with ``open()``/``close()``."""
+
     def __init__(self, reader):
         self._reader = reader
 
@@ -277,6 +333,7 @@ async def _generate_batch_thumbnails(
             try:
                 from backend.engines.thumbnail_cache import thumbnail_cache
                 from backend.engines.thumbnailer import generate_thumbnail_bytes
+
                 data = await asyncio.to_thread(generate_thumbnail_bytes, cached_path)
                 if data:
                     thumbnail_cache.put(item_id, data)
@@ -294,7 +351,9 @@ async def _generate_batch_thumbnails(
     failed_ids = [r[0] for r in results if isinstance(r, tuple) and r[1] == "failed"]
     logger.debug(
         "Batch thumbnails: %d ready, %d failed out of %d",
-        len(ready_ids), len(failed_ids), len(thumbnail_tasks),
+        len(ready_ids),
+        len(failed_ids),
+        len(thumbnail_tasks),
     )
 
 
@@ -334,13 +393,17 @@ async def cache_batch(
     cached_count = 0
     total = len(items)
     pending_thumbnails: list[tuple[int, Path]] = []
+    cancelled = False
 
     for idx, item in enumerate(items):
         if cancel_event is not None and cancel_event.is_set():
             logger.info(
                 "Batch %d interrupted (pause or cancel) at item %d/%d",
-                batch_id, idx + 1, total,
+                batch_id,
+                idx + 1,
+                total,
             )
+            cancelled = True
             break
 
         was_already_completed = item.hop1_status == HopStatus.COMPLETED.value
@@ -377,7 +440,10 @@ async def cache_batch(
         if db_batch is not None:
             db_batch.completed_items = cached_count
             db_batch.failed_items = total - cached_count
-            if cached_count == 0:
+            if cancelled:
+                # Interrupted: leave resumable (recovery re-runs LOADING)
+                db_batch.status = BatchStatus.LOADING.value
+            elif cached_count == 0:
                 db_batch.status = BatchStatus.FAILED.value
             elif cached_count < total:
                 db_batch.status = BatchStatus.PARTIAL.value
@@ -387,7 +453,6 @@ async def cache_batch(
 
     logger.info("Batch %d cached: %d/%d succeeded", batch_id, cached_count, total)
     return cached_count
-
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +477,19 @@ async def _cache_single_item(
     source_path = item.source_path
     is_ios = is_ios_source(source_path)
 
+    # Check available disk space on the cache drive before writing
+    from backend.utils.durability import check_free_space
+
+    is_ok, free_b, req_b = check_free_space(cache_dir, item.file_size or 0)
+    if not is_ok:
+        err = (
+            f"Insufficient disk space on cache drive: {free_b // (1024 * 1024)}MB free, "
+            f"need {req_b // (1024 * 1024)}MB for {item.file_name}"
+        )
+        logger.error("Item %d: %s", item.id, err)
+        await _mark_item_hop1(item, HopStatus.FAILED, err)
+        return (False, None)
+
     if is_ios:
         serial, afc_path = parse_ios_source(source_path)
         src_filename = afc_path.rsplit("/", 1)[-1] if "/" in afc_path else afc_path
@@ -432,6 +510,7 @@ async def _cache_single_item(
         # Retry transient device errors for the USB/AFC read
         dst.parent.mkdir(parents=True, exist_ok=True)
         from backend.device_backend import get_device_backend_manager
+
         backend_mgr = get_device_backend_manager()
         computed_hash = ""
         last_exc: BaseException | None = None
@@ -441,7 +520,8 @@ async def _cache_single_item(
                 # can persist across a USB blip and must be recreated from scratch.
                 file_reader = backend_mgr.create_file_reader(serial, afc_path)
                 computed_hash = await _copy_and_hash(
-                    file_reader, partial,
+                    file_reader,
+                    partial,
                     on_progress=on_progress,
                     file_index=file_index,
                     file_total=file_total,
@@ -454,16 +534,20 @@ async def _cache_single_item(
                 if not _is_transient_exc(exc) or attempt > HOP1_MAX_RETRIES:
                     logger.error(
                         "iOS device read failed for %s after %d attempt(s): %s",
-                        source_path, attempt, exc,
+                        source_path,
+                        attempt,
+                        exc,
                     )
-                    await _mark_item_hop1(item, HopStatus.FAILED,
-                                          f"iOS device read failed: {exc}")
+                    await _mark_item_hop1(item, HopStatus.FAILED, f"iOS device read failed: {exc}")
                     return (False, None)
                 delay = HOP1_RETRY_BASE_DELAY * attempt
                 logger.warning(
-                    "Transient iOS read error for %s (attempt %d/%d) — "
-                    "retrying in %.1fs: %s",
-                    source_path, attempt, HOP1_MAX_RETRIES + 1, delay, exc,
+                    "Transient iOS read error for %s (attempt %d/%d) — retrying in %.1fs: %s",
+                    source_path,
+                    attempt,
+                    HOP1_MAX_RETRIES + 1,
+                    delay,
+                    exc,
                 )
                 await asyncio.sleep(delay)
         if last_exc is not None:
@@ -471,17 +555,18 @@ async def _cache_single_item(
                 logger.error(
                     "Device disconnected during Hop 1 cache of %s: %s — "
                     "item marked FAILED. Reconnect device and retry session.",
-                    source_path, last_exc,
+                    source_path,
+                    last_exc,
                 )
-                await _mark_item_hop1(item, HopStatus.FAILED,
-                                      f"Device disconnected: {last_exc}")
+                await _mark_item_hop1(item, HopStatus.FAILED, f"Device disconnected: {last_exc}")
             else:
                 logger.error(
                     "iOS device read failed for %s after %d attempt(s): %s",
-                    source_path, HOP1_MAX_RETRIES + 1, last_exc,
+                    source_path,
+                    HOP1_MAX_RETRIES + 1,
+                    last_exc,
                 )
-                await _mark_item_hop1(item, HopStatus.FAILED,
-                                      f"iOS device read failed: {last_exc}")
+                await _mark_item_hop1(item, HopStatus.FAILED, f"iOS device read failed: {last_exc}")
             return (False, None)
     else:
         # Local file path
@@ -512,7 +597,8 @@ async def _cache_single_item(
         for attempt in range(1, HOP1_MAX_RETRIES + 2):
             try:
                 computed_hash = await _copy_and_hash(
-                    src, partial,
+                    src,
+                    partial,
                     on_progress=on_progress,
                     file_index=file_index,
                     file_total=file_total,
@@ -525,35 +611,44 @@ async def _cache_single_item(
                 if not _is_transient_exc(exc) or attempt > HOP1_MAX_RETRIES:
                     logger.error(
                         "Local file read failed for %s after %d attempt(s): %s",
-                        source_path, attempt, exc,
+                        source_path,
+                        attempt,
+                        exc,
                     )
                     await _mark_item_hop1(item, HopStatus.FAILED, str(exc))
                     return (False, None)
                 delay = HOP1_RETRY_BASE_DELAY * attempt
                 logger.warning(
-                    "Transient local read error for %s (attempt %d/%d) — "
-                    "retrying in %.1fs: %s",
-                    source_path, attempt, HOP1_MAX_RETRIES + 1, delay, exc,
+                    "Transient local read error for %s (attempt %d/%d) — retrying in %.1fs: %s",
+                    source_path,
+                    attempt,
+                    HOP1_MAX_RETRIES + 1,
+                    delay,
+                    exc,
                 )
                 await asyncio.sleep(delay)
         if last_exc is not None:
-            await _mark_item_hop1(item, HopStatus.FAILED,
-                                  f"Read failed after all retries: {last_exc}")
+            await _mark_item_hop1(item, HopStatus.FAILED, f"Read failed after all retries: {last_exc}")
             return (False, None)
 
     # --- Verify hash against recorded source_hash ---
     if item.source_hash and computed_hash != item.source_hash.lower():
         logger.warning(
             "Hash mismatch for %s: expected %s, got %s",
-            source_path, item.source_hash, computed_hash,
+            source_path,
+            item.source_hash,
+            computed_hash,
         )
         partial.unlink(missing_ok=True)
         await _mark_item_hop1(item, HopStatus.FAILED, "Source hash mismatch")
         return (False, None)
 
-    # --- Hash match (or no prior hash) — commit ---
-    import os
-    os.replace(str(partial), str(dst))
+    # --- Hash match (or no prior hash) — durable commit ---
+    from backend.utils.durability import durable_replace, fsync_file
+
+    fsync_file(partial)
+    durable_replace(partial, dst)
+    fsync_file(dst)
 
     # Store the computed hash for downstream verification
     async with session_scope() as session:

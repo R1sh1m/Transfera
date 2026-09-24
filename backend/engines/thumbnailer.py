@@ -257,15 +257,18 @@ def _generate_video_thumbnail(file_path: Path) -> bytes | None:
             if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
                 return result.stdout
 
-            stderr = result.stderr.decode("utf-8", errors="replace")[:2000]
-            logger.error(
+            stderr = result.stderr.decode("utf-8", errors="replace")[:200]
+            logger.warning(
                 "ffmpeg thumbnail failed for %s (returncode=%d, stdout=%d bytes): %s",
-                file_path, result.returncode, len(result.stdout or b""), stderr,
+                file_path.name,
+                result.returncode,
+                len(result.stdout or b""),
+                stderr.strip() or "no stderr",
             )
         except subprocess.TimeoutExpired:
-            logger.error("ffmpeg thumbnail timed out for %s", file_path)
+            logger.warning("ffmpeg thumbnail timed out for %s", file_path.name)
         except OSError as exc:
-            logger.error("ffmpeg thumbnail OS error for %s: %s", file_path, exc)
+            logger.warning("ffmpeg thumbnail OS error for %s: %s", file_path.name, exc)
 
         return None
 

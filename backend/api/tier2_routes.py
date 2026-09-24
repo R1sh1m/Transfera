@@ -37,6 +37,20 @@ router = APIRouter(prefix="/api/tier2")
 
 _fallback_orchestrator: WSLOrchestrator | None = None
 
+_BUSID_RE = None
+
+
+def _validate_busid(busid: str) -> str:
+    """Allowlist USB bus IDs (e.g. ``2-3``) to block command injection."""
+    import re as _re
+
+    global _BUSID_RE
+    if _BUSID_RE is None:
+        _BUSID_RE = _re.compile(r"^[0-9]+-[0-9]+(\.[0-9]+)?$")
+    if not _BUSID_RE.match(busid or ""):
+        raise HTTPException(status_code=400, detail="Invalid busid format")
+    return busid
+
 
 def _get_or_create_orchestrator(manager) -> WSLOrchestrator | None:
     global _fallback_orchestrator
@@ -46,6 +60,7 @@ def _get_or_create_orchestrator(manager) -> WSLOrchestrator | None:
     if _fallback_orchestrator is None:
         try:
             from backend.wsl_orchestrator import WSLOrchestrator
+
             _fallback_orchestrator = WSLOrchestrator()
         except Exception:
             return None
@@ -106,42 +121,52 @@ async def get_setup_preview() -> Tier2SetupPreviewResponse:
 
     if not wsl_status.wsl_installed:
         needs_restart = True
-        steps.append(Tier2StepPreview(
-            step_id="enable_wsl",
-            title="Enable WSL2 (Windows feature)",
-            description="Turns on Windows Subsystem for Linux. One-time restart may be required.",
-            requires_restart=True,
-            restart_description="Windows needs to restart to finish enabling WSL2. Save any unsaved work before restarting.",
-        ))
+        steps.append(
+            Tier2StepPreview(
+                step_id="enable_wsl",
+                title="Enable WSL2 (Windows feature)",
+                description="Turns on Windows Subsystem for Linux. One-time restart may be required.",
+                requires_restart=True,
+                restart_description="Windows needs to restart to finish enabling WSL2. Save any unsaved work before restarting.",
+            )
+        )
 
     if wsl_status.wsl_installed and not wsl_status.distro_name:
-        steps.append(Tier2StepPreview(
-            step_id="install_distro",
-            title="Install Ubuntu (WSL distribution)",
-            description="Downloads and registers the Ubuntu WSL distribution for running Linux-side tools.",
-        ))
+        steps.append(
+            Tier2StepPreview(
+                step_id="install_distro",
+                title="Install Ubuntu (WSL distribution)",
+                description="Downloads and registers the Ubuntu WSL distribution for running Linux-side tools.",
+            )
+        )
 
     if not usbipd_status.installed:
         needs_elevation = True
-        steps.append(Tier2StepPreview(
-            step_id="install_usbipd",
-            title="Install usbipd-win (USB sharing tool)",
-            description="Installs an open-source USB device sharing tool referenced in Microsoft's official WSL documentation.",
-            requires_elevation=True,
-            elevation_description="Windows will ask for admin permission (UAC). Click 'Yes' to allow installation.",
-        ))
+        steps.append(
+            Tier2StepPreview(
+                step_id="install_usbipd",
+                title="Install usbipd-win (USB sharing tool)",
+                description="Installs an open-source USB device sharing tool referenced in Microsoft's official WSL documentation.",
+                requires_elevation=True,
+                elevation_description="Windows will ask for admin permission (UAC). Click 'Yes' to allow installation.",
+            )
+        )
 
-    steps.append(Tier2StepPreview(
-        step_id="provision_linux",
-        title="Set up Linux-side tools",
-        description="Installs USB/IP tools, pymobiledevice3, and the connection bridge inside Ubuntu.",
-    ))
+    steps.append(
+        Tier2StepPreview(
+            step_id="provision_linux",
+            title="Set up Linux-side tools",
+            description="Installs USB/IP tools, pymobiledevice3, and the connection bridge inside Ubuntu.",
+        )
+    )
 
-    steps.append(Tier2StepPreview(
-        step_id="start_bridge",
-        title="Start connection bridge",
-        description="Launches the device access service that connects to your iPhone.",
-    ))
+    steps.append(
+        Tier2StepPreview(
+            step_id="start_bridge",
+            title="Start connection bridge",
+            description="Launches the device access service that connects to your iPhone.",
+        )
+    )
 
     return Tier2SetupPreviewResponse(
         steps=steps,
@@ -152,7 +177,7 @@ async def get_setup_preview() -> Tier2SetupPreviewResponse:
 
 
 @router.post("/setup", response_model=Tier2StepResponse)
-async def execute_setup_step(req: Tier2StepRequest) -> Tier2StepResponse:
+async def execute_setup_step(req: Tier2StepRequest, _: None = Depends(require_local_token)) -> Tier2StepResponse:
     """
     Execute a single setup step. The frontend drives the flow step-by-step,
     showing notification gates between each step.
@@ -173,6 +198,7 @@ async def execute_setup_step(req: Tier2StepRequest) -> Tier2StepResponse:
     elif step_id == "start_bridge":
         bridge_status = await orchestrator.start_bridge()
         from backend.wsl_orchestrator import Tier2StepResult
+
         result = Tier2StepResult(
             step_id="start_bridge",
             completed=bridge_status.reachable,
@@ -208,8 +234,11 @@ async def list_usb_devices() -> Tier2USBDeviceListResponse:
     return Tier2USBDeviceListResponse(
         devices=[
             Tier2USBDeviceInfo(
-                busid=d.busid, vid_pid=d.vid_pid,
-                device_name=d.device_name, state=d.state, is_apple=d.is_apple,
+                busid=d.busid,
+                vid_pid=d.vid_pid,
+                device_name=d.device_name,
+                state=d.state,
+                is_apple=d.is_apple,
             )
             for d in devices
         ]
@@ -217,7 +246,10 @@ async def list_usb_devices() -> Tier2USBDeviceListResponse:
 
 
 @router.post("/devices/bind-preview", response_model=Tier2BindPreviewResponse)
-async def preview_device_bind(req: Tier2BindRequest) -> Tier2BindPreviewResponse:
+async def preview_device_bind(
+    req: Tier2BindRequest, _: None = Depends(require_local_token)
+) -> Tier2BindPreviewResponse:
+    _validate_busid(req.busid)
     """
     Preview what bind does BEFORE triggering it.
     The frontend shows this explanation first, then asks for confirmation.
@@ -253,7 +285,9 @@ async def preview_device_bind(req: Tier2BindRequest) -> Tier2BindPreviewResponse
 
 
 @router.post("/devices/bind-execute", response_model=Tier2BindExecuteResponse)
-async def execute_device_bind(req: Tier2BindExecuteRequest) -> Tier2BindExecuteResponse:
+async def execute_device_bind(
+    req: Tier2BindExecuteRequest, _: None = Depends(require_local_token)
+) -> Tier2BindExecuteResponse:
     """
     Actually bind + attach a device after user confirmation.
     Returns the command for Electron to elevate for bind,
@@ -261,6 +295,7 @@ async def execute_device_bind(req: Tier2BindExecuteRequest) -> Tier2BindExecuteR
     """
     if not req.confirmed:
         raise HTTPException(status_code=400, detail="User confirmation required")
+    _validate_busid(req.busid)
 
     manager = get_device_manager()
     orchestrator = manager.get_orchestrator()
@@ -278,11 +313,12 @@ async def execute_device_bind(req: Tier2BindExecuteRequest) -> Tier2BindExecuteR
 
 
 @router.post("/devices/bind-elevated")
-async def bind_device_elevated(req: Tier2BindRequest) -> dict:
+async def bind_device_elevated(req: Tier2BindRequest, _: None = Depends(require_local_token)) -> dict:
     """
     Return the elevated bind command for Electron to execute.
     Does NOT run the bind itself.
     """
+    _validate_busid(req.busid)
     manager = get_device_manager()
     orchestrator = manager.get_orchestrator()
     if orchestrator is None:
@@ -296,6 +332,7 @@ async def bind_device_elevated(req: Tier2BindRequest) -> dict:
 async def check_resume() -> Tier2ResumeNotification | None:
     """Check if Tier 2 setup needs to resume after a restart."""
     from backend.wsl_orchestrator import Tier2PersistedState
+
     state = Tier2PersistedState.load()
     if state is None or not state.pending_step:
         return None
@@ -315,6 +352,7 @@ async def cancel_setup(_: None = Depends(require_local_token)) -> Tier2CancelRes
     so a cancelled setup doesn't leave an orphaned bridge running inside WSL.
     """
     from backend.wsl_orchestrator import Tier2PersistedState
+
     manager = get_device_manager()
     orchestrator = manager.get_orchestrator()
     if orchestrator is not None:
@@ -386,9 +424,13 @@ async def reset_setup(_: None = Depends(require_local_token)) -> Tier2ResetRespo
     except Exception as exc:
         logger.warning("Failed to clear device preferences: %s", exc)
 
-    logger.info("Device setup reset complete — bridge=%s prefer_tier2=%s state=%s device_prefs=%s",
-                bridge_terminated, prefer_tier2_reset, persisted_state_cleared,
-                device_preferences_cleared)
+    logger.info(
+        "Device setup reset complete — bridge=%s prefer_tier2=%s state=%s device_prefs=%s",
+        bridge_terminated,
+        prefer_tier2_reset,
+        persisted_state_cleared,
+        device_preferences_cleared,
+    )
 
     return Tier2ResetResponse(
         reset=True,

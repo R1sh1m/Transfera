@@ -1,56 +1,56 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-import path from 'path'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import path from "path";
 
-const PROCESS_START_TIME = Date.now()
-const STARTUP_GRACE_MS = 25000 // 25s covers worst-case device manager init
+const PROCESS_START_TIME = Date.now();
+const STARTUP_GRACE_MS = 25000; // 25s covers worst-case device manager init
 
 function suppressStartupErrors(proxy: any) {
-  proxy.on('error', (err: any, _req: any, res: any) => {
+  proxy.on("error", (err: any, _req: any, res: any) => {
     const isStartupError =
-      (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET') &&
-      Date.now() - PROCESS_START_TIME < STARTUP_GRACE_MS
+      (err.code === "ECONNREFUSED" || err.code === "ECONNRESET") &&
+      Date.now() - PROCESS_START_TIME < STARTUP_GRACE_MS;
 
     if (isStartupError) {
       // Return a clean 503 to the frontend instead of crashing the proxy
       // The frontend's health polling and React Query retry logic handles this
       try {
-        if (res && typeof res.writeHead === 'function' && !res.headersSent) {
-          res.writeHead(503, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ status: 'starting' }))
+        if (res && typeof res.writeHead === "function" && !res.headersSent) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "starting" }));
         }
       } catch {
         // res may already be closed — ignore
       }
-      return // Do NOT propagate to Vite's error logger
+      return; // Do NOT propagate to Vite's error logger
     }
 
     // After grace period: log real errors (backend crashed, wrong port, etc.)
-    console.error(`[proxy] ${err.code}: ${err.message}`)
-  })
+    console.error(`[proxy] ${err.code}: ${err.message}`);
+  });
 }
 
 export default defineConfig({
-  base: './',
+  base: "./",
   plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      "@": path.resolve(__dirname, "./src"),
     },
   },
   server: {
-    host: '127.0.0.1',
+    host: "127.0.0.1",
     port: 5173,
     strictPort: false,
     proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:47821',
+      "/api": {
+        target: "http://127.0.0.1:47821",
         changeOrigin: true,
         configure: suppressStartupErrors,
       },
-      '/ws': {
-        target: 'http://127.0.0.1:47821',
+      "/ws": {
+        target: "http://127.0.0.1:47821",
         ws: true,
         changeOrigin: true,
         configure: suppressStartupErrors,
@@ -58,23 +58,23 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
-    sourcemap: true,
+    outDir: "dist",
+    sourcemap: false,
     rollupOptions: {
       output: {
         // Split large vendor libraries into a separate chunk so they can be
         // cached independently from app code and don't block the initial paint.
         manualChunks: {
           // Core React runtime — almost never changes, cache-friendly
-          'vendor-react': ['react', 'react-dom'],
+          "vendor-react": ["react", "react-dom"],
           // Animation library — sizeable but infrequently updated
-          'vendor-motion': ['framer-motion'],
+          "vendor-motion": ["framer-motion"],
           // Data-fetching and state
-          'vendor-query': ['@tanstack/react-query', 'axios', 'zustand'],
+          "vendor-query": ["@tanstack/react-query", "axios", "zustand"],
           // Icon set — large at rest, rarely changed
-          'vendor-icons': ['lucide-react'],
+          "vendor-icons": ["lucide-react"],
         },
       },
     },
   },
-})
+});

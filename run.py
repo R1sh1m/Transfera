@@ -50,8 +50,11 @@ IS_WINDOWS = sys.platform == "win32"
 # Ordered list of paths to probe for a Python 3.12 installation on Windows.
 # The user-local path is resolved at runtime to avoid baking a real username into source.
 _PYTHON312_CANDIDATES: list[Path] = [
-    *([Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Python" / "Python312" / "python.exe"]
-      if IS_WINDOWS and "LOCALAPPDATA" in os.environ else []),
+    *(
+        [Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Python" / "Python312" / "python.exe"]
+        if IS_WINDOWS and "LOCALAPPDATA" in os.environ
+        else []
+    ),
     Path(r"C:\Program Files\Python312\python.exe"),
     Path(r"C:\Python312\python.exe"),
 ]
@@ -127,20 +130,23 @@ def _verify_python312(python_path: Path) -> bool:
 # ---------------------------------------------------------------------------
 class _C:
     """ANSI color codes (disabled when not a TTY)."""
-    RESET   = "\033[0m"   if sys.stdout.isatty() else ""
-    BOLD    = "\033[1m"    if sys.stdout.isatty() else ""
-    DIM     = "\033[2m"    if sys.stdout.isatty() else ""
-    RED     = "\033[31m"   if sys.stdout.isatty() else ""
-    GREEN   = "\033[32m"   if sys.stdout.isatty() else ""
-    YELLOW  = "\033[33m"   if sys.stdout.isatty() else ""
-    BLUE    = "\033[34m"   if sys.stdout.isatty() else ""
-    MAGENTA = "\033[35m"   if sys.stdout.isatty() else ""
-    CYAN    = "\033[36m"   if sys.stdout.isatty() else ""
+
+    RESET = "\033[0m" if sys.stdout.isatty() else ""
+    BOLD = "\033[1m" if sys.stdout.isatty() else ""
+    DIM = "\033[2m" if sys.stdout.isatty() else ""
+    RED = "\033[31m" if sys.stdout.isatty() else ""
+    GREEN = "\033[32m" if sys.stdout.isatty() else ""
+    YELLOW = "\033[33m" if sys.stdout.isatty() else ""
+    BLUE = "\033[34m" if sys.stdout.isatty() else ""
+    MAGENTA = "\033[35m" if sys.stdout.isatty() else ""
+    CYAN = "\033[36m" if sys.stdout.isatty() else ""
+
 
 # Process tracking
 _backend_proc: subprocess.Popen | None = None
 _frontend_proc: subprocess.Popen | None = None
 _shutdown_event = threading.Event()
+
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -149,22 +155,28 @@ def _log(color: str, tag: str, msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
     print(f"{_C.DIM}{ts}{_C.RESET} {color}{_C.BOLD}[{tag}]{_C.RESET} {msg}", flush=True)
 
+
 def _info(msg: str) -> None:
     _log(_C.CYAN, "STARTUP", msg)
+
 
 def _ok(msg: str) -> None:
     _log(_C.GREEN, "  OK  ", msg)
 
+
 def _warn(msg: str) -> None:
     _log(_C.YELLOW, "WARN ", msg)
 
+
 def _err(msg: str) -> None:
     _log(_C.RED, "ERROR", msg)
+
 
 def _phase(msg: str) -> None:
     print(f"\n{_C.BOLD}{_C.MAGENTA}{'=' * 60}{_C.RESET}")
     _log(_C.MAGENTA, ">>>>>", msg)
     print(f"{_C.BOLD}{_C.MAGENTA}{'=' * 60}{_C.RESET}\n", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # Stream reader thread -- pipes subprocess output into the main console
@@ -191,6 +203,7 @@ def _stream_output(proc: subprocess.Popen, tag: str, color: str) -> None:
     t_out.start()
     t_err.start()
 
+
 # ---------------------------------------------------------------------------
 # STEP 1: Backend virtual environment (Python 3.12 enforced)
 # ---------------------------------------------------------------------------
@@ -202,6 +215,7 @@ def _req_file_hash() -> str:
     if not REQ_FILE.is_file():
         return ""
     import hashlib
+
     return hashlib.sha256(REQ_FILE.read_bytes()).hexdigest()
 
 
@@ -244,8 +258,7 @@ def _ensure_backend_venv(python312: Path) -> bool:
     if venv_python.is_file():
         try:
             result = subprocess.run(
-                [str(venv_python), "-c",
-                 "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                [str(venv_python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -255,6 +268,7 @@ def _ensure_backend_venv(python312: Path) -> bool:
             if version != "3.12":
                 _warn(f"Existing venv uses Python {version} -- recreating with Python 3.12")
                 import shutil
+
                 shutil.rmtree(str(VENV_DIR))
             else:
                 _ok(f"Virtual environment found at .venv (Python {version})")
@@ -273,6 +287,7 @@ def _ensure_backend_venv(python312: Path) -> bool:
         except Exception:
             _warn("Could not verify existing venv -- recreating")
             import shutil
+
             shutil.rmtree(str(VENV_DIR), ignore_errors=True)
 
     # Create venv using the discovered Python 3.12
@@ -298,10 +313,10 @@ def _ensure_backend_venv(python312: Path) -> bool:
 
 
 def _check_node() -> None:
-    """Pre-flight check to ensure npm is on PATH and Node.js version is appropriate."""
+    """Pre-flight check to ensure Node.js v20+ is on PATH (fatal if missing or too old)."""
     try:
         result = subprocess.run(
-            ["npm", "--version"],
+            ["node", "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -309,16 +324,22 @@ def _check_node() -> None:
             creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
         if result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args, output=result.stdout, stderr=result.stderr
+            )
 
-        version_str = result.stdout.strip()
+        version_str = result.stdout.strip()  # e.g. "v20.11.0"
         cleaned = version_str.lstrip("v")
-        if cleaned:
-            parts = cleaned.split(".")
-            if parts and parts[0].isdigit():
-                major_version = int(parts[0])
-                if major_version < 20:
-                    _warn("npm reports Node.js < v20. Transfera requires v20+.")
+        major_s = cleaned.split(".")[0] if cleaned else ""
+        if not major_s.isdigit():
+            _err(f"Could not parse Node.js version from {version_str!r} -- expected e.g. v20.x.x")
+            sys.exit(1)
+        if int(major_s) < 20:
+            _err(f"Node.js {version_str} detected -- Transfera requires Node.js v20+.")
+            _err("  Download URL: https://nodejs.org/ (choose the LTS release)")
+            _err("  Please restart your terminal after installing")
+            sys.exit(1)
+        _ok(f"Node.js {version_str} detected")
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         _err("=" * 56)
         _err("")
@@ -333,14 +354,50 @@ def _check_node() -> None:
 # ---------------------------------------------------------------------------
 # STEP 2: Frontend dependencies
 # ---------------------------------------------------------------------------
+_PACKAGE_JSON = FRONTEND_DIR / "package.json"
+_PACKAGE_LOCK = FRONTEND_DIR / "package-lock.json"
+_NPM_HASH_FILE = NODE_MODULES / ".transfera-install-hash"
+
+
+def _npm_files_hash() -> str:
+    """SHA-256 over package.json + package-lock.json (lock file optional)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for f in (_PACKAGE_JSON, _PACKAGE_LOCK):
+        if f.is_file():
+            h.update(f.read_bytes())
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def _npm_up_to_date() -> bool:
+    """True when node_modules carries a hash matching the current manifests."""
+    try:
+        return _NPM_HASH_FILE.is_file() and _NPM_HASH_FILE.read_text(encoding="utf-8").strip() == _npm_files_hash()
+    except OSError:
+        return False
+
+
+def _write_npm_hash() -> None:
+    """Record the current manifest hash inside node_modules (best-effort)."""
+    try:
+        _NPM_HASH_FILE.write_text(_npm_files_hash(), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _ensure_frontend_deps() -> bool:
     _phase("STEP 2: Frontend Dependencies")
 
-    if NODE_MODULES.is_dir():
-        _ok(f"node_modules found at {NODE_MODULES.relative_to(ROOT_DIR)}")
+    if NODE_MODULES.is_dir() and _npm_up_to_date():
+        _ok(f"node_modules found at {NODE_MODULES.relative_to(ROOT_DIR)} (up to date)")
         return True
 
-    _warn("node_modules not found -- running npm install")
+    if NODE_MODULES.is_dir():
+        _info("package.json or package-lock.json changed -- reinstalling frontend dependencies")
+    else:
+        _warn("node_modules not found -- running npm install")
     try:
         subprocess.run(
             ["npm", "install"],
@@ -350,6 +407,7 @@ def _ensure_frontend_deps() -> bool:
             creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
         _ok("Frontend dependencies installed")
+        _write_npm_hash()
     except subprocess.CalledProcessError:
         _err("npm install failed. Check the output above for details.")
         _err("Common fixes: run your terminal as Administrator, or delete")
@@ -357,6 +415,7 @@ def _ensure_frontend_deps() -> bool:
         return False
 
     return True
+
 
 # ---------------------------------------------------------------------------
 # STEP 2.5: Build compiled frontend assets (if not present)
@@ -391,6 +450,7 @@ def _build_frontend() -> bool:
     except subprocess.CalledProcessError as exc:
         _err(f"Failed to build frontend: {exc}")
         return False
+
 
 # ---------------------------------------------------------------------------
 # STEP 2.6: Build native wpd_helper.exe
@@ -459,10 +519,7 @@ def _build_native() -> bool:
             combined = (result.stdout or "") + "\n" + (result.stderr or "")
             _err(f"wpd_helper build failed (exit {result.returncode})")
             if "LNK1104" in combined:
-                _err(
-                    f"  ↳ Cannot overwrite {WPD_HELPER_EXE.name} -- "
-                    "another process may still have it locked."
-                )
+                _err(f"  ↳ Cannot overwrite {WPD_HELPER_EXE.name} -- another process may still have it locked.")
                 _err(
                     "    Close any running Transfera backend or device-probe "
                     "process and retry.  If the problem persists, check for "
@@ -501,14 +558,44 @@ def _python_bin() -> str:
     sys.exit(1)
 
 
+def _is_port_in_use(port: int) -> bool:
+    """Return True if something on 127.0.0.1:port accepts a TCP connection."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _check_ports(start_backend: bool, start_frontend: bool) -> None:
+    """Fail fast with an actionable message if a needed port is already occupied."""
+    occupied: list[tuple[int, str]] = []
+    if start_backend and _is_port_in_use(BACKEND_PORT):
+        occupied.append((BACKEND_PORT, "backend (FastAPI)"))
+    if start_frontend and _is_port_in_use(VITE_PORT):
+        occupied.append((VITE_PORT, "frontend (Vite dev server)"))
+    if not occupied:
+        return
+    for port, owner in occupied:
+        _err(f"Port {port} is already in use -- cannot start {owner}.")
+    _err("A previous run may not have shut down cleanly, or another app holds the port.")
+    _err("Find the owner with:  netstat -ano | findstr :<port>")
+    _err("Then stop it with:    taskkill /F /PID <pid>")
+    _err("Or stop the other Transfera / dev server using that port and retry.")
+    sys.exit(1)
+
+
 def _launch_backend() -> subprocess.Popen | None:
     _info(f"Starting FastAPI backend on port {BACKEND_PORT}...")
     cmd = [
         _python_bin(),
-        "-m", "uvicorn",
+        "-m",
+        "uvicorn",
         "backend.main:app",
-        "--host", "127.0.0.1",
-        "--port", str(BACKEND_PORT),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(BACKEND_PORT),
     ]
     try:
         proc = subprocess.Popen(
@@ -541,7 +628,8 @@ def _wait_for_backend_readiness(proc: subprocess.Popen, port: int) -> None:
             return
         try:
             resp = urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/health", timeout=1.0,
+                f"http://127.0.0.1:{port}/api/health",
+                timeout=1.0,
             )
             if resp.status == 200:
                 _ok(f"Backend is responding on http://127.0.0.1:{port}")
@@ -551,8 +639,7 @@ def _wait_for_backend_readiness(proc: subprocess.Popen, port: int) -> None:
         time.sleep(0.5)
 
     _err(
-        f"Backend process (PID {proc.pid}) is alive but not responding on "
-        f"http://127.0.0.1:{port}/api/health after 30s"
+        f"Backend process (PID {proc.pid}) is alive but not responding on http://127.0.0.1:{port}/api/health after 30s"
     )
     _err(
         "Check the [BACKEND] log lines above for what it may be stuck on. "
@@ -597,19 +684,21 @@ def _get_transfera_processes(exclude_pid: int | None = None) -> list[dict]:
     exclude = exclude_pid or 0
 
     ps = (
-        'Get-CimInstance Win32_Process -Property ProcessId,Name,CommandLine | '
-        'Where-Object { '
-        f'$_.ProcessId -ne {exclude} -and $_.CommandLine -and '
+        "Get-CimInstance Win32_Process -Property ProcessId,Name,CommandLine | "
+        "Where-Object { "
+        f"$_.ProcessId -ne {exclude} -and $_.CommandLine -and "
         '$_.Name -ne "powershell.exe" -and '
         f'( $_.CommandLine -like "*{root}*" -or '
         f'$_.CommandLine -like "*uvicorn*backend.main*" ) '
-        '} | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json'
+        "} | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json"
     )
 
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -646,7 +735,8 @@ def _sweep_remaining(label: str) -> bool:
             if pid and pid != own_pid:
                 subprocess.run(
                     ["taskkill", "/T", "/F", "/PID", str(pid)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
                 )
 
@@ -660,7 +750,8 @@ def _sweep_remaining(label: str) -> bool:
                 try:
                     subprocess.run(
                         ["taskkill", "/F", "/FI", f"COMMANDLINE eq *{ROOT_DIR}*", "/IM", "python.exe"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
                     )
                 except Exception:
@@ -668,7 +759,8 @@ def _sweep_remaining(label: str) -> bool:
             else:
                 subprocess.run(
                     ["taskkill", "/F", "/IM", img],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
                 )
         time.sleep(1)
@@ -693,7 +785,8 @@ def _terminate_process_tree(proc: subprocess.Popen | None, label: str) -> None:
     if IS_WINDOWS:
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
     else:
@@ -755,6 +848,10 @@ def main() -> None:
     parser.add_argument("--frontend", action="store_true", help="Start Vite dev server only")
     parser.add_argument("--skip-deps", action="store_true", help="Skip dependency checks")
     args = parser.parse_args()
+
+    if args.backend and args.frontend:
+        _err("--backend and --frontend are mutually exclusive -- pass only one, or neither for the full stack")
+        sys.exit(2)
 
     start_backend = not args.frontend
     start_frontend = not args.backend
@@ -828,7 +925,8 @@ def main() -> None:
     if start_backend:
         _build_native()
 
-    # STEP 3: Launch processes
+    # STEP 3: Launch processes (fail fast if a needed port is already taken)
+    _check_ports(start_backend, start_frontend)
     _phase("STEP 3: Launching Services")
 
     global _backend_proc, _frontend_proc

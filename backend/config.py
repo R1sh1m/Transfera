@@ -57,38 +57,111 @@ DATABASE_URL_SYNC: str = f"sqlite:///{DB_DIR / 'transfera.db'}"
 # ---------------------------------------------------------------------------
 # Media Extension Sets  (frozensets for immutability & O(1) lookup)
 # ---------------------------------------------------------------------------
-IMAGE_EXTENSIONS: frozenset[str] = frozenset({
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp",
-    ".tiff", ".tif", ".webp", ".heic", ".heif",
-    ".svg", ".ico", ".raw", ".cr2", ".nef",
-    ".arw", ".dng", ".avif", ".jxl",
-})
-
-VIDEO_EXTENSIONS: frozenset[str] = frozenset({
-    ".mp4", ".mkv", ".avi", ".mov", ".wmv",
-    ".flv", ".webm", ".m4v", ".mpg", ".mpeg",
-    ".3gp", ".ts", ".vob", ".ogv", ".rm",
-    ".rmvb", ".asf", ".divx",
-})
-
-AUDIO_EXTENSIONS: frozenset[str] = frozenset({
-    ".mp3", ".flac", ".wav", ".aac", ".ogg",
-    ".wma", ".m4a", ".opus", ".aiff", ".ape",
-    ".alac", ".mid", ".midi",
-})
-
-DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-    ".ppt", ".pptx", ".txt", ".rtf", ".odt",
-    ".ods", ".odp", ".csv", ".epub", ".mobi",
-})
-
-ALL_MEDIA_EXTENSIONS: frozenset[str] = (
-    IMAGE_EXTENSIONS
-    | VIDEO_EXTENSIONS
-    | AUDIO_EXTENSIONS
-    | DOCUMENT_EXTENSIONS
+IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".heic",
+        ".heif",
+        ".svg",
+        ".ico",
+        ".raw",
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".nrw",
+        ".arw",
+        ".srf",
+        ".sr2",
+        ".dng",
+        ".orf",
+        ".rw2",
+        ".rwl",
+        ".pef",
+        ".raf",
+        ".avif",
+        ".jxl",
+        ".kdc",
+        ".dcr",
+        ".iiq",
+        ".3fr",
+        ".erf",
+        ".mef",
+    }
 )
+
+VIDEO_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".mp4",
+        ".mkv",
+        ".avi",
+        ".mov",
+        ".wmv",
+        ".flv",
+        ".webm",
+        ".m4v",
+        ".mpg",
+        ".mpeg",
+        ".3gp",
+        ".3g2",
+        ".ts",
+        ".mts",
+        ".m2ts",
+        ".vob",
+        ".ogv",
+        ".rm",
+        ".rmvb",
+        ".asf",
+        ".divx",
+        ".mxf",
+    }
+)
+
+AUDIO_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".mp3",
+        ".flac",
+        ".wav",
+        ".aac",
+        ".ogg",
+        ".wma",
+        ".m4a",
+        ".opus",
+        ".aiff",
+        ".ape",
+        ".alac",
+        ".mid",
+        ".midi",
+    }
+)
+
+DOCUMENT_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".txt",
+        ".rtf",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".csv",
+        ".epub",
+        ".mobi",
+    }
+)
+
+ALL_MEDIA_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS | DOCUMENT_EXTENSIONS
 
 # ---------------------------------------------------------------------------
 # Local secret token (destructive endpoint protection)
@@ -104,6 +177,14 @@ def _load_or_create_token() -> str:
             pass
     token = secrets.token_hex(32)
     _TOKEN_FILE.write_text(json.dumps({"token": token}))
+    try:
+        import os as _os
+
+        # Owner-only on POSIX; on Windows the file lives under the user profile
+        # DATA_DIR with default user-only ACLs. Best-effort hardening.
+        _os.chmod(_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
     return token
 
 
