@@ -70,27 +70,52 @@ Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verif
 
 ---
 
-## Download & Installation
+## Download & Run (no code, no build — 2 clicks)
 
-The easiest way to run Transfera on Windows is to download one of our pre-built releases.
+Everything is bundled inside (Python runtime, backend, ExifTool, native helper).
+Pick a file from **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)** and run it.
 
-### Option 1: Portable ZIP (Recommended - No Installation)
-For a lightweight, zero-installation setup:
-1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**.
-2. Download `Transfera-Portable-X.Y.Z.zip`.
-3. Extract the folder and run `Transfera.exe`.
-4. **SmartScreen Bypass:** On first launch, Windows SmartScreen will show a warning because the binary is compiled locally. Click **"More info"** and then **"Run anyway"**. Since this build does not install files to your system or request admin permissions, it is highly secure and fast.
+### Option 1: Portable (recommended)
+1. Download `Transfera-Portable-X.Y.Z.zip`.
+2. Right-click → **Extract All** → open the folder → double-click `Transfera.exe`.
 
-### Option 2: Desktop Installer (Zero Warnings)
-If you prefer a standard desktop installation with start menu shortcuts and **zero security warnings or blocks** during setup:
-1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**.
-2. Download the installer package containing:
-   - `Transfera-Setup-X.Y.Z.exe`
-   - `transfera-release.cer`
-   - `trust-and-install.bat`
-3. Extract the files to a local folder.
-4. Right-click `trust-and-install.bat` and select **"Run as administrator"**.
-5. The script will automatically import the certificate to trust the developer's signature locally and trigger the setup installer. The installation will complete with no SmartScreen warnings.
+No installation, no admin rights, nothing written outside its own folder.
+
+### Option 2: Setup installer
+1. Download `Transfera-Setup-X.Y.Z.exe` and run it.
+2. Adds a Start-menu shortcut; uninstalls cleanly from Settings → Apps.
+
+### "Windows protected your PC"? (one-time, 10 seconds)
+Straight talk: signing certificates that remove this warning cost $400+/year,
+which isn't happening on a student budget — so first-time users see a
+SmartScreen prompt. The app is safe, and you don't have to take my word for it:
+- Fully open source (AGPL-3.0) — every line is on GitHub.
+- Releases are built on GitHub's own servers (look for the green ✓ on the release tag), never on someone's laptop.
+- Verify the download yourself against `SHA256SUMS.txt` from the same release:
+  ```powershell
+  certutil -hashfile Transfera-Portable-X.Y.Z.zip SHA256
+  ```
+- To proceed, click **More info → Run anyway**. Windows remembers your choice,
+  and the warning fades for everyone as install counts grow. Each release is
+  also submitted to [Microsoft's file review](https://www.microsoft.com/en-us/wdsi/filesubmission)
+  to build that reputation faster.
+
+### One-line install (winget)
+```powershell
+winget install --id Transfera.Transfera -e
+```
+A ready-made manifest lives in [`winget/`](winget/) and tracks each release;
+it is submitted to the community repository so the package stays installable
+with a single command.
+
+### Coming soon: Microsoft Store (zero warnings + auto-updates)
+The real fix costs ~$19 once (individual developer account), not a yearly
+certificate: ship Transfera as an MSIX through the Store and Microsoft signs
+it themselves — no warnings, automatic updates, clean uninstall. The packaging
+script is already wired (`npm run electron:pack:msix` in `frontend/`); it just
+needs the Publisher ID from Partner Center filled into the existing `appx`
+block in `frontend/package.json`. Store submission is the next milestone after
+v2.5.0.
 
 
 ---
