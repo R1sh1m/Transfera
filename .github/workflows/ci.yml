@@ -151,3 +151,6 @@ jobs:
 
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
+        # Non-blocking until the repo's dependency graph is enabled
+        # (Settings → Security → Dependency graph). Fails closed otherwise.
+        continue-on-error: true

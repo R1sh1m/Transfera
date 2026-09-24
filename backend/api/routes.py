@@ -959,7 +959,9 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
     try:
         os.makedirs(dest_resolved, exist_ok=True)
     except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"Destination is not writable: {exc}")
+        # Warn-only: the drive may be offline or the path may need elevation.
+        # Start-time preflight re-validates before any byte is written.
+        logger.warning("Could not pre-create destination %s: %s", dest_resolved, exc)
 
     async with session_scope() as session:
         ts = TransferSession(
