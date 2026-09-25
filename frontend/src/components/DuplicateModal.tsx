@@ -24,7 +24,7 @@ import {
 import { useTransferStore } from "@/store/transfer";
 import { useResolveDuplicates } from "@/lib/queries";
 import { fetchThumbnail } from "@/lib/thumbnail-fetch";
-import { cn } from "@/lib/utils";
+import { cn, parseBackendDate } from "@/lib/utils";
 import type { DuplicateAction, DuplicateEntry } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ function formatBytes(bytes: number): string {
 function formatDate(iso: string | undefined): string {
   if (!iso) return "—";
   try {
-    const d = new Date(iso);
+    const d = parseBackendDate(iso);
     return d.toLocaleDateString(undefined, {
       year: "numeric",
       month: "short",
@@ -421,17 +421,14 @@ export default function DuplicateModal() {
     useState<DuplicateAction | null>(null);
   const [currentViewIdx, setCurrentViewIdx] = useState(0);
 
-  if (!isOpen || !report) return null;
-
   const resolutionsMap =
     resolutions instanceof Map
       ? resolutions
       : new Map<number, DuplicateAction>();
 
-  const allEntries = [
-    ...report.exact_duplicates,
-    ...report.potential_duplicates,
-  ];
+  const allEntries = report
+    ? [...report.exact_duplicates, ...report.potential_duplicates]
+    : [];
   const resolvedCount = resolutionsMap.size;
   const totalCount = allEntries.length;
   const allResolved = resolvedCount === totalCount && totalCount > 0;
@@ -487,6 +484,9 @@ export default function DuplicateModal() {
   const remainingCount = useMemo(() => {
     return allEntries.filter((e) => !resolutionsMap.has(e.item_id)).length;
   }, [allEntries, resolutionsMap]);
+
+  // All hooks are above this point — safe to early-return now.
+  if (!isOpen || !report) return null;
 
   return (
     <AnimatePresence>

@@ -209,7 +209,7 @@ def _cleanup_session_state(session_id: int) -> None:
 @router.get("/health")
 async def health_check() -> dict:
     """Return service health status for frontend polling and startup detection."""
-    return {"status": "ok", "version": "2.0"}
+    return {"status": "ok", "version": "2.5.0"}
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ async def get_local_token(request: Request) -> dict:
 # iOS Device Support
 # ---------------------------------------------------------------------------
 @router.get("/ios-devices", response_model=IOSDeviceListResponse)
-async def list_ios_devices() -> IOSDeviceListResponse:
+async def list_ios_devices(_: None = Depends(require_local_token)) -> IOSDeviceListResponse:
     """List connected iOS devices. Returns availability flag + device list + tier info."""
     manager = get_device_manager()
 
@@ -762,7 +762,7 @@ async def install_pymobiledevice3(_: None = Depends(require_local_token)) -> dic
 # Device Backend Preference (Tier 1 vs Tier 2)
 # ---------------------------------------------------------------------------
 @router.get("/device-preference", response_model=DevicePreferenceResponse)
-async def get_device_preference() -> DevicePreferenceResponse:
+async def get_device_preference(_: None = Depends(require_local_token)) -> DevicePreferenceResponse:
     """Get the global device backend preference."""
     mgr = get_device_backend_manager()
     return DevicePreferenceResponse(prefer_tier2=mgr.prefer_tier2)
@@ -788,7 +788,7 @@ async def set_device_preference(
 # Device Import State (incremental import tracking)
 # ---------------------------------------------------------------------------
 @router.get("/device-import-state", response_model=DeviceImportStateListResponse)
-async def list_device_import_states() -> DeviceImportStateListResponse:
+async def list_device_import_states(_: None = Depends(require_local_token)) -> DeviceImportStateListResponse:
     """List all devices with stored import state."""
     states = await list_all_device_states()
     return DeviceImportStateListResponse(
@@ -806,7 +806,7 @@ async def list_device_import_states() -> DeviceImportStateListResponse:
 
 
 @router.get("/device-import-state/{device_id}", response_model=DeviceImportStateResponse)
-async def get_device_import_state(device_id: str) -> DeviceImportStateResponse:
+async def get_device_import_state(device_id: str, _: None = Depends(require_local_token)) -> DeviceImportStateResponse:
     """Get the import state for a specific device.
 
     The device_id is URL-decoded by FastAPI automatically.  Device IDs
@@ -997,6 +997,7 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
 async def list_sessions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    _: None = Depends(require_local_token),
 ) -> SessionList:
     async with session_scope() as session:
         # Count
@@ -1017,7 +1018,7 @@ async def list_sessions(
 
 
 @router.get("/sessions/{session_id}", response_model=SessionInfo)
-async def get_session_detail(session_id: int) -> SessionInfo:
+async def get_session_detail(session_id: int, _: None = Depends(require_local_token)) -> SessionInfo:
     async with session_scope() as session:
         ts = await session.get(TransferSession, session_id)
         if ts is None:
@@ -2055,6 +2056,7 @@ async def list_media(
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
     has_gps: bool | None = Query(None),
+    _: None = Depends(require_local_token),
 ) -> MediaList:
     async with session_scope() as session:
         # Build base query
@@ -2085,22 +2087,26 @@ async def list_media(
         else:
             filters.append(MediaItem.trashed == trashed)
         if camera:
-            c = f"%{camera}%"
-            filters.append((MediaItem.camera_make.ilike(c)) | (MediaItem.camera_model.ilike(c)))
+            # Escape LIKE wildcards so user input can't inject %/_ patterns
+            escaped_camera = camera.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            c = f"%{escaped_camera}%"
+            filters.append(
+                (MediaItem.camera_make.ilike(c, escape="\\")) | (MediaItem.camera_model.ilike(c, escape="\\"))
+            )
         if date_from:
             try:
                 from datetime import datetime as _dt
 
                 filters.append(MediaItem.date_taken >= _dt.fromisoformat(date_from))
             except ValueError:
-                pass
+                raise HTTPException(status_code=422, detail=f"Invalid date_from: {date_from!r} (expected ISO format)")
         if date_to:
             try:
                 from datetime import datetime as _dt2
 
                 filters.append(MediaItem.date_taken <= _dt2.fromisoformat(date_to))
             except ValueError:
-                pass
+                raise HTTPException(status_code=422, detail=f"Invalid date_to: {date_to!r} (expected ISO format)")
         if has_gps is True:
             filters.append(MediaItem.gps_lat.is_not(None))
 
@@ -2505,6 +2511,7 @@ async def list_batches(
     session_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
+    _: None = Depends(require_local_token),
 ) -> BatchList:
     async with session_scope() as session:
         ts = await session.get(TransferSession, session_id)
@@ -2532,6 +2539,7 @@ async def list_batches(
 async def get_session_progress(
     session_id: int,
     _: None = Depends(per_session_rate_limit()),
+    __: None = Depends(require_local_token),
 ) -> SessionProgressResponse:
     """Return a complete snapshot of transfer progress for the live UI.
 
@@ -3143,7 +3151,11 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
 # Report serving
 # ---------------------------------------------------------------------------
 @router.get("/sessions/{session_id}/report")
-async def get_session_report(session_id: int, fmt: str = Query("html", pattern="^(html|json)$")):
+async def get_session_report(
+    session_id: int,
+    fmt: str = Query("html", pattern="^(html|json)$"),
+    _: None = Depends(require_local_token),
+):
     """Serve the session report file (HTML or JSON)."""
     async with session_scope() as session:
         ts = await session.get(TransferSession, session_id)

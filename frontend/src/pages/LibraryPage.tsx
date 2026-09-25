@@ -22,7 +22,12 @@ import {
   Trash2,
   AlertTriangle,
 } from "lucide-react";
-import { useMediaList, useClearLibrary, useTrash, useSemanticSearch } from "@/lib/queries";
+import {
+  useMediaList,
+  useClearLibrary,
+  useTrash,
+  useSemanticSearch,
+} from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import TransferHistoryTable from "@/components/TransferHistoryTable";
 import {
@@ -438,7 +443,8 @@ export default function LibraryPage() {
   const [viewMode, setViewMode] = useState<"masonry" | "list" | "history">(
     "masonry",
   );
-  type LibrarySection = "vault" | "timeline" | "moments" | "duplicates" | "people" | "trash";
+  type LibrarySection =
+    "vault" | "timeline" | "moments" | "duplicates" | "people" | "trash";
   const [section, setSection] = useState<LibrarySection>("vault");
   const [semanticQuery, setSemanticQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -501,7 +507,10 @@ export default function LibraryPage() {
 
   const trashQuery = useTrash(1);
   const semanticActive = semanticQuery.trim().length > 1;
-  const semanticResults = useSemanticSearch(semanticQuery, section === "vault" && semanticActive);
+  const semanticResults = useSemanticSearch(
+    semanticQuery,
+    section === "vault" && semanticActive,
+  );
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -519,15 +528,29 @@ export default function LibraryPage() {
     resetLibrary();
     setFetchPage(1);
     setFilterKey(myKey);
-  }, [search, extension, finalStatus, sessionFilter, favoritesOnly, resetLibrary]);
+  }, [
+    search,
+    extension,
+    finalStatus,
+    sessionFilter,
+    favoritesOnly,
+    resetLibrary,
+  ]);
 
   useEffect(() => {
-    if (!data || data.items.length === 0) return;
+    if (!data) return;
+    // Empty page (filter with no results, or past the last page): release
+    // the loading flag so the spinner can't stick forever and loadMore
+    // stays usable.
+    if (data.items.length === 0) {
+      setLoadingMore(false);
+      return;
+    }
     if (filterKey !== filterKeyRef.current) return;
     if (loadedPages.current.has(fetchPage)) return;
     loadedPages.current.add(fetchPage);
     appendLibraryItems(data.items, data.total, data.pages);
-  }, [data, filterKey, fetchPage, appendLibraryItems]);
+  }, [data, filterKey, fetchPage, appendLibraryItems, setLoadingMore]);
 
   // Auto-trigger thumbnail regeneration when library loads items with pending
   // thumbnails, firing at most once per filter/mount cycle.
@@ -870,7 +893,9 @@ export default function LibraryPage() {
       {section === "trash" && (
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">
-            {trashQuery.data ? `${trashQuery.data.total} items in Trash — restore from here, or empty to delete records.` : "Loading trash…"}
+            {trashQuery.data
+              ? `${trashQuery.data.total} items in Trash — restore from here, or empty to delete records.`
+              : "Loading trash…"}
           </p>
           {(trashQuery.data?.items ?? []).map((item) => (
             <div
@@ -878,8 +903,12 @@ export default function LibraryPage() {
               className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md"
             >
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-foreground truncate">{item.file_name}</p>
-                <p className="text-xs text-muted-foreground truncate">{item.source_path}</p>
+                <p className="text-sm text-foreground truncate">
+                  {item.file_name}
+                </p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {item.source_path}
+                </p>
               </div>
               <RestoreTrashButton id={item.id} />
             </div>
@@ -901,7 +930,9 @@ export default function LibraryPage() {
                 <div className="aspect-square rounded-md bg-muted flex items-center justify-center text-[10px] text-muted-foreground px-1">
                   {m.file_name.slice(0, 18)}
                 </div>
-                <p className="text-[10px] text-muted-foreground truncate mt-1">{m.file_name}</p>
+                <p className="text-[10px] text-muted-foreground truncate mt-1">
+                  {m.file_name}
+                </p>
               </div>
             ))}
           </div>

@@ -42,7 +42,12 @@ import {
   useInstallPymobiledevice3,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
-import { cn, extractErrorMessage, isElectron } from "@/lib/utils";
+import {
+  cn,
+  extractErrorMessage,
+  isElectron,
+  parseBackendDate,
+} from "@/lib/utils";
 import type { SessionInfo, SessionStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -57,7 +62,7 @@ function formatBytes(bytes: number): string {
 
 function timeAgo(dateStr: string): string {
   const now = Date.now();
-  const then = new Date(dateStr).getTime();
+  const then = parseBackendDate(dateStr).getTime();
   const diffMs = now - then;
   const seconds = Math.floor(diffMs / 1000);
   if (seconds < 60) return "just now";
@@ -67,7 +72,7 @@ function timeAgo(dateStr: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString();
+  return parseBackendDate(dateStr).toLocaleDateString();
 }
 
 // ---------------------------------------------------------------------------
@@ -723,7 +728,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
       </td>
       <td className="py-2.5 pr-3">
         <span className="text-xs text-muted-foreground">
-          {new Date(session.created_at).toLocaleDateString()}
+          {parseBackendDate(session.created_at).toLocaleDateString()}
         </span>
       </td>
       <td className="py-2.5">
@@ -1080,8 +1085,8 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Directory Metrics */}
-      <div className="grid grid-cols-2 gap-3">
+      {/* Directory Metrics — stack on phones, side-by-side from tablets up */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <DirMetricsCard
           label="Source Directory"
           sublabel="Select a source path to analyze"
@@ -1106,8 +1111,8 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* System Stats */}
-      <div className="grid grid-cols-4 gap-3">
+      {/* System Stats — 1-col on phones, 2-col on tablets, 4-col on desktop */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
         <BackendStatusCard />
         <AggregateStatsCard sessions={sessionList?.sessions ?? []} />
         <StorageHealthCard destPath={activeDest} />
@@ -1119,7 +1124,7 @@ export default function DashboardPage() {
         whileHover={{ scale: 1.01 }}
         whileTap={{ scale: 0.99 }}
         onClick={() => setCurrentPage("setup")}
-        className="no-drag w-full bg-primary text-primary-foreground rounded-lg p-4 flex items-center justify-between hover:bg-primary/90 transition-colors"
+        className="no-drag w-full bg-primary text-primary-foreground rounded-pill p-4 flex items-center justify-between hover:bg-primary/90 active:scale-[0.99] transition-colors"
       >
         <div className="flex items-center gap-3">
           <HardDrive className="w-5 h-5" />
@@ -1141,7 +1146,10 @@ export default function DashboardPage() {
           </h2>
           <div className="flex items-center gap-2">
             {sessionList && sessionList.total > 20 && (
-              <button className="text-xs text-primary hover:underline">
+              <button
+                onClick={() => setCurrentPage("library")}
+                className="text-xs text-primary hover:underline"
+              >
                 View All
               </button>
             )}

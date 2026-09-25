@@ -114,6 +114,28 @@ async def _ensure_migrations_table(conn: AsyncConnection) -> None:
     )
 
 
+def _prune_old_backups(db_dir, keep: int = 5) -> None:
+    """Delete all but the newest ``keep`` pre-migration backups."""
+    try:
+        backups = sorted(
+            db_dir.glob("transfera.pre-migrate-*.bak"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        for stale in backups[:-keep] if len(backups) > keep else []:
+            try:
+                stale.unlink()
+            except OSError as exc:
+                logger.debug("Backup prune failed for %s: %s", stale.name, exc)
+        if len(backups) > keep:
+            logger.info(
+                "Pruned %d old pre-migration backup(s), kept %d",
+                len(backups) - keep,
+                keep,
+            )
+    except OSError as exc:
+        logger.debug("Backup prune skipped: %s", exc)
+
+
 async def run_pending_migrations(conn: AsyncConnection) -> None:
     """Apply any unapplied migrations in order.
 
@@ -135,26 +157,39 @@ async def run_pending_migrations(conn: AsyncConnection) -> None:
     except Exception as exc:
         logger.warning("integrity_check skipped: %s", exc)
 
-    # Best-effort pre-migrate backup (same dir, timestamped)
-    try:
-        from backend.config import DB_DIR as _db_dir
-
-        db_file = _db_dir / "transfera.db"
-        if db_file.is_file():
-            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            backup = _db_dir / f"transfera.pre-migrate-{ts}.bak"
-            try:
-                import shutil as _shutil
-
-                _shutil.copy2(str(db_file), str(backup))
-                logger.info("Pre-migration backup written: %s", backup.name)
-            except OSError as exc:
-                logger.warning("Pre-migration backup failed: %s", exc)
-    except Exception as exc:
-        logger.debug("Backup probe skipped: %s", exc)
-
     result = await conn.execute(text("SELECT id FROM schema_migrations"))
     applied: set[int] = {row[0] for row in result.all()}
+    pending = [mid for mid, _sql in _MIGRATIONS if mid not in applied]
+
+    # Best-effort pre-migrate backup (same dir, timestamped) — only when
+    # there is actual DDL to run, otherwise every boot would pile up a
+    # ~300 KB duplicate. Retain the newest few, prune the rest.
+    if pending:
+        try:
+            from backend.config import DB_DIR as _db_dir
+
+            db_file = _db_dir / "transfera.db"
+            if db_file.is_file():
+                ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                backup = _db_dir / f"transfera.pre-migrate-{ts}.bak"
+                try:
+                    import shutil as _shutil
+
+                    _shutil.copy2(str(db_file), str(backup))
+                    logger.info("Pre-migration backup written: %s", backup.name)
+                except OSError as exc:
+                    logger.warning("Pre-migration backup failed: %s", exc)
+                _prune_old_backups(_db_dir, keep=5)
+        except Exception as exc:
+            logger.debug("Backup probe skipped: %s", exc)
+    else:
+        # No DDL pending: still prune backups left by older versions.
+        try:
+            from backend.config import DB_DIR as _db_dir
+
+            _prune_old_backups(_db_dir, keep=5)
+        except Exception as exc:
+            logger.debug("Backup prune skipped: %s", exc)
 
     for mid, sql in _MIGRATIONS:
         if mid in applied:

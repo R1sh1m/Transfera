@@ -1,6 +1,7 @@
 """
 Shared pytest fixtures for Transfera integration tests.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,16 +13,25 @@ import httpx
 import pytest
 import uvicorn
 
-from backend.config import HOST, LOCAL_SECRET_TOKEN, PORT
+from backend.config import HOST, LOCAL_SECRET_TOKEN
 from backend.main import create_app
 
 
-def _run_server() -> None:
+def _free_port() -> int:
+    """Pick an unused localhost port so tests never clash with a dev server."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, 0))
+        return int(s.getsockname()[1])
+
+
+def _run_server(port: int) -> None:
     """Run the FastAPI server in a background thread."""
     config = uvicorn.Config(
         create_app(),
         host=HOST,
-        port=PORT,
+        port=port,
         ws="wsproto",
         log_level="error",
         access_log=False,
@@ -31,27 +41,58 @@ def _run_server() -> None:
 
 
 @pytest.fixture(scope="module")
-def client() -> httpx.Client:
-    """Start the backend server and return an HTTPX client with auth headers."""
-    server_thread = Thread(target=_run_server, daemon=True)
-    server_thread.start()
+def client(tmp_path_factory) -> httpx.Client:
+    """Start the backend server and return an HTTPX client with auth headers.
 
-    for _ in range(30):
-        try:
-            r = httpx.get(f"http://{HOST}:{PORT}/api/health", timeout=1.0)
-            if r.status_code == 200:
-                break
-        except Exception:
-            time.sleep(0.5)
-    else:
-        raise RuntimeError("Server failed to start within 15 seconds")
+    Isolation (hard-won lesson: this fixture used to boot the REAL app on
+    the REAL port with the REAL database, so destructive tests wiped the
+    developer's dev data and clashed with a running dev server):
+      * free localhost port instead of the production PORT;
+      * temp-file DATABASE_URL so the server thread builds its engine
+        against a throwaway database. Any pre-existing global engine is
+        disposed first and the test engine is disposed at teardown.
+    """
+    import backend.database.manager as _manager
 
-    with httpx.Client(
-        base_url=f"http://{HOST}:{PORT}",
-        timeout=10.0,
-        headers={"X-Local-Token": LOCAL_SECRET_TOKEN},
-    ) as c:
-        yield c
+    db_file = tmp_path_factory.mktemp("client_db") / "client_test.db"
+    test_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+    port = _free_port()
+
+    # Drop any engine bound to the real (or a previous test) database so
+    # the server thread lazily creates a fresh one under the patched URL.
+    try:
+        asyncio.run(_manager.dispose_engine())
+    except Exception:
+        pass
+
+    with (
+        patch("backend.config.DATABASE_URL", test_url),
+        patch("backend.database.manager.DATABASE_URL", test_url),
+    ):
+        server_thread = Thread(target=_run_server, args=(port,), daemon=True)
+        server_thread.start()
+
+        for _ in range(60):
+            try:
+                r = httpx.get(f"http://{HOST}:{port}/api/health", timeout=1.0)
+                if r.status_code == 200:
+                    break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise RuntimeError("Server failed to start within 30 seconds")
+
+        with httpx.Client(
+            base_url=f"http://{HOST}:{port}",
+            timeout=10.0,
+            headers={"X-Local-Token": LOCAL_SECRET_TOKEN},
+        ) as c:
+            yield c
+
+    try:
+        asyncio.run(_manager.dispose_engine())
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -98,17 +139,34 @@ async def db_session(tmp_path):
 # TestClient fixture (lightweight, no real server thread)
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def test_client():
-    """Return a FastAPI ``TestClient`` backed by an in-memory database.
+def test_client(tmp_path):
+    """Return a FastAPI ``TestClient`` backed by a throwaway database.
 
-    The app's lifespan still runs (table creation, recovery, etc.) but the
-    ``DATABASE_URL`` is patched to ``sqlite+aiosqlite://`` so nothing
-    touches the real on-disk database.
+    The app's lifespan still runs (table creation, recovery, etc.) but both
+    ``DATABASE_URL`` bindings (``backend.config`` AND
+    ``backend.database.manager``, which imports it by value) point at a
+    temp file — patching only ``backend.config`` is a no-op for the engine
+    and previously let destructive tests (media/clear, trash/empty, which
+    now also delete vault files) run against the developer's REAL database.
+    Any pre-existing global engine is disposed first so the lifespan builds
+    a fresh one under the patched URL.
 
     The ``require_local_token`` dependency is overridden to accept any
     request during tests — no ``X-Local-Token`` header needed.
     """
-    with patch("backend.config.DATABASE_URL", "sqlite+aiosqlite://"):
+    import backend.database.manager as _manager
+
+    db_file = tmp_path / "testclient.db"
+    test_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+    try:
+        asyncio.run(_manager.dispose_engine())
+    except Exception:
+        pass
+
+    with (
+        patch("backend.config.DATABASE_URL", test_url),
+        patch("backend.database.manager.DATABASE_URL", test_url),
+    ):
         from starlette.testclient import TestClient
 
         from backend.api.auth import require_local_token
@@ -122,3 +180,8 @@ def test_client():
 
         with TestClient(app) as client:
             yield client
+
+    try:
+        asyncio.run(_manager.dispose_engine())
+    except Exception:
+        pass

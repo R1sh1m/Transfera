@@ -5,7 +5,7 @@
 // (rounded-pill), press state active:scale-[0.95], 17px body pace.
 // ---------------------------------------------------------------------------
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CalendarDays,
   Sparkles,
@@ -18,7 +18,7 @@ import {
   Loader2,
   ScanSearch,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, parseBackendDate } from "@/lib/utils";
 import {
   useBackfill,
   useCapabilities,
@@ -43,14 +43,21 @@ function Thumb({
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  useState(() => {});
-  // Lazy single fetch (fetchThumbnail already returns an object URL string)
-  if (!src && !failed) {
+  // Lazy single fetch (fetchThumbnail already returns an object URL string).
+  // Must run in an effect — fetching during render re-triggers every render.
+  useEffect(() => {
+    let cancelled = false;
+    setSrc(null);
+    setFailed(false);
     fetchThumbnail(id, url ?? undefined).then((s) => {
+      if (cancelled) return;
       if (s) setSrc(s);
       else setFailed(true);
     });
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, [id, url]);
   if (failed || !src)
     return (
       <div className="aspect-square rounded-lg bg-muted flex items-center justify-center text-[10px] text-muted-foreground px-1 text-center">
@@ -185,8 +192,8 @@ export function MomentsGrid() {
         {data.moments.slice(0, 9).map((m, i) => (
           <div key={i} className="rounded-lg border border-border bg-card p-3">
             <div className="text-sm font-semibold">
-              {new Date(m.start).toLocaleDateString()} →{" "}
-              {new Date(m.end).toLocaleDateString()}
+              {parseBackendDate(m.start).toLocaleDateString()} →{" "}
+              {parseBackendDate(m.end).toLocaleDateString()}
             </div>
             <div className="text-xs text-muted-foreground">
               {m.count} photos · event {i + 1}

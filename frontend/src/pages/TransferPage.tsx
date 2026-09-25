@@ -844,9 +844,30 @@ export default function TransferPage() {
     ) {
       startedSessions.add(transfer.sessionId);
       autoStartedRef.current = true;
-      startSession.mutate(transfer.sessionId);
+      const sid = transfer.sessionId;
+      // If the start request fails, release the guards so a manual
+      // retry via the Start button is possible (and the id doesn't
+      // leak in the module-level set forever).
+      startSession.mutate(sid, {
+        onError: () => {
+          startedSessions.delete(sid);
+          autoStartedRef.current = false;
+        },
+      });
     }
   }, [session, transfer.sessionId, startSession]);
+
+  // Prune finished session ids from the module-level guard set so it
+  // can't grow without bound across many transfers in one app lifetime.
+  useEffect(() => {
+    if (
+      transfer.sessionId &&
+      (transfer.status === "completed" ||
+        transfer.status === "completed_with_errors")
+    ) {
+      startedSessions.delete(transfer.sessionId);
+    }
+  }, [transfer.sessionId, transfer.status]);
 
   // Capture the completed snapshot when a transfer reaches a terminal state.
   // This freezes the final state into the store so the page shows results even
@@ -949,7 +970,14 @@ export default function TransferPage() {
       if (transfer.status === "created") {
         startedSessions.add(transfer.sessionId);
       }
-      startSession.mutate(transfer.sessionId);
+      const sid = transfer.sessionId;
+      startSession.mutate(sid, {
+        onError: () => {
+          // Release the auto-start guards so the user can retry.
+          startedSessions.delete(sid);
+          autoStartedRef.current = false;
+        },
+      });
     }
   };
 

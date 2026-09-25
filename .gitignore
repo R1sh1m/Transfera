@@ -11,10 +11,8 @@ dist/
 .eggs/
 
 # --- Runtime data ---
-backend/data/db/
-backend/data/exports/
-backend/data/thumbnails/
-backend/data/local_secret.json
+backend/data/
+local_secret.json
 *.db
 *.db-wal
 *.db-shm

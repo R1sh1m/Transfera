@@ -54,7 +54,12 @@ import {
   useRecoverIOSDevice,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
-import { cn, extractErrorMessage, isElectron } from "@/lib/utils";
+import {
+  cn,
+  extractErrorMessage,
+  isElectron,
+  parseBackendDate,
+} from "@/lib/utils";
 import type {
   TransferMode,
   IOSDeviceInfo,
@@ -71,7 +76,7 @@ import SourcePreviewPanel from "@/components/SourcePreviewPanel";
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} MB`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
@@ -128,7 +133,7 @@ function TierBadge({ tier }: { tier?: string | null }) {
 
 function formatDate(dateStr: string): string {
   try {
-    return new Date(dateStr).toLocaleDateString(undefined, {
+    return parseBackendDate(dateStr).toLocaleDateString(undefined, {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -2513,7 +2518,7 @@ export default function DeviceSetupPage() {
                     : "Free up disk space on the destination to continue"
           }
           className={cn(
-            "no-drag w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl text-sm font-semibold transition-colors",
+            "no-drag w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-pill text-sm font-semibold active:scale-[0.99] transition-colors",
             canStart && !createSession.isPending
               ? "bg-primary text-primary-foreground hover:bg-primary/90"
               : "bg-muted text-muted-foreground cursor-not-allowed",

@@ -6,6 +6,7 @@ Run: python -m backend.tests.test_exiftool_bootstrapper
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import sys
 import tempfile
@@ -42,6 +43,25 @@ def _reset_state() -> None:
     me._bootstrap_done = False
 
 
+@contextlib.contextmanager
+def _isolated_bin_dir():
+    """Redirect EXIFTOOL_DIR/_LOCAL_EXIFTOOL to a temp dir.
+
+    The mutating tests must never touch the real data directory: it may
+    hold a genuinely installed binary (possibly locked by AV/scanner),
+    and fall-through tests must not "find" it. Works under pytest and
+    the file's own main() runner (no fixtures needed).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_dir = Path(tmp) / "bin" / "exiftool"
+        bin_dir.mkdir(parents=True)
+        with (
+            patch.object(me, "EXIFTOOL_DIR", bin_dir),
+            patch.object(me, "_LOCAL_EXIFTOOL", bin_dir / me._EXIFTOOL_EXE_NAME),
+        ):
+            yield bin_dir
+
+
 # ======================================================================
 # 1. Local binary detection
 # ======================================================================
@@ -50,24 +70,23 @@ def test_local_binary() -> None:
 
     _reset_state()
 
-    # Create a fake exiftool.exe in the expected local path
-    EXIFTOOL_DIR.mkdir(parents=True, exist_ok=True)
-    fake_exe = EXIFTOOL_DIR / me._EXIFTOOL_EXE_NAME
-    fake_exe.write_bytes(b"fake-exiftool")
-    try:
-        result = me._bootstrap_exiftool()
-        _check(
-            "Returns local path when binary exists",
-            result == str(fake_exe),
-            f"got: {result}",
-        )
-        _check(
-            "Resolved path matches local binary",
-            me._resolved_exiftool == str(fake_exe),
-        )
-    finally:
-        fake_exe.unlink(missing_ok=True)
-        _reset_state()
+    # Create a fake exiftool.exe in an isolated bin dir (never the real one)
+    with _isolated_bin_dir() as bin_dir:
+        fake_exe = bin_dir / me._EXIFTOOL_EXE_NAME
+        fake_exe.write_bytes(b"fake-exiftool")
+        try:
+            result = me._bootstrap_exiftool()
+            _check(
+                "Returns local path when binary exists",
+                result == str(fake_exe),
+                f"got: {result}",
+            )
+            _check(
+                "Resolved path matches local binary",
+                me._resolved_exiftool == str(fake_exe),
+            )
+        finally:
+            _reset_state()
 
 
 # ======================================================================
@@ -78,13 +97,15 @@ def test_local_missing_falls_through() -> None:
 
     _reset_state()
 
-    # Ensure no local binary
-    fake_exe = EXIFTOOL_DIR / me._EXIFTOOL_EXE_NAME
-    fake_exe.unlink(missing_ok=True)
-
-    # If exiftool is on PATH, it will resolve via Tier 2
-    # If not, it will attempt Tier 3 (download)
-    result = me._bootstrap_exiftool()
+    # Isolated dir guarantees no local binary (the real data dir may hold
+    # a genuinely installed one, which must not leak into this test).
+    with _isolated_bin_dir():
+        # If exiftool is on PATH, it will resolve via Tier 2.
+        # Tier 3 (live network download) is mocked out: this test only
+        # proves the fall-through completes without exception, and must
+        # stay fast and hermetic.
+        with patch.object(me, "_download_exiftool", return_value=None):
+            result = me._bootstrap_exiftool()
     # We can't assert the result since it depends on the environment
     # but we verify no exception was thrown
     _check(
@@ -131,12 +152,12 @@ def test_empty_command_when_missing() -> None:
 
     _reset_state()
 
-    # Ensure no local binary and mock shutil.which to return None
-    fake_exe = EXIFTOOL_DIR / me._EXIFTOOL_EXE_NAME
-    fake_exe.unlink(missing_ok=True)
-
-    with patch.object(shutil, "which", return_value=None):
-        cmd = me._build_exiftool_cmd()
+    # Isolated dir guarantees no local binary; mock PATH and network tiers.
+    with _isolated_bin_dir(), patch.object(shutil, "which", return_value=None):
+        # Mock the network tier: this test proves the empty-command
+        # fallback, not the 11 MB SourceForge fetch (kept hermetic/fast).
+        with patch.object(me, "_download_exiftool", return_value=None):
+            cmd = me._build_exiftool_cmd()
         _check(
             "Returns empty list when binary missing",
             cmd == [],
@@ -298,11 +319,8 @@ def test_bootstrap_idempotent() -> None:
 
     _reset_state()
 
-    # Force no binary available
-    fake_exe = EXIFTOOL_DIR / me._EXIFTOOL_EXE_NAME
-    fake_exe.unlink(missing_ok=True)
-
-    with patch.object(shutil, "which", return_value=None):
+    # Force no binary available (isolated dir — never touches real data)
+    with _isolated_bin_dir(), patch.object(shutil, "which", return_value=None):
         # Patch download to also fail
         with patch.object(me, "_download_exiftool", return_value=None):
             result1 = me._bootstrap_exiftool()

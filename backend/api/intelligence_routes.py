@@ -716,11 +716,48 @@ async def list_trash(
 
 @trash_router.post("/empty")
 async def empty_trash(_: None = Depends(require_local_token)) -> dict:
+    """Permanently delete all trashed items: DB rows, vault files, thumbnails.
+
+    Vault files are located with ``locate_archive_file`` (date-folder +
+    size match, hash-verified when ``source_hash`` is known) and only
+    deleted when they resolve inside the item's session destination —
+    the source originals are never touched.
+    """
+    from pathlib import Path
+
+    from backend.engines.organizer import locate_archive_file
+    from backend.engines.thumbnail_cache import thumbnail_cache
+
     async with session_scope() as session:
         result = await session.execute(select(MediaItem).where(MediaItem.trashed == True))  # noqa: E712
         items = list(result.scalars().all())
+        session_ids = {mi.session_id for mi in items if mi.session_id is not None}
+        dest_by_session: dict[int, tuple[str, str]] = {}
+        if session_ids:
+            sess_rows = await session.execute(select(TransferSession).where(TransferSession.id.in_(session_ids)))
+            for ts in sess_rows.scalars().all():
+                dest_by_session[ts.id] = (ts.dest_root, ts.folder_layout or "year/month")
+
         n = 0
+        files_removed = 0
         for mi in items:
+            dest = dest_by_session.get(mi.session_id or -1)
+            if dest and mi.final_status == "completed":
+                try:
+                    vault_file = locate_archive_file(Path(dest[0]), mi, layout=dest[1], verify_hash=True)
+                except Exception as exc:
+                    logger.warning("Trash locate failed for item %d: %s", mi.id, exc)
+                    vault_file = None
+                if vault_file is not None:
+                    try:
+                        vault_file.unlink()
+                        files_removed += 1
+                    except OSError as exc:
+                        logger.warning("Trash file delete failed for item %d: %s", mi.id, exc)
+            try:
+                thumbnail_cache.evict_items([mi.id])
+            except Exception as exc:
+                logger.debug("Thumbnail evict failed for item %d: %s", mi.id, exc)
             await session.delete(mi)
             n += 1
-    return {"emptied": n}
+    return {"emptied": n, "files_removed": files_removed}

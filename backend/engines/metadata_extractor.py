@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 # Register pillow-heif opener so Image.open() can decode HEIC/HEIF files
 try:
     from pillow_heif import register_heif_opener
+
     register_heif_opener()
     logger.debug("pillow-heif registered for HEIC/HEIF support")
 except ImportError:
     logger.warning(
-        "pillow-heif not installed — HEIC files will fall back to mtime. "
-        "Install with: pip install pillow-heif"
+        "pillow-heif not installed — HEIC files will fall back to mtime. Install with: pip install pillow-heif"
     )
 
 # ---------------------------------------------------------------------------
@@ -170,15 +170,12 @@ def _bootstrap_exiftool() -> str | None:
         _resolved_exiftool = path_loc
         return _resolved_exiftool
 
-    logger.info(
-        "ExifTool not found in package, AppData, or on PATH -- attempting automated download"
-    )
+    logger.info("ExifTool not found in package, AppData, or on PATH -- attempting automated download")
 
     # Tier 3: Auto-download (Windows only)
     if sys.platform != "win32":
         logger.warning(
-            "Auto-download only supported on Windows; "
-            "ExifTool unavailable -- falling back to filesystem timestamps"
+            "Auto-download only supported on Windows; ExifTool unavailable -- falling back to filesystem timestamps"
         )
         return None
 
@@ -197,10 +194,17 @@ def _bootstrap_exiftool() -> str | None:
     return None
 
 
-def _fetch_latest_version() -> str | None:
+def _fetch_zip_candidates() -> list[str]:
     """
-    Scrape the ExifTool homepage to find the latest Windows zip filename.
-    Returns the version string (e.g. '12.97') or None on failure.
+    Scrape the ExifTool homepage for Windows zip *download URLs*.
+
+    exiftool.org no longer hosts the zips itself — the Windows builds
+    (e.g. ``exiftool-13.59_32.zip`` / ``exiftool-13.59_64.zip``, where the
+    underscore separates the CPU arch, NOT a version dot) live on
+    SourceForge behind ``.../files/<name>.zip/download`` links.
+    Reconstructing ``https://exiftool.org/<name>.zip`` therefore 404s, so
+    the downloader must follow these verbatim hrefs. Returns deduplicated
+    absolute URLs in page order (latest first), preferring 64-bit builds.
     """
     import re
 
@@ -212,17 +216,59 @@ def _fetch_latest_version() -> str | None:
         with urlopen(req, timeout=_CONNECT_TIMEOUT) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
-        # Match: exiftool-12.97.zip or exiftool-12_97.zip
-        pattern = re.compile(r"exiftool[_-](\d+\.\d+(?:_\d+)?)\.zip", re.IGNORECASE)
-        matches = pattern.findall(html)
-        if not matches:
-            return None
-
-        # Pick the first (latest) match; normalise underscores to dots
-        ver = matches[0].replace("_", ".")
-        return ver
+        # Anchor hrefs whose target is an official Windows exiftool-*.zip
+        hrefs = re.findall(r"""<a[^>]*href\s*=\s*["']([^"']+)["']""", html, re.IGNORECASE)
+        seen: list[str] = []
+        for href in hrefs:
+            # Official builds are `exiftool-<version>.zip` (dash). The dash
+            # requirement excludes third-party zips like `modExiftool_101`.
+            m = re.search(r"(exiftool-[\d][\d._]*\.zip)(/download)?", href, re.IGNORECASE)
+            if not m:
+                continue
+            # Only official distribution hosts (sourceforge project files);
+            # skip third-party zips (List_Exif_Metadata, modExiftool, ...).
+            if "sourceforge.net/projects/exiftool/files/" not in href and not href.startswith(_EXIFTOOL_HOME):
+                continue
+            url = href if href.lower().endswith("/download") else href
+            if url not in seen:
+                seen.append(url)
+        # Prefer 64-bit archives on 64-bit Windows, keep page order otherwise
+        if sys.platform == "win32":
+            seen.sort(key=lambda u: 0 if "_64" in u else 1)
+        return seen
     except (URLError, OSError, ValueError):
+        return []
+
+
+def _normalise_candidate_version(zip_name_or_url: str) -> str | None:
+    """Derive a display version from a scraped zip filename or URL.
+
+    ``.../exiftool-13.59_64.zip/download`` -> ``13.59`` (trailing _32/_64
+    is the CPU arch); ``exiftool-12_97.zip`` -> ``12.97``
+    (legacy underscore-as-dot).
+    """
+    import re
+
+    base = zip_name_or_url.rsplit("/", 1)[-1]
+    m = re.match(r"exiftool[_-]([\d._]+)\.zip$", base, re.IGNORECASE)
+    if not m:
         return None
+    ver = m.group(1).replace("_", ".")
+    parts = ver.split(".")
+    if len(parts) == 3 and parts[2] in ("32", "64"):
+        ver = ".".join(parts[:2])
+    return ver
+
+
+def _fetch_latest_version() -> str | None:
+    """
+    Scrape the ExifTool homepage to find the latest Windows zip filename.
+    Returns the version string (e.g. '12.97', '13.59') or None on failure.
+    """
+    candidates = _fetch_zip_candidates()
+    if not candidates:
+        return None
+    return _normalise_candidate_version(candidates[0])
 
 
 def _download_exiftool() -> Path | None:
@@ -232,47 +278,57 @@ def _download_exiftool() -> Path | None:
     """
     import tempfile
 
-    version = _fetch_latest_version()
-    if not version:
+    candidates = _fetch_zip_candidates()
+    if not candidates:
         logger.warning("Could not determine latest ExifTool version from homepage")
         return None
 
-    # Build download URL (version with underscore for zip filename)
-    ver_underscore = version.replace(".", "_")
-    zip_name = f"exiftool-{ver_underscore}.zip"
-    url = f"{_EXIFTOOL_HOME}/{zip_name}"
-    logger.info("Downloading ExifTool %s from %s", version, url)
-
     tmp_dir = Path(tempfile.mkdtemp(prefix="exiftool_dl_"))
-    zip_path = tmp_dir / zip_name
-
+    last_error: Exception | None = None
     try:
-        req = Request(url, headers={"User-Agent": "Transfera/2.0"})
-        with urlopen(req, timeout=_READ_TIMEOUT) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            with open(zip_path, "wb") as fh:
-                while True:
-                    chunk = resp.read(_DOWNLOAD_CHUNK)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    downloaded += len(chunk)
-                    if total and downloaded % (1024 * 1024) == 0:
-                        pct = (downloaded / total) * 100 if total else 0
-                        logger.debug(
-                            "Download progress: %d/%d bytes (%.0f%%)",
-                            downloaded, total, pct,
-                        )
+        # Try each verbatim download URL from the homepage in order —
+        # older entries may have been removed upstream (404), so fall
+        # through. SourceForge /download links redirect to a mirror;
+        # urlopen follows redirects automatically.
+        for url in candidates:
+            version = _normalise_candidate_version(url) or "unknown"
+            zip_name = url.rsplit("/", 1)[-1]
+            if zip_name.lower() == "download":
+                zip_name = f"exiftool-{version.replace('.', '_')}.zip"
+            logger.info("Downloading ExifTool %s from %s", version, url)
+            zip_path = tmp_dir / zip_name
+            try:
+                req = Request(url, headers={"User-Agent": "Transfera/2.0"})
+                with urlopen(req, timeout=_READ_TIMEOUT) as resp:
+                    total = int(resp.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    with open(zip_path, "wb") as fh:
+                        while True:
+                            chunk = resp.read(_DOWNLOAD_CHUNK)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            downloaded += len(chunk)
+                            if total and downloaded % (1024 * 1024) == 0:
+                                pct = (downloaded / total) * 100 if total else 0
+                                logger.debug(
+                                    "Download progress: %d/%d bytes (%.0f%%)",
+                                    downloaded,
+                                    total,
+                                    pct,
+                                )
 
-        logger.info(
-            "Download complete: %d bytes -- extracting", zip_path.stat().st_size
-        )
+                logger.info("Download complete: %d bytes -- extracting", zip_path.stat().st_size)
 
-        return _extract_from_zip(zip_path)
+                extracted = _extract_from_zip(zip_path)
+                if extracted and extracted.is_file():
+                    return extracted
+            except (URLError, OSError, TimeoutError) as exc:
+                logger.warning("ExifTool download failed for %s: %s", url, exc)
+                last_error = exc
+                continue
 
-    except (URLError, OSError, TimeoutError) as exc:
-        logger.warning("ExifTool download failed: %s", exc)
+        logger.warning("All ExifTool download candidates failed (last: %s)", last_error)
         return None
     finally:
         # Always clean up the temp directory and zip
@@ -281,41 +337,79 @@ def _download_exiftool() -> Path | None:
 
 def _extract_from_zip(zip_path: Path) -> Path | None:
     """
-    Extract exiftool.exe from the downloaded zip into the local bin directory.
-    The official zip contains a single directory with exiftool.exe at its root.
+    Extract the ExifTool distribution from the downloaded zip into the local
+    bin directory, resolving to EXIFTOOL_DIR/exiftool.exe.
+
+    Layouts handled:
+      * legacy: single dir with `exiftool.exe` / `exiftool(-k).exe` at root.
+      * current (v13.59+): `exiftool(-k).exe` stub plus a bundled
+        `exiftool_files/` runtime tree (perl DLLs, exiftool.pl, lib/).
+        The stub locates its runtime in `exiftool_files/` next to the exe,
+        so the whole tree must be extracted alongside it.
     """
+    from pathlib import PurePath as _PurePath
+
     EXIFTOOL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            # Find the exiftool executable inside the archive
+            # Find the exiftool executable inside the archive. Current
+            # official zips ship it as `exiftool(-k).exe` at the archive
+            # root (upstream tells users to rename it to `exiftool.exe`;
+            # the bracket options only apply when kept in the filename, so
+            # our renamed copy runs without the -k pause). Match on the
+            # *basename* — directory names like `exiftool_files/` must not
+            # count, otherwise perl.exe would be picked by accident.
+            from pathlib import PurePath as _PurePath
+
+            wanted = _EXIFTOOL_EXE_NAME.lower()
             exe_names = [
-                n for n in zf.namelist()
-                if n.lower().endswith(_EXIFTOOL_EXE_NAME.lower())
+                n
+                for n in zf.namelist()
+                if _PurePath(n).suffix.lower() == ".exe" and "exiftool" in _PurePath(n).stem.lower()
             ]
             if not exe_names:
-                logger.warning(
-                    "ExifTool executable not found inside zip archive"
-                )
+                logger.warning("ExifTool executable not found inside zip archive")
                 return None
+            exe_names.sort(key=lambda n: 0 if n.lower().endswith(wanted) else 1)
 
-            # Extract the executable
+            # Extract the executable plus its bundled runtime tree (if any).
+            # The exe lives one directory below the archive root
+            # (<root>/exiftool(-k).exe); strip that root so the layout lands
+            # as EXIFTOOL_DIR/exiftool.exe + EXIFTOOL_DIR/exiftool_files/.
             exe_entry = exe_names[0]
+            root_prefix = exe_entry.rsplit("/", 1)[0] + "/"
             target = EXIFTOOL_DIR / _EXIFTOOL_EXE_NAME
 
-            with zf.open(exe_entry) as src, open(target, "wb") as dst:
-                while True:
-                    chunk = src.read(_DOWNLOAD_CHUNK)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
+            for member in zf.namelist():
+                if not member.startswith(root_prefix):
+                    continue
+                rel = member[len(root_prefix) :]
+                if not rel or rel.endswith("/"):
+                    continue
+                # Zip-slip guard: stay inside EXIFTOOL_DIR
+                dest = EXIFTOOL_DIR / _PurePath(rel)
+                try:
+                    dest.relative_to(EXIFTOOL_DIR)
+                except ValueError:
+                    logger.warning("Skipping suspicious zip entry: %s", member)
+                    continue
+                if _PurePath(rel).name.lower() == _PurePath(exe_entry).name.lower():
+                    dest = target
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, open(dest, "wb") as dst:
+                    while True:
+                        chunk = src.read(_DOWNLOAD_CHUNK)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
 
             # Mark as executable on Unix-like systems
             if sys.platform != "win32":
                 target.chmod(0o755)
 
             logger.info("Extracted %s -> %s", exe_entry, target)
-            return target
+            return target if target.is_file() else None
 
     except (zipfile.BadZipFile, OSError) as exc:
         logger.warning("Failed to extract ExifTool zip: %s", exc)
@@ -325,6 +419,7 @@ def _extract_from_zip(zip_path: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 # ExifTool extraction
 # ---------------------------------------------------------------------------
+
 
 def _build_exiftool_cmd() -> list[str]:
     """Build the ExifTool command list using the resolved binary path."""
@@ -366,10 +461,7 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
         tags = data[0] if isinstance(data, list) else data
 
         # Extract timestamps -- ExifTool returns ISO-ish strings with -time:all
-        date_taken = (
-            _parse_exif_datetime(tags.get("DateTimeOriginal"))
-            or _parse_exif_datetime(tags.get("CreateDate"))
-        )
+        date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal")) or _parse_exif_datetime(tags.get("CreateDate"))
         date_created = _parse_exif_datetime(tags.get("CreateDate"))
         date_modified = _parse_exif_datetime(tags.get("ModifyDate"))
 
@@ -389,7 +481,8 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
         logger.warning(
             "ExifTool failed for %s: %s -- using filesystem fallback",
-            file_path, exc,
+            file_path,
+            exc,
         )
         return _extract_via_filesystem(file_path)
 
@@ -445,13 +538,16 @@ class _ExifToolSession:
             self._proc = subprocess.Popen(
                 [
                     exe,
-                    "-stay_open", "True",
-                    "-@", "-",
+                    "-stay_open",
+                    "True",
+                    "-@",
+                    "-",
                     "-common_args",
                     "-json",
                     "-time:all",
                     "-s3",
-                    "-charset", "utf8",
+                    "-charset",
+                    "utf8",
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -466,7 +562,7 @@ class _ExifToolSession:
                 target=self._read_stdout_loop,
                 args=(self._proc.stdout, self._stdout_queue),
                 daemon=True,
-                name="exiftool-reader"
+                name="exiftool-reader",
             )
             self._reader_thread.start()
 
@@ -558,19 +654,14 @@ class _ExifToolSession:
         results: dict[str, FileMetadata] = {}
         for path in paths:
             resolved = str(path.resolve())
-            tags = (
-                exiftool_by_path.get(resolved)
-                or exiftool_by_path.get(str(path))
-                or {}
-            )
+            tags = exiftool_by_path.get(resolved) or exiftool_by_path.get(str(path)) or {}
             if not tags:
                 results[resolved] = _extract_via_filesystem(path)
                 continue
             try:
                 stat = path.stat()
-                date_taken = (
-                    _parse_exif_datetime(tags.get("DateTimeOriginal"))
-                    or _parse_exif_datetime(tags.get("CreateDate"))
+                date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal")) or _parse_exif_datetime(
+                    tags.get("CreateDate")
                 )
                 date_created = _parse_exif_datetime(tags.get("CreateDate"))
                 date_modified_tag = _parse_exif_datetime(tags.get("ModifyDate"))
@@ -674,4 +765,3 @@ def extract_metadata_batch(file_paths: list[Path]) -> dict[str, FileMetadata]:
         return _exiftool_session.extract_batch(file_paths)
 
     return {str(p.resolve()): _extract_via_filesystem(p) for p in file_paths}
-

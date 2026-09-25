@@ -89,7 +89,7 @@ if /I "%CONFIG%"=="Debug" (
 
 REM Build
 echo Building wpd_helper (%CONFIG%)...
-cl.exe !CFLAGS! "!SRC!" /Fe:"!OUT!" /link ^
+cl.exe !CFLAGS! "!SRC!" /Fo:"!OUT_DIR!\\" /Fe:"!OUT!" /link ^
     /SUBSYSTEM:CONSOLE ^
     ole32.lib ^
     portabledeviceguids.lib ^

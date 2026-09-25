@@ -85,11 +85,17 @@ def dhash_bytes(image_bytes: bytes) -> str | None:
         return None
 
 
-def hamming_distance(h1: str, h2: str) -> int:
-    """Hamming distance between two 16-hex-char hashes (0..64)."""
+def hamming_distance(h1: str | None, h2: str | None) -> int:
+    """Hamming distance between two 16-hex-char hashes (0..64).
+
+    Returns 64 (maximally different) for missing/malformed inputs instead
+    of raising, so one corrupt row can never break duplicate grouping.
+    """
     try:
+        if not isinstance(h1, str) or not isinstance(h2, str):
+            return 64
         return bin(int(h1, 16) ^ int(h2, 16)).count("1")
-    except ValueError:
+    except (ValueError, TypeError):
         return 64
 
 

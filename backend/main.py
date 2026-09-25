@@ -281,7 +281,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Transfera v2",
         description="Local media backup engine",
-        version="2.4.0",
+        version="2.5.0",
         lifespan=lifespan,
     )
 
@@ -351,7 +351,7 @@ def create_app() -> FastAPI:
             return {
                 "name": "Transfera Backend API",
                 "status": "active",
-                "version": "2.4.0",
+                "version": "2.5.0",
                 "note": "Frontend not built — run 'npm run build' in frontend/",
             }
 

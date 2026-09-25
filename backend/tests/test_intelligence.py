@@ -141,6 +141,58 @@ def test_manifest_verify_stats_review_endpoints(test_client):
     assert "blurry_ids" in r.json()
 
 
+def test_empty_trash_removes_vault_files(test_client, tmp_path):
+    """Emptying trash must delete vault files + thumbnails, not just rows."""
+    import time
+    import uuid
+
+    uniq = uuid.uuid4().hex[:8]
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    for i in range(2):
+        _make_image(src / f"trashme_{uniq}_{i}.png", (10 + i * 40, 120, 30 + i * 20))
+
+    s = test_client.post(
+        "/api/sessions",
+        json={
+            "session_name": f"trash-e2e-{uniq}",
+            "source_root": str(src),
+            "dest_root": str(dst),
+            "transfer_mode": "copy",
+        },
+    )
+    assert s.status_code == 200, s.text
+    sid = s.json()["id"]
+    assert test_client.post(f"/api/sessions/{sid}/start").status_code == 200
+
+    final = None
+    for _ in range(60):
+        time.sleep(1)
+        g = test_client.get(f"/api/sessions/{sid}").json()
+        if g.get("status") in ("completed", "failed", "paused"):
+            final = g
+            break
+    assert final is not None and final.get("status") == "completed", final
+
+    vault_files = [p for p in dst.rglob("*") if p.is_file()]
+    assert len(vault_files) == 2, [str(p) for p in vault_files]
+
+    items = test_client.get("/api/media", params={"session_id": sid, "limit": 50}).json()["items"]
+    assert len(items) == 2
+    for it in items:
+        r = test_client.patch(f"/api/media/{it['id']}", json={"trashed": True})
+        assert r.status_code == 200, r.text
+    assert test_client.get("/api/trash").json()["total"] == 2
+
+    out = test_client.post("/api/trash/empty").json()
+    assert out["emptied"] == 2, out
+    assert out.get("files_removed", 0) == 2, out
+    assert [p for p in dst.rglob("*") if p.is_file()] == []
+    assert test_client.get("/api/trash").json()["total"] == 0
+
+
 def test_trash_favorite_flow(test_client):
     # Seed one completed item directly via API-visible list; create via DB is complex
     # here, so exercise the 404 paths + empty-trash shape instead.

@@ -10,7 +10,16 @@ import {
 } from "lucide-react";
 import { CheckCircle, AlertTriangle, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getLocalToken } from "@/lib/api-client";
 import ErrorBoundary from "./ErrorBoundary";
+
+// Attach the local auth token when available. Endpoints like
+// /api/duplicates/prescan require it; open preview/thumbnail endpoints
+// simply ignore the extra header.
+function authHeaders(extra) {
+  const token = getLocalToken();
+  return token ? { ...extra, "X-Local-Token": token } : { ...extra };
+}
 
 const API_BASE =
   !window.location.origin || window.location.origin.startsWith("file://")
@@ -457,7 +466,10 @@ function SourcePreviewPanelInner({
 
     const url = getPreviewUrl(page, 100, sortBy);
 
-    fetch(url, { signal: controller.signal })
+    fetch(url, {
+      signal: controller.signal,
+      headers: authHeaders(),
+    })
       .then((res) => {
         if (!res.ok) throw new Error("Preview fetch failed");
         return res.json();
@@ -509,7 +521,7 @@ function SourcePreviewPanelInner({
     }));
     fetch(`${API_BASE}/api/duplicates/prescan`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ candidates }),
     })
       .then((res) => {

@@ -5,6 +5,7 @@ Endpoints for WSL2/usbipd iPhone access setup and management.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -68,16 +69,31 @@ def _get_or_create_orchestrator(manager) -> WSLOrchestrator | None:
 
 
 @router.get("/status", response_model=Tier2StatusResponse)
-async def get_tier2_status() -> Tier2StatusResponse:
+async def get_tier2_status(_: None = Depends(require_local_token)) -> Tier2StatusResponse:
     """Get comprehensive Tier 2 setup status."""
     manager = get_device_manager()
     orchestrator = _get_or_create_orchestrator(manager)
     if orchestrator is None:
         return Tier2StatusResponse(error="WSL orchestrator not available")
 
-    wsl_status = await orchestrator.check_feasibility()
-    usbipd_status = await orchestrator.verify_usbipd_installed()
-    bridge_status = await orchestrator.get_bridge_status()
+    # Each probe can block for a long time on a cold machine (WSL / usbipd /
+    # bridge subprocess calls). Bound them so GET /status never hangs the
+    # caller — callers (Dashboard setup cards) poll this endpoint.
+    try:
+        wsl_status = await asyncio.wait_for(orchestrator.check_feasibility(), timeout=10.0)
+    except (TimeoutError, Exception) as exc:
+        logger.warning("Tier2 feasibility probe failed/timed out: %s", exc)
+        return Tier2StatusResponse(error=f"Feasibility probe failed: {exc}")
+    try:
+        usbipd_status = await asyncio.wait_for(orchestrator.verify_usbipd_installed(), timeout=10.0)
+    except (TimeoutError, Exception) as exc:
+        logger.warning("Tier2 usbipd probe failed/timed out: %s", exc)
+        return Tier2StatusResponse(error=f"usbipd probe failed: {exc}")
+    try:
+        bridge_status = await asyncio.wait_for(orchestrator.get_bridge_status(), timeout=10.0)
+    except (TimeoutError, Exception) as exc:
+        logger.warning("Tier2 bridge probe failed/timed out: %s", exc)
+        return Tier2StatusResponse(error=f"Bridge probe failed: {exc}")
 
     # Get devices on Tier 2
     devices_on_tier2 = []
@@ -102,7 +118,7 @@ async def get_tier2_status() -> Tier2StatusResponse:
 
 
 @router.get("/preview", response_model=Tier2SetupPreviewResponse)
-async def get_setup_preview() -> Tier2SetupPreviewResponse:
+async def get_setup_preview(_: None = Depends(require_local_token)) -> Tier2SetupPreviewResponse:
     """
     Preview all setup steps before the user commits.
     Shows exactly what will happen, including restart/elevation requirements.
@@ -223,7 +239,7 @@ async def execute_setup_step(req: Tier2StepRequest, _: None = Depends(require_lo
 
 
 @router.get("/usb-devices", response_model=Tier2USBDeviceListResponse)
-async def list_usb_devices() -> Tier2USBDeviceListResponse:
+async def list_usb_devices(_: None = Depends(require_local_token)) -> Tier2USBDeviceListResponse:
     """List USB devices with their usbipd bind/attach state."""
     manager = get_device_manager()
     orchestrator = manager.get_orchestrator()
@@ -329,7 +345,7 @@ async def bind_device_elevated(req: Tier2BindRequest, _: None = Depends(require_
 
 
 @router.get("/resume")
-async def check_resume() -> Tier2ResumeNotification | None:
+async def check_resume(_: None = Depends(require_local_token)) -> Tier2ResumeNotification | None:
     """Check if Tier 2 setup needs to resume after a restart."""
     from backend.wsl_orchestrator import Tier2PersistedState
 
