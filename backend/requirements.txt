@@ -13,4 +13,6 @@ aiohttp>=3.9,<4.0
 pydantic>=2.7,<3.0
 pymobiledevice3>=5.0,<6.0
 exifread>=3.0,<4.0
+onnxruntime>=1.20,<2.0
+tokenizers>=0.21,<1.0
 

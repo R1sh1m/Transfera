@@ -707,6 +707,15 @@ function downloadFile(
   });
 }
 
+/** Last N non-empty lines of a captured process log (for error dialogs). */
+function lastLines(logged: string, n: number): string {
+  const lines = logged
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0);
+  return lines.slice(-n).join("\n") || "(no output captured)";
+}
+
 async function runSetupInstall(
   event: Electron.IpcMainInvokeEvent,
 ): Promise<void> {
@@ -799,6 +808,37 @@ async function runSetupInstall(
       fs.unlinkSync(getPipPath);
     }
 
+    sendProgress("Installing Python build tools...", 72);
+    // Some backend dependencies (e.g. hexdump via pymobiledevice3) ship as
+    // source-only archives and need a build backend. The embeddable Python
+    // has none, so install setuptools/wheel first — otherwise pip fails
+    // with "Cannot import 'setuptools.build_meta'".
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(pythonExe, [
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "setuptools",
+        "wheel",
+      ]);
+      let logged = "";
+      proc.stdout?.on("data", (d) => (logged += d.toString()));
+      proc.stderr?.on("data", (d) => (logged += d.toString()));
+      proc.on("error", (err) => reject(err));
+      proc.on("exit", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `build-tools install exited with code ${code}\n${lastLines(logged, 12)}`,
+            ),
+          );
+        }
+      });
+    });
+
     sendProgress(
       "Installing backend dependencies (pymobiledevice3, fastapi, pillow)...",
       75,
@@ -817,12 +857,20 @@ async function runSetupInstall(
         requirementsPath,
       ]);
 
+      let logged = "";
+      pipProc.stdout?.on("data", (d) => (logged += d.toString()));
+      pipProc.stderr?.on("data", (d) => (logged += d.toString()));
       pipProc.on("error", (err) => reject(err));
       pipProc.on("exit", (code) => {
         if (code === 0) {
           resolve();
         } else {
-          reject(new Error(`pip install exited with code ${code}`));
+          // Surface pip's own error tail — a bare exit code is undebuggable.
+          reject(
+            new Error(
+              `pip install exited with code ${code}\n${lastLines(logged, 12)}`,
+            ),
+          );
         }
       });
     });

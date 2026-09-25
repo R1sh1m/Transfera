@@ -557,6 +557,16 @@ The structural breakpoints that matter for agents: 1440px (content lock), 1068px
 
 These are Transfera-specific UI components built from the token system above. They are documented here because they represent reusable patterns not found in Apple's web surfaces but consistent with this project's design language.
 
+### Dark-mode accent (product-icon sunset)
+
+Light mode follows the single-accent rule (`{colors.primary}` Action Blue) exactly.
+Dark mode swaps the interactive family to the product icon's sunset palette
+(sampled from `frontend/build/icon.png`): `--primary` / `--ring` become
+`#f68059` (icon orange) and `--color-action` becomes `oklch(0.7 0.16 43)`.
+All `bg-primary` / `bg-action` / `text-primary` / `ring-action` utilities
+follow automatically — no per-component overrides. Status colors (green /
+amber / red) are unchanged in both modes.
+
 ### `component.media-preview-panel`
 
 The live preview panel on the Transfer page showing thumbnails of transferred media items as they complete.

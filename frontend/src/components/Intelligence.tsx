@@ -22,7 +22,9 @@ import { cn, parseBackendDate } from "@/lib/utils";
 import {
   useBackfill,
   useCapabilities,
+  useDownloadModels,
   useDuplicateGroups,
+  useModelStatus,
   useMoments,
   usePeople,
   useRenamePerson,
@@ -30,7 +32,7 @@ import {
   useSemanticSearch,
   useTimeline,
 } from "@/lib/queries";
-import { fetchThumbnail } from "@/lib/thumbnail-fetch";
+import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
 
 function Thumb({
   id,
@@ -56,6 +58,7 @@ function Thumb({
     });
     return () => {
       cancelled = true;
+      revokeThumbnail(id);
     };
   }, [id, url]);
   if (failed || !src)
@@ -77,21 +80,49 @@ function Thumb({
 export function CapabilitiesBadge() {
   const { data } = useCapabilities();
   const backfill = useBackfill();
+  const download = useDownloadModels();
+  const [wantModels, setWantModels] = useState(false);
+  const { data: modelStatus } = useModelStatus(wantModels);
+  const downloading = modelStatus?.status === "downloading";
+  const clipReady = data?.semantic_mode === "clip";
+  const showGetModels = !!data && !clipReady && !downloading;
+  const mb = modelStatus
+    ? (modelStatus.downloaded_bytes / 1e6).toFixed(0)
+    : "0";
   if (!data) return null;
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <span
         className={cn(
           "px-2 py-0.5 rounded-pill border border-border",
-          data.semantic_mode === "clip"
-            ? "text-green-600"
-            : "text-muted-foreground",
+          clipReady ? "text-green-600" : "text-muted-foreground",
         )}
         title={`phash: ${data.phash_available}, faces: ${data.faces_available}, clip: ${data.clip_available}`}
       >
-        {data.semantic_mode === "clip" ? "CLIP on-device" : "Keyword search"} ·{" "}
+        {clipReady ? "CLIP on-device" : "Keyword search"} ·{" "}
         {data.faces_available ? "Faces on" : "Faces off"}
       </span>
+      {showGetModels && (
+        <button
+          onClick={() => {
+            setWantModels(true);
+            download.mutate();
+          }}
+          disabled={download.isPending}
+          className="px-3 py-1 rounded-pill border border-border text-xs hover:bg-muted active:scale-[0.95] disabled:opacity-40"
+          title="Download the on-board AI vision model once (~210 MB) to enable true semantic search"
+        >
+          Get AI models
+        </button>
+      )}
+      {downloading && (
+        <span
+          className="px-2 py-0.5 rounded-pill border border-border"
+          title="Downloading on-board AI models in the background"
+        >
+          Downloading AI… {mb} MB
+        </span>
+      )}
       <button
         onClick={() => backfill.mutate()}
         disabled={backfill.isPending}

@@ -52,6 +52,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["intelligence"])
 
 
+def _clip_embed_thumb(thumb: bytes) -> list[float] | None:
+    """Encode thumbnail bytes with the on-board CLIP image encoder."""
+    try:
+        import io as _io
+
+        from PIL import Image as _Image
+
+        from backend.engines import clip as _clip
+
+        with _Image.open(_io.BytesIO(thumb)) as im:
+            return _clip.encode_image(im)
+    except Exception:
+        return None
+
+
 def _thumb_url(mi: MediaItem) -> str:
     try:
         return f"/api/media/{mi.id}/thumbnail?t={int(mi.updated_at.timestamp())}"
@@ -121,6 +136,33 @@ async def capabilities(_: None = Depends(require_local_token)) -> CapabilitiesRe
 
     caps = get_capabilities()
     return CapabilitiesResponse(**caps)
+
+
+@router.get("/models/status")
+async def model_download_status(_: None = Depends(require_local_token)) -> dict:
+    """On-board AI model presence + background download progress (~207 MB)."""
+    try:
+        from backend.engines import clip as clip_engine
+
+        return clip_engine.download_status()
+    except Exception as exc:
+        return {"status": "error", "ready": False, "error": str(exc)[:200]}
+
+
+@router.post("/models/download")
+async def start_model_download(_: None = Depends(require_local_token)) -> dict:
+    """Start background download of the on-board CLIP models (idempotent).
+
+    Returns immediately; poll ``GET /models/status`` for progress. The
+    Library "Index library" backfill picks up embeddings on its next run
+    once the models are ready.
+    """
+    try:
+        from backend.engines import clip as clip_engine
+
+        return clip_engine.start_background_download()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Model download unavailable: {exc}")
 
 
 @router.get("/duplicates/groups", response_model=NearDuplicateGroupsResponse)
@@ -326,10 +368,51 @@ async def semantic_search(
     req: SemanticSearchRequest,
     _: None = Depends(require_local_token),
 ) -> SemanticSearchResponse:
+    import asyncio as _asyncio
+
+    from backend.database.models import MediaEmbedding
     from backend.engines.intelligence import get_capabilities, semantic_search_keyword
 
     caps = get_capabilities()
     async with session_scope() as session:
+        # CLIP vector path (vector-DB style): cosine top-k over stored
+        # on-board embeddings. Falls through to keyword search when models
+        # are absent, the query fails to encode, or nothing is indexed yet.
+        if caps.get("clip_available"):
+            try:
+                from backend.engines import clip as _clip
+
+                qvec = await _asyncio.to_thread(_clip.encode_text, req.query or "")
+                if qvec:
+                    rows = await session.execute(select(MediaEmbedding).where(MediaEmbedding.model == _clip.MODEL_NAME))
+                    cands: list[tuple[int, list]] = []
+                    for row in rows.scalars().all():
+                        try:
+                            vec = json.loads(row.vector_json or "[]")
+                        except (ValueError, TypeError):
+                            continue
+                        if isinstance(vec, list) and len(vec) == len(qvec):
+                            cands.append((row.media_id, [float(x) for x in vec]))
+                    ranked = _clip.cosine_top_k(qvec, cands, limit=req.limit)
+                    if ranked:
+                        wanted = [mid for mid, _ in ranked]
+                        got = await session.execute(
+                            select(MediaItem).where(
+                                MediaItem.id.in_(wanted),
+                                MediaItem.trashed == False,  # noqa: E712
+                            )
+                        )
+                        by_id = {mi.id: mi for mi in got.scalars().all()}
+                        ordered = [by_id[mid] for mid, _ in ranked if mid in by_id]
+                        if ordered:
+                            return SemanticSearchResponse(
+                                query=req.query,
+                                mode="clip",
+                                results=[_to_media_info(mi) for mi in ordered],
+                                total=len(ordered),
+                            )
+            except Exception as exc:
+                logger.debug("CLIP semantic path failed, using keyword: %s", exc)
         result = await session.execute(
             select(MediaItem)
             .where(
@@ -371,13 +454,26 @@ async def backfill_intelligence(
     Bounded (``limit``) so it is safe to call repeatedly; idempotent —
     only touches rows with NULL fields. Pure-Pillow, fully offline.
     """
+    import asyncio
     import io
 
+    from backend.config import IMAGE_EXTENSIONS
+    from backend.database.models import MediaEmbedding
     from backend.engines.intelligence import compute_blur_score, keyword_tags
     from backend.engines.perceptual_hash import dhash_bytes
     from backend.engines.thumbnailer import generate_thumbnail_bytes
 
-    scanned = phash_filled = dims_filled = tags_filled = 0
+    try:
+        from backend.engines import clip as clip_engine
+
+        clip_ready = clip_engine.clip_available()
+        clip_model_name = clip_engine.MODEL_NAME if clip_ready else ""
+    except Exception:
+        clip_engine = None  # type: ignore[assignment]
+        clip_ready = False
+        clip_model_name = ""
+
+    scanned = phash_filled = dims_filled = tags_filled = embeddings_filled = 0
     async with session_scope() as session:
         result = await session.execute(select(MediaItem).where(MediaItem.final_status == "completed").limit(limit))
         items = list(result.scalars().all())
@@ -396,6 +492,7 @@ async def backfill_intelligence(
             # Dimensions via Pillow on the archived file (source_path may be stale;
             # thumbnail bytes are the reliable fallback for hashing)
             needs_visual = mi.phash is None or mi.width is None or mi.blur_score is None
+            thumb: bytes | None = None
             if needs_visual:
                 try:
                     from pathlib import Path
@@ -426,12 +523,58 @@ async def backfill_intelligence(
                             touched = True
                 except Exception as exc:
                     logger.debug("backfill skipped %s: %s", mi.id, exc)
+            # CLIP embedding (vector-DB row) — images only, on-board model.
+            # Reuses thumbnail bytes generated above when available, else
+            # generates them (CLIP on 512px thumbs is fast and sufficient).
+            # Skipped entirely when models are absent.
+            if clip_ready and thumb is None and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
+                # Item already has phash/dims/blur but no embedding yet:
+                # generate thumbnail bytes just for CLIP.
+                try:
+                    from pathlib import Path as _Path
+
+                    _p = _Path(mi.source_path) if mi.source_path else None
+                    thumb = generate_thumbnail_bytes(_p) if _p and _p.is_file() else None
+                except Exception as exc:
+                    logger.debug("backfill clip thumb skipped %s: %s", mi.id, exc)
+                    thumb = None
+            if clip_ready and thumb and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
+                try:
+                    existing = await session.get(MediaEmbedding, mi.id)
+                    if existing is None or existing.model != clip_model_name:
+                        vec = await asyncio.to_thread(_clip_embed_thumb, thumb)
+                        if vec:
+                            if existing is None:
+                                session.add(
+                                    MediaEmbedding(
+                                        media_id=mi.id,
+                                        model=clip_model_name,
+                                        dim=len(vec),
+                                        vector_json=json.dumps(vec),
+                                    )
+                                )
+                            else:
+                                existing.model = clip_model_name
+                                existing.dim = len(vec)
+                                existing.vector_json = json.dumps(vec)
+                            embeddings_filled += 1
+                            touched = True
+                except Exception as exc:
+                    logger.debug("backfill clip skipped %s: %s", mi.id, exc)
             if touched:
                 mi.touch()
-    msg = f"backfilled {phash_filled} hashes, {dims_filled} dims, {tags_filled} tags across {scanned} items"
+    msg = (
+        f"backfilled {phash_filled} hashes, {dims_filled} dims, {tags_filled} tags, "
+        f"{embeddings_filled} clip embeddings across {scanned} items"
+    )
     logger.info(msg)
     return BackfillResponse(
-        scanned=scanned, phash_filled=phash_filled, dims_filled=dims_filled, tags_filled=tags_filled, message=msg
+        scanned=scanned,
+        phash_filled=phash_filled,
+        dims_filled=dims_filled,
+        tags_filled=tags_filled,
+        embeddings_filled=embeddings_filled,
+        message=msg,
     )
 
 

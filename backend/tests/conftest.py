@@ -26,6 +26,39 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _guard_real_database(tmp_path_factory):
+    """Process-wide guard: no test may EVER touch the developer's real DB.
+
+    Several legacy helpers (e.g. ``_reset_db`` in test_crash_recovery.py)
+    call ``drop_all``/``create_all_tables`` on the global engine without
+    patching ``DATABASE_URL`` — against the real
+    ``backend/data/db/transfera.db`` that wiped real user data mid-suite.
+    This autouse session fixture redirects both ``DATABASE_URL`` bindings
+    (``backend.config`` and ``backend.database.manager``, which imports it
+    by value) at a throwaway file for the whole pytest process. Narrower
+    per-test fixtures (``db_session``, ``client``, ``test_client``)
+    re-patch on top without conflict.
+    """
+    import backend.database.manager as _manager
+
+    guard_file = tmp_path_factory.mktemp("guard_db") / "guard.db"
+    guard_url = f"sqlite+aiosqlite:///{guard_file.as_posix()}"
+    try:
+        asyncio.run(_manager.dispose_engine())
+    except Exception:
+        pass
+    with (
+        patch("backend.config.DATABASE_URL", guard_url),
+        patch("backend.database.manager.DATABASE_URL", guard_url),
+    ):
+        yield
+    try:
+        asyncio.run(_manager.dispose_engine())
+    except Exception:
+        pass
+
+
 def _run_server(port: int) -> None:
     """Run the FastAPI server in a background thread."""
     config = uvicorn.Config(

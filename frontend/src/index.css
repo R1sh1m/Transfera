@@ -33,7 +33,9 @@
   --card-foreground: hsl(210 40% 98%);
   --popover: hsl(222.2 84% 4.9%);
   --popover-foreground: hsl(210 40% 98%);
-  --primary: #2997ff;
+  /* Icon-matched dark accent: product icon sunset orange (#f68059) replaces
+     sky blue in dark mode only. Light mode keeps Action Blue untouched. */
+  --primary: #f68059;
   --primary-foreground: hsl(0 0% 100%);
   --secondary: hsl(217.2 32.6% 17.5%);
   --secondary-foreground: hsl(210 40% 98%);
@@ -45,7 +47,9 @@
   --destructive-foreground: hsl(210 40% 98%);
   --border: hsl(217.2 32.6% 17.5%);
   --input: hsl(217.2 32.6% 17.5%);
-  --ring: #2997ff;
+  --ring: #f68059;
+  /* Icon-matched dark Action (see --primary note above). */
+  --color-action: oklch(0.7 0.16 43);
 }
 
 @theme inline {
@@ -81,6 +85,7 @@
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
+  --radius-pill: 9999px;
 
   --font-sans: Inter, system-ui, sans-serif;
   --font-mono: JetBrains Mono, monospace;

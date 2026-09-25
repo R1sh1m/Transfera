@@ -1,18 +1,8 @@
-```
-=============================================================================================
-=        ==       ======  =====  =======  ===      ===        ==        ==       ======  ====
-====  =====  ====  ====    ====   ======  ==  ====  ==  ========  ========  ====  ====    ===
-====  =====  ====  ===  ==  ===    =====  ==  ====  ==  ========  ========  ====  ===  ==  ==
-====  =====  ===   ==  ====  ==  ==  ===  ===  =======  ========  ========  ===   ==  ====  =
-====  =====      ====  ====  ==  ===  ==  =====  =====      ====      ====      ====  ====  =
-====  =====  ====  ==        ==  ====  =  =======  ===  ========  ========  ====  ==        =
-====  =====  ====  ==  ====  ==  =====    ==  ====  ==  ========  ========  ====  ==  ====  =
-====  =====  ====  ==  ====  ==  ======   ==  ====  ==  ========  ========  ====  ==  ====  =
-====  =====  ====  ==  ====  ==  =======  ===      ===  ========        ==  ====  ==  ====  =
-=============================================================================================
-```
+# Transfera
 
-**Two-Stage Verified Media Vaulting Engine**   FastAPI · Electron · React · SQLite
+**Back up the photos and videos on your phone, camera, or USB drive — safely, privately, on your own PC.**
+
+Transfera copies your pictures and videos into one tidy, organized archive folder. It checks every file twice so nothing corrupt ever slips in, skips files you already backed up, and sorts everything by date. There is no cloud, no account, and no subscription. Your files never leave your computer.
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -22,404 +12,157 @@
 
 ---
 
-## What it does
+## Install (pick one — easiest first)
 
-Transfera is a Windows desktop app that transfers photos, videos, and documents from iPhones, Android phones, cameras, and USB drives to a folder on your PC. It skips duplicate files using content based hashing, organizes media by capture date, and generates thumbnails so you can preview what was imported. Everything runs locally, no cloud account, no internet connection, no subscription.
+You need **Windows 10 or 11**. Nothing else to install.
 
-### Two-Stage Verified Pipeline
+### Option 1: Portable — no installation at all (recommended for testing)
 
-Transfera's pipeline ensures that no silent corruption ever reaches the destination:
+1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)** and download `Transfera-Portable-X.Y.Z.zip`.
+2. Right-click it → **Extract All** → open the folder → double-click `Transfera.exe`.
 
-```
-Source Files ──▶ [Hop 1: Cache] ──▶ [Hop 2: Archive] ──▶ Verified Backup
-                  BLAKE3 hash            re-verify
-                  .partial write         atomic rename
-```
-
-| Hop | From | To | Guarantee |
-|-----|------|----|-----------|
-| **Hop 1** | Original source files | Local staging cache | Stream-copied with concurrent BLAKE3 hash; only renamed from `.partial` on hash match |
-| **Hop 2** | Verified cache copy | Final archive directory | Hash re-verified before atomic placement into organised `YYYY/MM/DD` folder structure |
-
----
-
-## Features
-
-- Copy or move files from connected devices and USB drives
-- iPhone support via native AFC protocol (no iTunes required) and WSL bridge for deeper access
-- Android and camera support via Windows MTP/WPD
-- Duplicate detection using BLAKE3 content hashing
-- Date based organization using EXIF metadata
-- Thumbnail preview during and after transfer
-- Pause, resume, and crash recovery for interrupted transfers
-- Transfer history with session logs
-- Dark and light mode
-
-### Technical Details
-
-- **BLAKE3 hashing** (SHA-256 fallback) computed *during* the copy stream, requiring no second reads
-- **Atomic writes** via `.partial` staging, ensuring a corrupt or interrupted file never lands in the final archive
-- **iPhone & iPad support** via native WPD driver integration (optional WSL2 bridge for Tier 2)
-- **Live Photo detection** pairs HEIC + MOV files by matching filename, preserving them together
-- **Duplicate detection** using exact (hash-based) and near-duplicate (metadata similarity) resolution with per-file controls
-- **Crash recovery** interrupted `LOADING` and `ARCHIVED` batch states are automatically resumed on next launch
-- **Real-time transfer monitor** WebSocket-driven progress with per-hop bars, ETA, speed, and media thumbnail preview
-- **Media library** masonry/list/history views of every archived file, with infinite scroll and thumbnail regeneration
-- **SQLite WAL mode** safe concurrent reads during active writes with no database lock contention
-- **ExifTool auto-bootstrap** downloads and manages ExifTool automatically with no manual installation needed
-
----
-
-## Download & Run (no code, no build — 2 clicks)
-
-Everything is bundled inside (Python runtime, backend, ExifTool, native helper).
-Pick a file from **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)** and run it.
-
-### Option 1: Portable (recommended)
-1. Download `Transfera-Portable-X.Y.Z.zip`.
-2. Right-click → **Extract All** → open the folder → double-click `Transfera.exe`.
-
-No installation, no admin rights, nothing written outside its own folder.
+That is everything. No admin rights, no setup wizard. To remove it, just delete the folder.
 
 ### Option 2: Setup installer
-1. Download `Transfera-Setup-X.Y.Z.exe` and run it.
-2. Adds a Start-menu shortcut; uninstalls cleanly from Settings → Apps.
 
-### "Windows protected your PC"? (one-time, 10 seconds)
-Straight talk: signing certificates that remove this warning cost $400+/year,
-which isn't happening on a student budget — so first-time users see a
-SmartScreen prompt. The app is safe, and you don't have to take my word for it:
-- Fully open source (AGPL-3.0) — every line is on GitHub.
-- Releases are built on GitHub's own servers (look for the green ✓ on the release tag), never on someone's laptop.
-- Verify the download yourself against `SHA256SUMS.txt` from the same release:
-  ```powershell
-  certutil -hashfile Transfera-Portable-X.Y.Z.zip SHA256
-  ```
-- To proceed, click **More info → Run anyway**. Windows remembers your choice,
-  and the warning fades for everyone as install counts grow. Each release is
-  also submitted to [Microsoft's file review](https://www.microsoft.com/en-us/wdsi/filesubmission)
-  to build that reputation faster.
+1. From **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**, download `Transfera-Setup-X.Y.Z.exe` and run it.
+2. It adds a Start-menu shortcut. To remove it later: Settings → Apps → Transfera → Uninstall.
 
-### One-line install (winget)
+### Option 3: One command (winget)
+
 ```powershell
 winget install --id Transfera.Transfera -e
 ```
-A ready-made manifest lives in [`winget/`](winget/) and tracks each release;
-it is submitted to the community repository so the package stays installable
-with a single command.
 
-### Coming soon: Microsoft Store (zero warnings + auto-updates)
-The real fix costs ~$19 once (individual developer account), not a yearly
-certificate: ship Transfera as an MSIX through the Store and Microsoft signs
-it themselves — no warnings, automatic updates, clean uninstall. The packaging
-script is already wired (`npm run electron:pack:msix` in `frontend/`); it just
-needs the Publisher ID from Partner Center filled into the existing `appx`
-block in `frontend/package.json`. Store submission is the next milestone after
-v2.5.0.
+### "Windows protected your PC"?
 
+You may see this warning the first time you run Transfera. It appears because the app is new and does not yet have a paid signing certificate — **not** because anything is wrong:
 
----
+- Transfera is fully open source — every line of code is on GitHub for anyone to inspect.
+- Releases are built automatically on GitHub's own servers, never on somebody's laptop.
+- You can verify your download yourself. Compare its fingerprint against `SHA256SUMS.txt` from the same release page:
 
-## Development & Building from Source
-
-If you want to run the developer stack or compile the standalone installer yourself, follow the instructions below.
-
-### Prerequisites
-
-Only **two tools** need to be on the system before running Transfera. Everything else like Python virtual environment, pip packages, npm packages, native build tools, ExifTool, etc is handled automatically on first launch.
-
-On Windows, install both prerequisites in a single command using `winget`:
-
-```powershell
-winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS.LTS
-```
-
----
-
-### 1. Python 3.12
-
-Transfera requires Python **3.12.x** specifically. This version is enforced because several core dependencies (`blake3`, `pillow-heif`) only ship pre-compiled wheels for 3.12, avoiding any need for local compilation.
-
-Install Python 3.12 using the following `winget` command:
-
-```powershell
-winget install -e --id Python.Python.3.12
-```
-
-*(Or download the installer from [python.org/downloads](https://www.python.org/downloads/) and check **"Add python.exe to PATH"** during setup).*
-
-Verify after installation:
-
-```powershell
-python --version
-# Python 3.12.x
-```
-
-> If multiple Python versions are installed, the `py` launcher (`py -3.12`) is also supported, the run script probes for it automatically.
-
-### 2. Node.js v20 or later
-
-The Electron shell and Vite build pipeline require Node **v20 LTS** or newer.
-
-Install Node.js v20 using the following `winget` command:
-
-```powershell
-winget install -e --id OpenJS.NodeJS.LTS
-```
-
-*(Or download the installer from [nodejs.org](https://nodejs.org/) — choose the LTS release).*
-
-Verify after installation:
-
-```powershell
-node --version
-# v20.x.x or higher
-```
-
-### That's it
-
-## Quickstart
-
-```powershell
-git clone https://github.com/R1sh1m/Transfera.git
-cd Transfera
-python run.py
-```
-
-The orchestrator runs through a self-bootstrapping sequence on first launch (takes 2–4 minutes on a clean machine):
-
-```
-[PYTHON]   Locating Python 3.12 interpreter
-[STEP 1]   Creating .venv and installing backend dependencies
-[STEP 2]   Installing frontend npm packages
-[STEP 2.5] Compiling React frontend (Vite)
-[STEP 2.6] Building native WPD device helper (requires MSVC — see below)
-[STEP 3]   Launching FastAPI backend on :47821
-[STEP 3]   Launching Electron + Vite dev shell
-```
-
-Subsequent launches skip all setup steps automatically (only runs again when `requirements.txt` or `package.json`/`package-lock.json` change).
-
-Press **Ctrl+C** at any time for a clean teardown of all processes.
-
----
-
-## iPhone & iPad Support — Native Helper
-
-Transfera's iOS device support is powered by a native C++ helper compiled against the Windows Portable Devices (WPD) API. The run script builds it automatically (requires Visual Studio Build Tools), but **requires Microsoft's C++ compiler (MSVC)** to be present on the system.
-
-Install one of:
-
-- **Visual Studio 2022 Build Tools** via the following command:
   ```powershell
-  winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
+  certutil -hashfile Transfera-Portable-X.Y.Z.zip SHA256
   ```
-- **Visual Studio 2022** (any edition, free Community edition works) with the **"Desktop development with C++"** workload.
 
-The build script locates the compiler via `vswhere.exe` automatically, no PATH configuration needed.
+  If the long code matches, the file is exactly what GitHub built.
 
-> **If you skip this step**, Transfera still runs fully. Local folder and network path backups work without the native helper. iPhone/iPad detection simply won't be available until MSVC is installed and the helper is built.
-
----
-
-## Runner Reference
-
-```powershell
-python run.py               # Start everything (recommended)
-python run.py --backend     # Backend API only (no Electron window)
-python run.py --frontend    # Electron + Vite dev shell only
-python run.py --skip-deps   # Skip all setup checks (fast relaunch)
-```
-
-The full dev stack runs two processes:
-
-| Process | URL | Description |
-|---------|-----|-------------|
-| FastAPI backend | `http://127.0.0.1:47821` | REST API + WebSocket + static frontend server |
-| Electron (Vite HMR) | `http://127.0.0.1:5173` | Dev shell with hot-module reload |
+To continue past the warning, click **More info → Run anyway**. Windows remembers your choice.
 
 ---
 
-### Packaging Releases (Developer Guide)
+## Your first backup (5 minutes)
 
-To produce the portable distribution and signed setup installer:
+1. **Open Transfera.** You land on the **Dashboard**.
+2. Click the big blue **Start New Backup** button (or **Setup** in the left sidebar).
+3. **Source** — where are your photos?
+   - *A folder on this PC:* click **Browse**, pick the folder, and you will instantly see a preview grid of the photos and videos inside. Tick the ones you want (or keep them all).
+   - *An iPhone/iPad:* plug it in with a USB cable, unlock it, and tap **Trust** on the phone. Then pick it from **Connected devices**. (First time only, Transfera may offer to install Apple's free driver for you in one click — see [iPhone notes](#iphone--ipad).)
+4. **Destination** — click **Browse** and choose (or create) the folder where your archive should live, for example `D:\Photos`.
+5. **Transfer Mode** — leave it on **Backup (Copy)**. Your originals stay untouched; Transfera only reads them. (Choose **Space Saver (Move)** only if you want the originals deleted after a verified copy.)
+6. Press **Start**. The **Transfer** page shows live progress, speed, and thumbnails as each file lands.
+7. When it finishes, open the **Library** page: your archive, searchable, with Timeline, Moments, Duplicates, and Trash sections.
 
-1. Ensure the development virtual environment has been created (run `python run.py` at least once first).
-2. To build the **Portable ZIP**:
-   ```powershell
-   cd frontend
-   npm run electron:build:dir
-   ```
-   Compress the resulting directory `frontend/release/win-unpacked/` into a `.zip` archive.
+Your archive is organized automatically into folders by date, like `D:\Photos\2026\09-September\photo.jpg`.
 
-3. To build the **Self-Signed Installer**:
-   - Generate a release certificate (run once as Administrator):
-     ```powershell
-     cd frontend
-     .\scripts\generate-release-cert.ps1
-     ```
-   - Compile and sign the setup installer:
-     ```powershell
-     $env:CSC_LINK = "release-certs\transfera-release.pfx"
-     $env:CSC_KEY_PASSWORD = "transfera-release-pwd"
-     npm run electron:build
-     ```
-   - Package `Transfera-Setup-[version].exe` together with `release-certs/transfera-release.cer` and `scripts/trust-and-install.bat`.
+### Everyday answers
 
-
-
+- **Where are my files?** Exactly where you pointed Destination — plain JPG/MP4 files in date folders. You can open them with any app, even if you delete Transfera.
+- **Is anything uploaded?** No. Transfera has no servers. The only internet it ever uses is downloading helper tools (photo-metadata reader, AI search model) once, with your permission.
+- **What if I unplug mid-transfer?** Plug back in and press Start again — finished files are skipped, interrupted ones resume. Nothing half-written ever lands in your archive.
+- **I pressed the wrong thing — are my originals safe?** Yes, in Copy mode Transfera never writes to, moves, or deletes your source files. Move mode deletes originals only after each file is verified twice.
+- **I deleted something in the Library?** It goes to **Trash** first. Emptying Trash permanently deletes those archive copies (your originals elsewhere are never touched).
+- **How do I search?** Type in the Library search box. Press **Get AI models** once (~210 MB, one time) and search understands content too — try "sunset" or "dog".
+- **How do I update?** Download the new release and run it over the old one. Your library, sessions, and settings are kept.
 
 ---
 
-## Project Structure
+## iPhone & iPad
 
-```
-Transfera/
-│
-├── run.py                            # ← Start here. One-command orchestrator.
-│
-├── backend/                          # Python 3.12 · FastAPI · SQLAlchemy · SQLite
-│   ├── main.py                       # App entrypoint, lifespan, startup hooks
-│   ├── config.py                     # Ports, paths, media extensions
-│   ├── requirements.txt              # Python dependencies
-│   │
-│   ├── api/
-│   │   ├── routes.py                 # All HTTP endpoints (health, sessions, media, thumbnails)
-│   │   ├── schemas.py                # Pydantic request/response models
-│   │   ├── websocket.py              # WebSocket manager with 15-event protocol + keepalive
-│   │   ├── device_preview.py         # Source folder browsing endpoint
-│   │   └── tier2_routes.py           # WSL2 bridge routes (Tier 2 iOS backend)
-│   │
-│   ├── database/
-│   │   ├── manager.py                # Async SQLAlchemy engine (WAL mode, FK pragmas)
-│   │   ├── models.py                 # MediaItem, TransferSession, TransferBatch ORM models
-│   │   └── migrations.py             # Schema migration runner (21 migrations)
-│   │
-│   ├── engines/
-│   │   ├── scanner.py                # Recursive walker + Live Photo HEIC/MOV grouping
-│   │   ├── cache_manager.py          # Hop 1: source → cache (streaming BLAKE3, .partial)
-│   │   ├── importer.py               # Hop 2: cache → archive (re-verify, atomic rename)
-│   │   ├── batch_manager.py          # 100-file batch chunking and status tracking
-│   │   ├── duplicate_detector.py     # Exact (hash) + potential (metadata) duplicate detection
-│   │   ├── metadata_extractor.py     # ExifTool stay-open session + filesystem fallback
-│   │   ├── organizer.py              # Archive path resolution (YYYY/MM/DD layouts)
-│   │   ├── recovery.py               # Crash recovery for interrupted LOADING/ARCHIVED batches
-│   │   ├── reporter.py               # JSON + HTML transfer reports
-│   │   ├── thumbnailer.py            # JPEG thumbnail generation (ExifTool/Pillow/ffmpeg)
-│   │   ├── thumbnail_cache.py        # Bounded in-memory LRU thumbnail cache (50 MB cap)
-│   │   └── thumbnail_ops.py          # Thumbnail DB status helpers
-│   │
-│   ├── utils/
-│   │   └── hashing.py                # BLAKE3 / SHA-256 streaming hash implementation
-│   │
-│   ├── bin/                          # Auto-managed binaries (git-ignored)
-│   │   ├── exiftool/                 # ExifTool binary (auto-downloaded on first run)
-│   │   └── wpd_helper.exe            # Native WPD device helper (auto-built if MSVC present)
-│   │
-│   ├── data/                         # Runtime data (git-ignored)
-│   │   ├── db/                       # transfera.db — SQLite database
-│   │   ├── cache/                    # Hop 1 staging area (.partial files)
-│   │   ├── exports/                  # Generated session reports (JSON + HTML)
-│   │   └── logs/                     # Application logs
-│   │
-│   └── tests/                        # pytest suite (16 modules, ~200 tests)
-│
-├── frontend/                         # Electron · React 18 · Vite · TypeScript · Tailwind
-│   ├── electron/
-│   │   ├── main.ts                   # Electron main process (IPC, tray, native notifications)
-│   │   └── preload.ts                # Secure contextBridge IPC surface
-│   │
-│   └── src/
-│       ├── App.tsx                   # App shell: sidebar, router, toast, error boundaries
-│       ├── pages/
-│       │   ├── DashboardPage.tsx     # Session history, statistics, device status
-│       │   ├── DeviceSetupPage.tsx   # Source/destination picker, preflight validation
-│       │   ├── TransferPage.tsx      # Live transfer monitor with WebSocket + polling
-│       │   └── LibraryPage.tsx       # Masonry/list/history browser with infinite scroll
-│       ├── store/
-│       │   └── transfer.ts           # Zustand store — 15-event WebSocket reducer
-│       ├── lib/
-│       │   ├── queries.ts            # TanStack Query hooks for all API endpoints
-│       │   ├── api-client.ts         # Axios instance with local auth token
-│       │   └── thumbnail-fetch.ts    # Thumbnail fetch with negative-cache deduplication
-│       └── hooks/
-│           └── use-transfer-ws.ts    # WebSocket connection lifecycle hook
-│
-├── native/
-│   └── wpd_helper/
-│       ├── wpd_helper.cpp            # WPD COM API device driver (Windows Portable Devices)
-│       └── build.bat                 # MSVC build script (vswhere auto-discovery)
-│
-└── .github/
-    └── workflows/ci.yml              # CI: backend pytest + frontend typecheck + lint
-```
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Desktop shell | Electron 33 |
-| Frontend | React 18, TypeScript, Vite 6, Tailwind CSS 4 |
-| State management | Zustand 5 (persisted preferences), TanStack Query 5 |
-| Backend | Python 3.12, FastAPI, Uvicorn |
-| Database | SQLite (via SQLAlchemy 2 async + aiosqlite), WAL mode |
-| Hashing | BLAKE3 (primary), SHA-256 (fallback) |
-| Metadata | ExifTool (stay-open session), Pillow, pillow-heif |
-| iOS/WPD | Windows Portable Devices COM API (native C++), pymobiledevice3 |
-| Real-time | WebSocket (15-event protocol), REST polling fallback |
+- **Easiest path:** USB cable + unlock + Trust. Transfera reads your Camera Roll directly — no iTunes needed.
+- If Windows is missing Apple's free driver, Transfera shows an **Install Driver** card on the Dashboard. One click installs it via winget (Windows may ask for admin permission once).
+- No driver and no admin rights? Transfera automatically falls back to its built-in open-source bridge (WSL2 + usbipd) where available, and plain folder backup always works regardless.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Resolution |
-|---------|------------|
-| `Python 3.12 not found` | Ensure Python 3.12 is installed and `python --version` returns `3.12.x`. The `py -3.12` launcher is also probed automatically. |
-| `Port 47821 already in use` | A previous run may not have shut down cleanly. The orchestrator auto-sweeps stray processes on startup; if it still fails, kill the process occupying the port manually. |
-| `npm install` permission error | Run your terminal as Administrator (right-click → Run as administrator). |
-| iPhone not detected | Ensure MSVC is installed and `npm run build:native` has completed (look for `wpd_helper.exe` in `backend/bin/`). Trust the computer on your iPhone when prompted. |
-| ExifTool not found | First-run auto-bootstrap handles this. If it fails, check internet connectivity; ExifTool is downloaded from `exiftool.org` on first launch. |
-| `wpd_helper build failed: LNK1104` | The `.exe` is locked by a running Transfera backend. Fully close the app (`Ctrl+C` in the terminal) and retry. |
+| What you see | What to do |
+|---|---|
+| App window is blank / won't open | Close it fully, wait 10 seconds, open again. Still stuck? Delete `%APPDATA%\Transfera` session files and relaunch. |
+| iPhone not listed | Use a data cable (some cables charge only), unlock the phone, tap **Trust**, unplug and replug. Then check the Dashboard driver card. |
+| A transfer paused with "duplicates found" | Transfera thinks some files are already archived. Open the popup, choose **Skip** (don't copy again), **Keep both**, or **Overwrite** per file, then Resume. |
+| "Session ... is not paused" after resolving | Just press Start/Resume once more — resolving already restarted the transfer in the background. |
+| Search finds nothing | Filenames only match by default. Press **Get AI models** in the Library header, wait for the download, press **Index library**, then search again. |
+| Antivirus flags a file | Add the Transfera folder to your antivirus exclusions — freshly built helper programs sometimes trip heuristics. |
+| Something looks broken | The log file `backend\data\logs\transfera.log` (next to the app) records what happened — attach it when asking for help. |
 
 ---
 
-## Environment Variables & Logs
+## For developers (building from source)
 
-The backend has no dotenv loader — these are read via plain `os.environ` / `process.env` (see `.env.example` for a template):
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `TRANSFERA_DATA_DIR` | `backend/data/` | Override the runtime data directory (DB, cache, exports, logs). |
-| `TRANSFERA_LOG_LEVEL` | `INFO` | Backend log level (e.g. `DEBUG`, `WARNING`). |
-| `TRANSFERA_EXTERNAL_BACKEND` | unset | Set to `1` when Electron should NOT spawn its own backend (`run.py --frontend` / `npm run electron:dev` sets this automatically). |
-
-Application logs are written to `backend/data/logs/transfera.log` (or `<TRANSFERA_DATA_DIR>/logs/transfera.log` when the data dir is overridden).
-
-### Offline first-launch limitation
-
-The first launch is **not fully offline**: the orchestrator downloads Python packages from PyPI (`pip install -r backend/requirements.txt`), `npm install` fetches frontend dependencies, and the backend auto-bootstraps ExifTool from `exiftool.org`. The portable-packaging helper (`frontend/scripts/build-portable-python.cjs`, output in `frontend/python-bin/`, git-ignored) likewise downloads an embeddable Python from `python.org`. Run the first launch (or the portable-Python build) on a connected machine; subsequent runs work offline. Backend test files (`backend/tests/`) are excluded from the packaged installer.
-
----
-
-## Running Tests
+You need just two tools installed first (everything else — Python packages, npm packages, ExifTool, the device helper — sets itself up on first launch):
 
 ```powershell
-cd backend
-.venv\Scripts\python -m pytest tests/ -v
+winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS.LTS
 ```
 
-The test suite covers pipeline integrity, crash recovery, schema migrations, organiser logic, duplicate detection, and API endpoint smoke tests.
+Then:
+
+```powershell
+git clone https://github.com/R1sh1m/Transfera.git
+cd Transfera
+python run.py              # full app (backend + Electron window)
+```
+
+| Command | What it does |
+|---|---|
+| `python run.py` | Start everything (recommended) |
+| `python run.py --backend` | API only, on `http://127.0.0.1:47821` |
+| `python run.py --frontend` | Electron + Vite dev shell only |
+| `python run.py --skip-deps` | Skip setup checks (fast relaunch) |
+
+First launch takes 2–4 minutes (creates `.venv`, installs packages, builds the frontend, downloads ExifTool). Later launches skip finished steps. Press **Ctrl+C** to stop everything cleanly.
+
+Building the iPhone helper from source additionally needs MSVC (Visual Studio 2022 Build Tools with the C++ workload) — without it, folder backup still works fully; only iPhone/WPD detection stays unavailable.
+
+### Checks before you commit or release
+
+```powershell
+.venv\Scripts\python -m pytest backend/tests/ -q   # backend suite
+.venv\Scripts\python -m ruff check backend/        # backend lint
+cd frontend && npm run typecheck                    # frontend types
+```
+
+Keep `frontend/package.json`, `pyproject.toml`, and `winget/Transfera.Transfera.yaml` on the same version — the release workflow enforces `v<that-version>` tags against all three.
+
+### How it works (60 seconds)
+
+Every file travels in two verified hops: **source → staging cache** (streamed copy + BLAKE3 hash, kept as `.partial` until the hash matches), then **cache → archive** (hash re-verified, atomic move into `YYYY/MM/DD`, source deleted only in Move mode after verification). Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. On-board AI (MobileCLIP, ONNX, CPU) is optional and downloads once on request.
+
+```
+Transfera/
+├── run.py                 # one-command orchestrator — start here
+├── backend/               # Python 3.12 + FastAPI + SQLite (WAL)
+│   ├── api/               # REST routes, WebSocket, auth, device preview
+│   ├── database/          # models, async engine, migrations
+│   ├── engines/           # scanner, cache, importer, duplicates, EXIF,
+│   │                      # thumbnails, CLIP, organizer, recovery, reports
+│   ├── requirements.txt   # backend deps (incl. onnxruntime for AI search)
+│   ├── data/              # runtime DB, cache, exports, logs, models (ignored)
+│   └── tests/             # pytest suite (isolated temp DBs — never touches yours)
+├── frontend/              # Electron 33 + React 18 + Vite + TypeScript + Tailwind
+│   ├── electron/          # main process, preload IPC
+│   └── src/pages/         # Dashboard, DeviceSetup, Transfer, Library
+├── native/wpd_helper/     # C++ WPD helper source + build.bat
+└── .github/workflows/     # ci.yml (tests/typecheck/lint) + release.yml (build+sign)
+```
 
 ---
 
 ## License
 
-**AGPL-3.0-or-later** — see [LICENSE](LICENSE) for full terms. Free for personal, academic,
-and commercial *use*; anyone who copies, modifies, or re-hosts Transfera (including as a
-network service) must preserve Rishi Misra's copyright notice, state their changes, and
-share their modified source under the same terms. The "Transfera" name and artwork are
-reserved trademarks of the author.
+**AGPL-3.0-or-later** — see [LICENSE](LICENSE). Free for personal, academic, and commercial *use*; if you modify or re-host Transfera (including as a network service), keep Rishi Misra's copyright notice, state your changes, and share your modified source under the same terms. The "Transfera" name and artwork are reserved.
 
 Copyright © 2026 Rishi Misra

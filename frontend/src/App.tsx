@@ -150,6 +150,62 @@ function NotificationToast() {
 }
 
 // ---------------------------------------------------------------------------
+// Window Controls (min / max / close) — shared by the TitleBar and every
+// fullscreen overlay (first-time setup, starting, backend-down), because the
+// frameless window otherwise leaves those screens with no way to move,
+// minimize, or close the app. Rendered only under Electron; the overlays
+// reuse this single component so controls are never duplicated.
+// ---------------------------------------------------------------------------
+function WindowControls() {
+  if (!isElectron) return null;
+  return (
+    <div className="no-drag flex items-center gap-1">
+      <button
+        onClick={() => window.electronAPI?.minimizeWindow()}
+        title="Minimize to Tray"
+        className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
+      >
+        <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor">
+          <rect width="10" height="1" />
+        </svg>
+      </button>
+      <button
+        onClick={() => window.electronAPI?.maximizeWindow()}
+        title="Maximize"
+        className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1"
+        >
+          <rect x="0.5" y="0.5" width="9" height="9" />
+        </svg>
+      </button>
+      <button
+        onClick={() => window.electronAPI?.closeWindow()}
+        title="Close"
+        className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        >
+          <path d="M1 1L9 9M9 1L1 9" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Title Bar
 // ---------------------------------------------------------------------------
 function TitleBar() {
@@ -161,50 +217,7 @@ function TitleBar() {
         </div>
         <span className="text-sm font-semibold text-foreground">Transfera</span>
       </div>
-      {isElectron && (
-        <div className="no-drag flex items-center gap-1">
-          <button
-            onClick={() => window.electronAPI?.minimizeWindow()}
-            title="Minimize to Tray"
-            className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
-          >
-            <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor">
-              <rect width="10" height="1" />
-            </svg>
-          </button>
-          <button
-            onClick={() => window.electronAPI?.maximizeWindow()}
-            className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
-          >
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 10 10"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1"
-            >
-              <rect x="0.5" y="0.5" width="9" height="9" />
-            </svg>
-          </button>
-          <button
-            onClick={() => window.electronAPI?.closeWindow()}
-            title="Close"
-            className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
-          >
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 10 10"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-            >
-              <path d="M1 1L9 9M9 1L1 9" />
-            </svg>
-          </button>
-        </div>
-      )}
+      <WindowControls />
     </div>
   );
 }
@@ -366,8 +379,11 @@ function BackendDownScreen() {
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        className="fixed inset-0 z-100 bg-background flex items-center justify-center"
+        className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
       >
+        <div className="absolute top-3 right-3">
+          <WindowControls />
+        </div>
         <div className="text-center space-y-4 max-w-sm mx-auto px-6">
           <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
@@ -438,8 +454,11 @@ function BackendDownScreen() {
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        className="fixed inset-0 z-100 bg-background flex items-center justify-center"
+        className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
       >
+        <div className="absolute top-3 right-3">
+          <WindowControls />
+        </div>
         <div className="text-center space-y-6 max-w-md mx-auto px-6">
           <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
             <RefreshCw
@@ -469,7 +488,7 @@ function BackendDownScreen() {
                 />
               </div>
               <div className="flex justify-between items-center text-xs text-muted-foreground">
-                <span className="truncate max-w-[80%] font-medium">
+                <span className="truncate max-w-[80%] font-semibold">
                   {installProgress.step}
                 </span>
                 <span className="font-mono">{installProgress.percent}%</span>
@@ -508,8 +527,11 @@ function BackendDownScreen() {
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className="fixed inset-0 z-100 bg-background flex items-center justify-center"
+      className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
     >
+      <div className="absolute top-3 right-3">
+        <WindowControls />
+      </div>
       <div className="text-center space-y-4 max-w-sm mx-auto px-6">
         <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mx-auto">
           <ServerCrash className="w-8 h-8 text-red-500" />
@@ -524,7 +546,7 @@ function BackendDownScreen() {
         <button
           onClick={handleRetry}
           disabled={retrying}
-          className="no-drag inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+          className="no-drag inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-pill text-sm font-normal hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
         >
           <RefreshCw className={cn("w-4 h-4", retrying && "animate-spin")} />
           {retrying ? "Retrying..." : "Retry Connection"}

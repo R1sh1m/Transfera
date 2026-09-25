@@ -744,6 +744,16 @@ def extract_metadata(file_path: str | Path) -> FileMetadata:
         raise FileNotFoundError(f"No such file: {path}")
 
     if _bootstrap_exiftool():
+        # Prefer the persistent stay-open session: one ~15 ms round-trip
+        # instead of a ~500 ms process spawn per file on Windows. The
+        # one-shot subprocess remains as fallback (session dead), then
+        # filesystem timestamps.
+        try:
+            via_session = _exiftool_session.extract_batch([path]).get(str(path))
+            if via_session is not None:
+                return via_session
+        except Exception:
+            pass
         return _extract_via_exiftool(path)
     return _extract_via_filesystem(path)
 

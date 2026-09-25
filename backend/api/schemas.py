@@ -336,6 +336,7 @@ class BackfillResponse(BaseModel):
     phash_filled: int = 0
     dims_filled: int = 0
     tags_filled: int = 0
+    embeddings_filled: int = 0
     message: str = ""
 
 

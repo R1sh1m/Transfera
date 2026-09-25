@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 THUMBNAIL_MAX_SIZE = 400  # longest edge in pixels
-THUMBNAIL_QUALITY = 82   # JPEG quality for generated thumbnails
+THUMBNAIL_QUALITY = 82  # JPEG quality for generated thumbnails
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +43,7 @@ try:
 
     try:
         import pillow_heif
+
         pillow_heif.register_heif_opener()
         _PILLOW_HEIF_READY = True
     except ImportError:
@@ -73,6 +74,7 @@ def _find_ffmpeg() -> str | None:
 _RAWPY_READY = False
 try:
     import rawpy  # type: ignore # noqa: F401
+
     _RAWPY_READY = True
 except ImportError:
     pass
@@ -81,27 +83,64 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Image extension sets
 # ---------------------------------------------------------------------------
-_IMAGE_EXTENSIONS = frozenset({
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp",
-    ".tiff", ".tif", ".webp", ".heic", ".heif",
-    ".svg", ".ico", ".cr2", ".cr3", ".nef",
-    ".arw", ".dng", ".orf", ".rw2", ".raw",
-})
+_IMAGE_EXTENSIONS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".heic",
+        ".heif",
+        ".svg",
+        ".ico",
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".arw",
+        ".dng",
+        ".orf",
+        ".rw2",
+        ".raw",
+    }
+)
 
-_VIDEO_EXTENSIONS = frozenset({
-    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v",
-    ".3gp", ".wmv", ".flv", ".mpg", ".mpeg",
-})
+_VIDEO_EXTENSIONS = frozenset(
+    {
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".webm",
+        ".m4v",
+        ".3gp",
+        ".wmv",
+        ".flv",
+        ".mpg",
+        ".mpeg",
+    }
+)
 
 # Formats that structurally cannot contain an embedded JPEG thumbnail in EXIF
 # metadata. Running ExifTool's -ThumbnailImage on these is guaranteed to return
 # nothing, so we skip that subprocess entirely for a significant speed win.
 # JPEG, HEIC, CR2/CR3, NEF, ARW, DNG — these CAN have embedded thumbnails.
 # PNG, BMP, GIF, WebP, TIFF, SVG, ICO — these cannot.
-_NO_EMBEDDED_THUMB_EXTS = frozenset({
-    ".png", ".bmp", ".gif", ".webp",
-    ".tiff", ".tif", ".svg", ".ico",
-})
+_NO_EMBEDDED_THUMB_EXTS = frozenset(
+    {
+        ".png",
+        ".bmp",
+        ".gif",
+        ".webp",
+        ".tiff",
+        ".tif",
+        ".svg",
+        ".ico",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +167,8 @@ def _extract_embedded_thumbnail(file_path: Path) -> bytes | None:
                 exe,
                 "-b",
                 "-ThumbnailImage",
-                "-Charset", "utf8",
+                "-Charset",
+                "utf8",
                 str(file_path),
             ],
             capture_output=True,
@@ -218,8 +258,10 @@ def _generate_video_thumbnail(file_path: Path) -> bytes | None:
             duration_result = subprocess.run(
                 [
                     ffmpeg,
-                    "-i", str(file_path),
-                    "-f", "null",
+                    "-i",
+                    str(file_path),
+                    "-f",
+                    "null",
                     "-",
                 ],
                 capture_output=True,
@@ -242,12 +284,18 @@ def _generate_video_thumbnail(file_path: Path) -> bytes | None:
             result = subprocess.run(
                 [
                     ffmpeg,
-                    "-ss", seek_time,
-                    "-i", str(file_path),
-                    "-vframes", "1",
-                    "-vf", f"scale={THUMBNAIL_MAX_SIZE}:{THUMBNAIL_MAX_SIZE}:force_original_aspect_ratio=decrease",
-                    "-f", "mjpeg",
-                    "-q:v", "3",
+                    "-ss",
+                    seek_time,
+                    "-i",
+                    str(file_path),
+                    "-vframes",
+                    "1",
+                    "-vf",
+                    f"scale={THUMBNAIL_MAX_SIZE}:{THUMBNAIL_MAX_SIZE}:force_original_aspect_ratio=decrease",
+                    "-f",
+                    "mjpeg",
+                    "-q:v",
+                    "3",
                     "-",
                 ],
                 capture_output=True,
@@ -283,6 +331,7 @@ def _generate_raw_thumbnail(file_path: Path) -> bytes | None:
 
     try:
         import rawpy  # type: ignore
+
         with rawpy.imread(str(file_path)) as raw:
             rgb = raw.postprocess(
                 use_camera_wb=True,
@@ -291,6 +340,7 @@ def _generate_raw_thumbnail(file_path: Path) -> bytes | None:
                 output_bps=8,
             )
         from PIL import Image as _PilImage
+
         img = _PilImage.fromarray(rgb)
         img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), _LANCZOS)
         if img.mode != "RGB":
@@ -313,10 +363,14 @@ def generate_thumbnail_bytes(source_path: Path) -> bytes | None:
     Returns raw JPEG bytes on success, None on failure.
     Never writes to disk.
 
-    Strategy:
-    1. For formats with EXIF support (JPEG, HEIC, RAW): try embedded thumbnail
-       extraction first (fast) — skipped for formats that can't have them.
-    2. Full Pillow decode + resize (works for all raster formats).
+    Strategy (ordered by measured cost on Windows, where each ExifTool
+    subprocess spawn costs ~500 ms):
+    1. In-process Pillow decode + resize (no spawn; higher quality 512px
+       output than typical 160px embedded previews). For very large files
+       (>25 MB, e.g. panoramas) the embedded EXIF preview is tried first
+       to avoid a huge transient decode.
+    2. Embedded EXIF thumbnail via ExifTool (covers RAW-ish containers
+       Pillow cannot decode) — skipped for formats that can't have one.
     3. ffmpeg frame extraction for video files.
     4. rawpy for RAW camera files.
     """
@@ -326,28 +380,44 @@ def generate_thumbnail_bytes(source_path: Path) -> bytes | None:
 
     ext = path.suffix.lower()
 
+    def _try_embedded() -> bytes | None:
+        if ext in _NO_EMBEDDED_THUMB_EXTS:
+            return None
+        embedded = _extract_embedded_thumbnail(path)
+        if embedded:
+            try:
+                from PIL import Image as _TestImg
+
+                test = _TestImg.open(io.BytesIO(embedded))
+                test.verify()
+                return embedded
+            except Exception:
+                pass
+        return None
+
     if ext in _IMAGE_EXTENSIONS:
         if ext in (".heic", ".heif") and not _PILLOW_HEIF_READY:
             return None
 
-        # Embedded thumbnail fast path — only for formats that can have one.
-        # Skipping PNG/BMP/GIF/WebP eliminates hundreds of wasted ExifTool
-        # subprocesses when processing screenshot folders.
-        if ext not in _NO_EMBEDDED_THUMB_EXTS:
-            embedded = _extract_embedded_thumbnail(path)
+        # Huge files: embedded preview first to bound decode memory.
+        try:
+            huge = path.stat().st_size > 25 * 1024 * 1024
+        except OSError:
+            huge = False
+        if huge:
+            embedded = _try_embedded()
             if embedded:
-                try:
-                    from PIL import Image as _TestImg
-                    test = _TestImg.open(io.BytesIO(embedded))
-                    test.verify()
-                    return embedded
-                except Exception:
-                    pass
+                return embedded
 
         if _PILLOW_READY:
             result = _generate_image_thumbnail(path)
             if result:
                 return result
+
+        if not huge:
+            embedded = _try_embedded()
+            if embedded:
+                return embedded
 
     if ext in _VIDEO_EXTENSIONS:
         result = _generate_video_thumbnail(path)

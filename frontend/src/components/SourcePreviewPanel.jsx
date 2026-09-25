@@ -334,7 +334,7 @@ function SourcePreviewFallback({ onRetry }) {
           <AlertTriangle className="w-5 h-5 text-destructive" />
         </div>
         <div>
-          <p className="text-sm font-medium text-foreground">
+          <p className="text-sm font-semibold text-foreground">
             Preview unavailable
           </p>
           <p className="text-xs text-muted-foreground mt-1">
@@ -345,7 +345,7 @@ function SourcePreviewFallback({ onRetry }) {
         <button
           type="button"
           onClick={onRetry}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:bg-primary/90 transition-colors"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-normal hover:bg-primary/90 transition-colors"
         >
           <RefreshCw className="w-3.5 h-3.5" />
           Retry
@@ -639,7 +639,7 @@ function SourcePreviewPanelInner({
       {/* Header bar */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-foreground">
+          <span className="text-xs font-normal text-foreground">
             Source preview
           </span>
           {!loading && (
@@ -654,7 +654,7 @@ function SourcePreviewPanelInner({
             <button
               type="button"
               onClick={handleSelectAll}
-              className="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
+              className="text-xs font-normal text-primary hover:text-primary/80 transition-colors"
             >
               {allVisibleSelected ? "Deselect all" : "Select all"}
             </button>
@@ -675,7 +675,7 @@ function SourcePreviewPanelInner({
                 aria-selected={filter === f}
                 onClick={() => setFilter(f)}
                 className={cn(
-                  "px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors",
+                  "px-2.5 py-1 rounded-full text-[11px] font-normal transition-colors",
                   filter === f
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted text-muted-foreground hover:bg-muted/80",
@@ -810,7 +810,7 @@ function SourcePreviewPanelInner({
         <button
           type="button"
           onClick={() => setPage((p) => p + 1)}
-          className="w-full py-2 text-xs font-medium text-primary hover:text-primary/80 transition-colors border border-border rounded-lg"
+          className="w-full py-2 text-xs font-normal text-primary hover:text-primary/80 transition-colors border border-border rounded-lg"
         >
           Load more ({metadata.total - items.length} remaining)
         </button>
@@ -819,7 +819,7 @@ function SourcePreviewPanelInner({
       {/* Bottom action bar */}
       <div className="flex items-center justify-between pt-1">
         <div>
-          <p className="text-xs font-medium text-foreground">
+          <p className="text-xs font-normal text-foreground">
             {selectedCount > 0 ? `${selectedCount} selected` : "0 selected"}
           </p>
           <p className="text-xs text-muted-foreground">
@@ -837,7 +837,7 @@ function SourcePreviewPanelInner({
           }}
           disabled={selectedCount === 0}
           className={cn(
-            "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-normal transition-all",
             selectedCount > 0
               ? "bg-action text-white hover:bg-action/90 active:scale-[0.95]"
               : "bg-muted text-muted-foreground cursor-default opacity-40",

@@ -4,33 +4,37 @@
 // take down the entire app shell (sidebar, titlebar, etc.).
 // ---------------------------------------------------------------------------
 
-import { Component, type ReactNode } from 'react'
-import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { Component, type ReactNode } from "react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 
 interface Props {
-  pageName: string
-  children: ReactNode
+  pageName: string;
+  children: ReactNode;
 }
 
 interface State {
-  hasError: boolean
-  error: Error | null
+  hasError: boolean;
+  error: Error | null;
 }
 
 export default class PageErrorBoundary extends Component<Props, State> {
-  state: State = { hasError: false, error: null }
+  state: State = { hasError: false, error: null };
 
   static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error }
+    return { hasError: true, error };
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error(`[PageErrorBoundary: ${this.props.pageName}]`, error, info.componentStack)
+    console.error(
+      `[PageErrorBoundary: ${this.props.pageName}]`,
+      error,
+      info.componentStack,
+    );
   }
 
   handleReset = () => {
-    this.setState({ hasError: false, error: null })
-  }
+    this.setState({ hasError: false, error: null });
+  };
 
   render() {
     if (this.state.hasError) {
@@ -55,23 +59,23 @@ export default class PageErrorBoundary extends Component<Props, State> {
                 </summary>
                 <pre className="mt-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded p-3 overflow-auto max-h-40">
                   {this.state.error.message}
-                  {'\n'}
+                  {"\n"}
                   {this.state.error.stack}
                 </pre>
               </details>
             )}
             <button
               onClick={this.handleReset}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
             >
               <RefreshCw className="w-4 h-4" />
               Try Again
             </button>
           </div>
         </div>
-      )
+      );
     }
 
-    return this.props.children
+    return this.props.children;
   }
 }

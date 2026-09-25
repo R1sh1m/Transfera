@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { useTransferStore } from "@/store/transfer";
 import { useResolveDuplicates } from "@/lib/queries";
-import { fetchThumbnail } from "@/lib/thumbnail-fetch";
+import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
 import { cn, parseBackendDate } from "@/lib/utils";
 import type { DuplicateAction, DuplicateEntry } from "@/types/api";
 
@@ -117,7 +117,7 @@ function ActionButton({
     <button
       onClick={onClick}
       className={cn(
-        "no-drag inline-flex items-center gap-1.5 rounded-md font-medium transition-colors border",
+        "no-drag inline-flex items-center gap-1.5 rounded-md font-normal transition-colors border",
         size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm",
         active
           ? `${c.bg} ${c.color} border-current`
@@ -167,6 +167,7 @@ function ThumbnailImage({
     return () => {
       cancelled = true;
       controller.abort();
+      if (mediaId) revokeThumbnail(mediaId);
     };
   }, [mediaId]);
 
@@ -224,7 +225,7 @@ function DiffBadge({
     <div className="flex items-center gap-1.5 text-[11px]">
       <span className="text-muted-foreground">{label}</span>
       {isDifferent ? (
-        <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 font-medium">
+        <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 font-normal">
           {newval} vs {matched}
         </span>
       ) : (
@@ -280,7 +281,7 @@ function DuplicatePairCard({
           </span>
         </div>
         {isReviewed && (
-          <span className="text-[10px] font-medium text-green-600 dark:text-green-400 flex items-center gap-1">
+          <span className="text-[10px] font-normal text-green-600 dark:text-green-400 flex items-center gap-1">
             <Check className="w-3 h-3" /> Reviewed
           </span>
         )}
@@ -300,7 +301,7 @@ function DuplicatePairCard({
             />
             <div className="flex-1 min-w-0 space-y-1">
               <p
-                className="text-sm font-medium text-foreground truncate"
+                className="text-sm font-semibold text-foreground truncate"
                 title={entry.file_name}
               >
                 {truncateFilename(entry.file_name)}
@@ -342,7 +343,7 @@ function DuplicatePairCard({
             />
             <div className="flex-1 min-w-0 space-y-1">
               <p
-                className="text-sm font-medium text-foreground truncate"
+                className="text-sm font-semibold text-foreground truncate"
                 title={entry.file_name}
               >
                 {truncateFilename(entry.file_name)}
@@ -531,7 +532,7 @@ export default function DuplicateModal() {
 
               {/* Bulk Actions */}
               <div className="px-5 py-3 border-b border-border bg-muted/10 flex items-center gap-3">
-                <span className="text-xs font-medium text-muted-foreground shrink-0">
+                <span className="text-xs font-normal text-muted-foreground shrink-0">
                   Bulk Action:
                 </span>
                 <div className="flex items-center gap-1.5">
@@ -542,7 +543,7 @@ export default function DuplicateModal() {
                       key={action}
                       onClick={() => setActiveBulkAction(action)}
                       className={cn(
-                        "no-drag px-2.5 py-1.5 rounded-md text-xs font-medium border transition-all flex items-center gap-1.5",
+                        "no-drag px-2.5 py-1.5 rounded-md text-xs font-normal border transition-all flex items-center gap-1.5",
                         activeBulkAction === action
                           ? cn(
                               actionConfig[action].bg,
@@ -561,7 +562,7 @@ export default function DuplicateModal() {
                 {activeBulkAction && (
                   <button
                     onClick={handleBulkApply}
-                    className="no-drag ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:bg-primary/90 transition-colors shadow-xs"
+                    className="no-drag ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-normal hover:bg-primary/90 transition-colors"
                   >
                     Apply to All
                   </button>
@@ -634,7 +635,7 @@ export default function DuplicateModal() {
                   <div className="mt-4 flex items-center justify-center">
                     <button
                       onClick={handleApplyToRemaining}
-                      className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-dashed border-muted-foreground/30 text-muted-foreground hover:bg-muted hover:border-muted-foreground/50 transition-colors"
+                      className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-normal border border-dashed border-muted-foreground/30 text-muted-foreground hover:bg-muted hover:border-muted-foreground/50 transition-colors"
                     >
                       <Layers className="w-3 h-3" />
                       Apply "{actionConfig[activeBulkAction].label}" to{" "}
@@ -656,7 +657,7 @@ export default function DuplicateModal() {
                 <div className="flex items-center gap-2">
                   <button
                     onClick={closeDuplicates}
-                    className="no-drag px-4 py-2 bg-secondary text-secondary-foreground rounded-md text-sm font-medium hover:bg-secondary/80 transition-colors"
+                    className="no-drag px-4 py-2 bg-secondary text-secondary-foreground rounded-md text-sm font-normal hover:bg-secondary/80 transition-colors"
                   >
                     Cancel
                   </button>
@@ -664,7 +665,7 @@ export default function DuplicateModal() {
                     onClick={handleConfirm}
                     disabled={!allResolved || resolveDuplicates.isPending}
                     className={cn(
-                      "no-drag inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors",
+                      "no-drag inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-normal transition-colors",
                       allResolved && !resolveDuplicates.isPending
                         ? "bg-primary text-primary-foreground hover:bg-primary/90"
                         : "bg-muted text-muted-foreground cursor-not-allowed",

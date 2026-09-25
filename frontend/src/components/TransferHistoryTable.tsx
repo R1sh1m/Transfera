@@ -125,28 +125,28 @@ export default function TransferHistoryTable() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border">
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Date
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Source
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Destination
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Files
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Size
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Duration
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                 Status
               </th>
-              <th className="text-left text-xs font-medium text-muted-foreground py-2">
+              <th className="text-left text-xs font-normal text-muted-foreground py-2">
                 Failures
               </th>
             </tr>

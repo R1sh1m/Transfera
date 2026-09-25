@@ -130,7 +130,7 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium",
+        "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-normal",
         c.bg,
         c.color,
       )}
@@ -177,7 +177,7 @@ function DirMetricsCard({
           {icon}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium text-foreground">{label}</p>
+          <p className="text-xs font-semibold text-foreground">{label}</p>
           <p
             className="text-[11px] text-muted-foreground truncate"
             title={path ?? undefined}
@@ -187,7 +187,7 @@ function DirMetricsCard({
         </div>
         {sessionName && (
           <span
-            className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]"
+            className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]"
             title={sessionName}
           >
             {sessionName}
@@ -225,7 +225,7 @@ function DirMetricsCard({
               )}
               <span
                 className={cn(
-                  "text-[10px] font-medium",
+                  "text-[10px] font-normal",
                   transferMode === "copy"
                     ? "text-blue-600 dark:text-blue-400"
                     : "text-amber-600 dark:text-amber-400",
@@ -314,7 +314,7 @@ function ResumeAlert() {
                   className="flex items-center justify-between text-xs px-2.5 py-1.5 bg-amber-100/50 dark:bg-amber-900/30 rounded"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <span className="font-medium text-amber-800 dark:text-amber-200 truncate">
+                    <span className="font-semibold text-amber-800 dark:text-amber-200 truncate">
                       {s.session_name}
                     </span>
                     <span
@@ -344,7 +344,7 @@ function ResumeAlert() {
                 });
               }}
               disabled={recovery.isPending}
-              className="no-drag inline-flex items-center gap-1 px-3 py-1.5 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors disabled:opacity-50"
+              className="no-drag inline-flex items-center gap-1 px-3 py-1.5 bg-amber-500 text-white rounded text-xs font-normal hover:bg-amber-600 transition-colors disabled:opacity-50"
             >
               <RefreshCw
                 className={cn("w-3 h-3", recovery.isPending && "animate-spin")}
@@ -404,14 +404,14 @@ function ConfirmDialog({
               <button
                 onClick={onCancel}
                 disabled={loading}
-                className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted disabled:opacity-50"
+                className="px-4 py-2 text-sm font-normal text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={onConfirm}
                 disabled={loading}
-                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+                className="px-4 py-2 text-sm font-normal text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50 inline-flex items-center gap-2"
               >
                 {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                 {confirmLabel}
@@ -443,7 +443,7 @@ function ClearSessionsButton({ sessionCount }: { sessionCount: number }) {
     <>
       <button
         onClick={() => setShowDialog(true)}
-        className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 border border-input rounded-md transition-colors"
+        className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 border border-input rounded-md transition-colors"
         title="Clear session history"
       >
         <Trash2 className="w-3.5 h-3.5" />
@@ -513,7 +513,7 @@ function BackendStatusCard() {
         </div>
       </div>
       {health?.version && (
-        <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+        <span className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
           v{health.version}
         </span>
       )}
@@ -646,7 +646,7 @@ function LastBackupCard({ sessions }: { sessions: SessionInfo[] }) {
                   : "unknown"}
               </span>
               {lastCompleted.failed_items > 0 && (
-                <span className="text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                <span className="text-[10px] font-normal text-amber-600 dark:text-amber-400">
                   {lastCompleted.failed_items} failed
                 </span>
               )}
@@ -690,7 +690,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
       </td>
       <td className="py-2.5 pr-3">
         <p
-          className="text-sm font-medium text-foreground truncate max-w-[180px]"
+          className="text-sm font-semibold text-foreground truncate max-w-[180px]"
           title={session.session_name}
         >
           {session.session_name}
@@ -720,7 +720,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
           </span>
           {session.total_bytes_volume != null &&
             session.total_bytes_volume > 0 && (
-              <span className="text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+              <span className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
                 {formatBytes(session.total_bytes_volume)}
               </span>
             )}
@@ -736,7 +736,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
           {session.status === "paused" && (
             <button
               onClick={handleResume}
-              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-amber-500 text-white rounded text-xs font-medium hover:bg-amber-600 transition-colors"
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-amber-500 text-white rounded text-xs font-normal hover:bg-amber-600 transition-colors"
             >
               <Play className="w-3 h-3" />
               Resume
@@ -748,7 +748,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
             session.session_report_path && (
               <button
                 onClick={handleViewReport}
-                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
+                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
                 title="Open HTML report"
               >
                 <FileText className="w-3 h-3" />
@@ -771,7 +771,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
           ) && (
             <button
               onClick={handleResume}
-              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-medium hover:bg-secondary/80 transition-colors"
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
             >
               <ArrowRight className="w-3 h-3" />
               View
@@ -1184,25 +1184,25 @@ export default function DashboardPage() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-border bg-muted/30">
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 px-4 pr-3 w-[100px]">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 px-4 pr-3 w-[100px]">
                     Status
                   </th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[180px]">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3 w-[180px]">
                     Session
                   </th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                     Source
                   </th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3">
                     Destination
                   </th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[160px]">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3 w-[160px]">
                     Progress
                   </th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 pr-3 w-[90px]">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3 w-[90px]">
                     Date
                   </th>
-                  <th className="text-left text-xs font-medium text-muted-foreground py-2 w-[120px]">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 w-[120px]">
                     Actions
                   </th>
                 </tr>

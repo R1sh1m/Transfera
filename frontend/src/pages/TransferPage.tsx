@@ -7,7 +7,7 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import type { ThumbQueue } from "@/lib/thumb-queue";
 import { createThumbQueue } from "@/lib/thumb-queue";
-import { fetchThumbnail } from "@/lib/thumbnail-fetch";
+import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Play,
@@ -262,6 +262,7 @@ function PreviewThumbnail({
     return () => {
       cancelled = true;
       controller.abort();
+      if (itemId) revokeThumbnail(itemId);
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
         timeoutRef.current = null;
@@ -582,7 +583,7 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
         <div>
           <div className="flex justify-between text-xs text-muted-foreground mb-1">
             <span>Overall Progress</span>
-            <span className="font-medium text-foreground">{displayPct}%</span>
+            <span className="font-semibold text-foreground">{displayPct}%</span>
           </div>
           <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
             <motion.div
@@ -627,7 +628,7 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           />
         ) : (
           <div className="p-3 bg-muted/50 rounded-md">
-            <p className="text-xs font-medium text-foreground">{phaseText}</p>
+            <p className="text-xs font-normal text-foreground">{phaseText}</p>
             {transfer.currentFileName && (
               <p className="text-[11px] text-muted-foreground mt-1 truncate">
                 {transfer.currentFileName}
@@ -641,7 +642,7 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           <div className="space-y-3">
             <div className="p-3 bg-muted/50 rounded-md">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-foreground">
+                <span className="text-xs font-normal text-foreground">
                   Hop 1: Source {"->"} Cache
                 </span>
                 <span className="text-xs text-muted-foreground">
@@ -658,7 +659,7 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
 
             <div className="p-3 bg-muted/50 rounded-md">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-foreground">
+                <span className="text-xs font-normal text-foreground">
                   Hop 2: Cache {"->"} Archive
                 </span>
                 <span className="text-xs text-muted-foreground">
@@ -729,7 +730,9 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
         {/* Batch List */}
         {batches && batches.batches.length > 0 && (
           <div>
-            <p className="text-xs font-medium text-foreground mb-2">Batches</p>
+            <p className="text-xs font-semibold text-foreground mb-2">
+              Batches
+            </p>
             <div className="space-y-1.5">
               {batches.batches.map((b) => (
                 <div
@@ -1048,7 +1051,7 @@ export default function TransferPage() {
             <button
               onClick={handleStart}
               disabled={startSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
             >
               {startSession.isPending ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -1064,7 +1067,7 @@ export default function TransferPage() {
             <button
               onClick={handlePause}
               disabled={pauseSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-amber-500 text-white rounded-md text-sm font-medium hover:bg-amber-600 transition-colors"
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-amber-500 text-white rounded-md text-sm font-normal hover:bg-amber-600 transition-colors"
             >
               <Pause className="w-4 h-4" />
               Pause
@@ -1074,7 +1077,7 @@ export default function TransferPage() {
             <button
               onClick={handleStart}
               disabled={startSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
             >
               {startSession.isPending ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -1091,7 +1094,7 @@ export default function TransferPage() {
               onClick={handleCancel}
               disabled={cancelSession.isPending}
               className={cn(
-                "no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors",
+                "no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-normal transition-colors",
                 confirmCancel
                   ? "bg-red-600 text-white hover:bg-red-700"
                   : "bg-destructive text-destructive-foreground hover:bg-destructive/90",
@@ -1104,7 +1107,7 @@ export default function TransferPage() {
           {isFinished && (
             <button
               onClick={() => setCurrentPage("library")}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
             >
               View Library
             </button>
@@ -1133,7 +1136,7 @@ export default function TransferPage() {
                       .getState()
                       .openDuplicates(duplicates.report!)
                   }
-                  className="no-drag px-3 py-1 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 transition-colors"
+                  className="no-drag px-3 py-1 bg-amber-600 text-white rounded-md text-xs font-normal hover:bg-amber-700 transition-colors"
                 >
                   Review
                 </button>

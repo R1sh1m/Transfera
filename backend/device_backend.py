@@ -74,6 +74,7 @@ try:
         PasscodeRequiredError,
         UserDeniedPairingError,
     )
+
     _HAS_PYMOBILE_EXC = True
 except ImportError:
     _HAS_PYMOBILE_EXC = False
@@ -272,10 +273,14 @@ class Tier2Backend(DeviceBackend):
             )
         try:
             import aiohttp
-            async with aiohttp.ClientSession() as session, session.get(
-                f"{self._bridge_url}/api/ios-devices",
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
+
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    f"{self._bridge_url}/api/ios-devices",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp,
+            ):
                 if resp.status == 200:
                     return TierProbeResult(tier=self.tier, available=True)
                 return TierProbeResult(
@@ -292,29 +297,36 @@ class Tier2Backend(DeviceBackend):
 
     async def list_devices(self) -> list[IOSDevice]:
         import aiohttp
+
         devices: list[IOSDevice] = []
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                f"{self._bridge_url}/api/ios-devices",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    f"{self._bridge_url}/api/ios-devices",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp,
+            ):
                 if resp.status != 200:
                     body = await resp.text()
                     logger.warning(
                         "Tier2 list_devices: bridge returned %d: %s",
-                        resp.status, body[:200],
+                        resp.status,
+                        body[:200],
                     )
                     return devices
                 data = await resp.json()
                 for d in data.get("devices", []):
-                    devices.append(IOSDevice(
-                        serial=d["serial"],
-                        name=d.get("name", "Unknown"),
-                        model=d.get("model", "iPhone"),
-                        ios_version=d.get("ios_version", "unknown"),
-                        connection_type=d.get("connection_type", "USB"),
-                        status=DeviceStatus(d.get("status", "ready")),
-                    ))
+                    devices.append(
+                        IOSDevice(
+                            serial=d["serial"],
+                            name=d.get("name", "Unknown"),
+                            model=d.get("model", "iPhone"),
+                            ios_version=d.get("ios_version", "unknown"),
+                            connection_type=d.get("connection_type", "USB"),
+                            status=DeviceStatus(d.get("status", "ready")),
+                        )
+                    )
         except aiohttp.ClientError as exc:
             logger.warning("Tier2 list_devices: connection failed: %s", exc)
         except Exception as exc:
@@ -323,11 +335,15 @@ class Tier2Backend(DeviceBackend):
 
     async def browse(self, serial: str, path: str) -> list[DeviceFileInfo]:
         import aiohttp
-        async with aiohttp.ClientSession() as session, session.post(
-            f"{self._bridge_url}/api/ios-devices/browse",
-            json={"serial": serial, "path": path},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
+
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                f"{self._bridge_url}/api/ios-devices/browse",
+                json={"serial": serial, "path": path},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp,
+        ):
             if resp.status != 200:
                 try:
                     body = await resp.json()
@@ -345,49 +361,62 @@ class Tier2Backend(DeviceBackend):
             data = await resp.json()
             return [
                 DeviceFileInfo(
-                    name=e["name"], path=e["path"],
-                    is_dir=e["is_dir"], size=e["size"], mtime=e["mtime"],
+                    name=e["name"],
+                    path=e["path"],
+                    is_dir=e["is_dir"],
+                    size=e["size"],
+                    mtime=e["mtime"],
                 )
                 for e in data.get("entries", [])
             ]
 
     async def file_info(self, serial: str, path: str) -> DeviceFileInfo:
         import aiohttp
-        async with aiohttp.ClientSession() as session, session.post(
-            f"{self._bridge_url}/api/ios-devices/file-info",
-            json={"serial": serial, "path": path},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
+
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                f"{self._bridge_url}/api/ios-devices/file-info",
+                json={"serial": serial, "path": path},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp,
+        ):
             if resp.status != 200:
                 error = await resp.json()
                 raise RuntimeError(error.get("detail", "File info failed"))
             data = await resp.json()
             return DeviceFileInfo(
-                name=data["name"], path=data["path"],
-                is_dir=data["is_dir"], size=data["size"], mtime=data["mtime"],
+                name=data["name"],
+                path=data["path"],
+                is_dir=data["is_dir"],
+                size=data["size"],
+                mtime=data["mtime"],
             )
 
     async def read_file(self, serial: str, path: str) -> bytes:
         import aiohttp
-        async with aiohttp.ClientSession() as session, session.get(
-            f"{self._bridge_url}/api/ios-devices/file/{_url_quote(serial, safe='')}{path}",
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
+
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
+                f"{self._bridge_url}/api/ios-devices/file/{_url_quote(serial, safe='')}{path}",
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp,
+        ):
             if resp.status != 200:
                 try:
                     body = await resp.json()
                     detail = body.get("detail", "")
                 except Exception:
                     detail = (await resp.text())[:200]
-                raise RuntimeError(
-                    f"File read failed (HTTP {resp.status}): {detail}"
-                )
+                raise RuntimeError(f"File read failed (HTTP {resp.status}): {detail}")
             return await resp.read()
 
     def create_file_reader(self, serial: str, path: str) -> Any:  # type: ignore[override]
         if self._bridge_url is not None:
             return _BridgeFileReader(serial, path, self._bridge_url)
         from backend.ios_device import AFCFileReader
+
         return AFCFileReader(serial, path)
 
 
@@ -408,6 +437,7 @@ class _BridgeFileReader:
 
     async def open(self):
         import aiohttp
+
         self._session = aiohttp.ClientSession()
         try:
             self._resp = await self._session.get(
@@ -605,6 +635,7 @@ class DeviceBackendManager:
             if t1_probe.error and "no_driver" in t1_probe.error:
                 try:
                     from backend.ios_driver_installer import check_winget_available_async, verify_package_async
+
                     winget_ok, _ = await check_winget_available_async()
                     if winget_ok:
                         pkg = await verify_package_async()
@@ -625,42 +656,78 @@ class DeviceBackendManager:
             # install it.
             if t1_probe.error and "import_error" in t1_probe.error:
                 import shutil
+
                 pip_path = shutil.which("pip") or shutil.which("pip3")
                 if pip_path:
                     self._pymobiledevice3_installable = True
                     logger.info(
-                        "DeviceBackend: pymobiledevice3 not installed but pip is available "
-                        "at %s", pip_path,
+                        "DeviceBackend: pymobiledevice3 not installed but pip is available at %s",
+                        pip_path,
                     )
+                    # Self-healing: pip installs need no UAC, so attempt a
+                    # silent background install. The tier is re-probed
+                    # afterwards; failure just keeps the manual prompt.
+                    import asyncio as _asyncio
+                    import sys as _sys
+
+                    async def _self_install_pm3() -> None:
+                        try:
+                            proc = await _asyncio.create_subprocess_exec(
+                                _sys.executable,
+                                "-m",
+                                "pip",
+                                "install",
+                                "pymobiledevice3>=5.0,<6.0",
+                                stdout=_asyncio.subprocess.DEVNULL,
+                                stderr=_asyncio.subprocess.DEVNULL,
+                            )
+                            rc = await proc.wait()
+                            if rc != 0:
+                                logger.info(
+                                    "DeviceBackend: background pymobiledevice3 install "
+                                    "failed (rc=%d) -- manual install prompt remains",
+                                    rc,
+                                )
+                                return
+                            retry = await self._tier1.is_available()
+                            if retry.available:
+                                logger.info("DeviceBackend: Tier 1 available after background pymobiledevice3 install")
+                            else:
+                                logger.info(
+                                    "DeviceBackend: pymobiledevice3 installed but Tier 1 still unavailable: %s",
+                                    retry.error,
+                                )
+                        except Exception as exc:
+                            logger.debug(
+                                "DeviceBackend: background pymobiledevice3 install skipped: %s",
+                                exc,
+                            )
+
+                    _asyncio.ensure_future(_self_install_pm3())
 
             # Self-healing: the Apple service may be installed but stopped.
             # Try to restart it before giving up on Tier 1 entirely.
             try:
                 from backend.ios_driver_installer import ensure_apple_service_running
+
                 service_result = await ensure_apple_service_running()
                 if service_result.state == "running":
-                    logger.info(
-                        "DeviceBackend: Apple service revived -- re-probing Tier 1"
-                    )
+                    logger.info("DeviceBackend: Apple service revived -- re-probing Tier 1")
                     t1_retry = await self._tier1.is_available()
                     if t1_retry.available:
                         t1_probe = t1_retry
                         logger.info("DeviceBackend: Tier 1 now available after service restart")
                 elif service_result.state == "elevation_required":
-                    logger.info(
-                        "DeviceBackend: Apple service needs elevation to start -- "
-                        "frontend will prompt user"
-                    )
+                    logger.info("DeviceBackend: Apple service needs elevation to start -- frontend will prompt user")
                 elif service_result.state == "not_installed":
-                    logger.debug(
-                        "DeviceBackend: Apple service not installed -- will use Tier 2"
-                    )
+                    logger.debug("DeviceBackend: Apple service not installed -- will use Tier 2")
             except Exception as exc:
                 logger.debug("DeviceBackend: Apple service recovery attempt failed: %s", exc)
 
         # Check Tier 2
         try:
             from backend.wsl_orchestrator import BRIDGE_PORT, WSLOrchestrator
+
             self._wsl_orchestrator = WSLOrchestrator()
             status = await self._wsl_orchestrator.get_bridge_status()
             if status.reachable:
@@ -692,8 +759,7 @@ class DeviceBackendManager:
                                 recovery = await self._wsl_orchestrator.auto_recover_apple_device()
                                 if recovery.get("success"):
                                     logger.info(
-                                        "DeviceBackend: Apple device auto-attached via usbipd -- "
-                                        "retrying bridge probe"
+                                        "DeviceBackend: Apple device auto-attached via usbipd -- retrying bridge probe"
                                     )
                                     retry2 = await self._wsl_orchestrator.get_bridge_status()
                                     if retry2.reachable:
@@ -703,26 +769,21 @@ class DeviceBackendManager:
                                         logger.info("DeviceBackend: Bridge reachable after USB attach")
                                 elif recovery.get("needs_bind"):
                                     logger.info(
-                                        "DeviceBackend: Apple device needs bind before attach -- "
-                                        "busids: %s", recovery["needs_bind"]
+                                        "DeviceBackend: Apple device needs bind before attach -- busids: %s",
+                                        recovery["needs_bind"],
                                     )
                                 elif recovery.get("needs_elevation"):
                                     logger.info(
-                                        "DeviceBackend: Apple device attach needs elevation -- "
-                                        "frontend will prompt"
+                                        "DeviceBackend: Apple device attach needs elevation -- frontend will prompt"
                                     )
                             except Exception as recovery_exc:
                                 logger.debug("DeviceBackend: USB passthrough recovery failed: %s", recovery_exc)
                     elif feasibility.wsl_installed or not feasibility.error:
                         self._wsl_setup_suggested = True
-                        logger.info(
-                            "DeviceBackend: WSL available but not ready -- surfacing setup card"
-                        )
+                        logger.info("DeviceBackend: WSL available but not ready -- surfacing setup card")
                     else:
                         self._wsl_setup_suggested = True
-                        logger.info(
-                            "DeviceBackend: WSL not installed -- surfacing setup card"
-                        )
+                        logger.info("DeviceBackend: WSL not installed -- surfacing setup card")
                 except Exception as exc:
                     logger.debug("DeviceBackend: WSL auto-activation check failed: %s", exc)
         except Exception as exc:
@@ -731,6 +792,7 @@ class DeviceBackendManager:
         # Check WPD
         try:
             from backend.wpd_backend import WpdBackend
+
             self._wpd = WpdBackend()
             if self._wpd.is_configured:
                 wpd_probe = await self._wpd.is_available()
@@ -803,6 +865,7 @@ class DeviceBackendManager:
         if t1_probe.error and "no_driver" in t1_probe.error:
             try:
                 from backend.ios_driver_installer import check_winget_available_async, verify_package_async
+
                 winget_ok, _ = await check_winget_available_async()
                 if winget_ok:
                     pkg = await verify_package_async()
@@ -961,7 +1024,7 @@ class DeviceBackendManager:
         order = self._waterfall_order(is_ios_query=is_ios)
         try:
             idx = order.index(preferred)
-            return order[idx + 1:]
+            return order[idx + 1 :]
         except ValueError:
             return [b for b in order if b is not preferred]
 
@@ -996,7 +1059,8 @@ class DeviceBackendManager:
             if not probe.available:
                 logger.debug(
                     "DeviceBackend: skipping %s -- not available: %s",
-                    backend.tier.value, probe.error,
+                    backend.tier.value,
+                    probe.error,
                 )
                 continue
 
@@ -1006,7 +1070,8 @@ class DeviceBackendManager:
                 error_msg = f"{type(exc).__name__}: {exc}"
                 logger.warning(
                     "DeviceBackend: %s listed devices but failed to use them: %s",
-                    backend.tier.value, error_msg,
+                    backend.tier.value,
+                    error_msg,
                 )
                 continue
 
@@ -1015,14 +1080,16 @@ class DeviceBackendManager:
                 # (locked, not trusted, or error), and we have fallback backends available,
                 # we should continue checking the fallback backends to see if they can
                 # access the device in a ready/usable state (e.g. WPD backend).
-                all_non_ready = all(d.status in (DeviceStatus.NOT_TRUSTED, DeviceStatus.LOCKED, DeviceStatus.ERROR) for d in devices)
+                all_non_ready = all(
+                    d.status in (DeviceStatus.NOT_TRUSTED, DeviceStatus.LOCKED, DeviceStatus.ERROR) for d in devices
+                )
                 if all_non_ready:
                     # Check if there are other configured/available backends in the waterfall order
                     has_alternatives = False
                     waterfall = self._waterfall_order(is_ios_query=False)
                     try:
                         current_idx = waterfall.index(backend)
-                        for alt_backend in waterfall[current_idx + 1:]:
+                        for alt_backend in waterfall[current_idx + 1 :]:
                             if alt_backend.is_configured:
                                 alt_probe = await alt_backend.is_available()
                                 if alt_probe.available:
@@ -1035,7 +1102,8 @@ class DeviceBackendManager:
                         logger.info(
                             "DeviceBackend: %s found devices but all are in non-ready states %s. "
                             "Checking fallback backends for a usable connection.",
-                            backend.tier.value, [d.status.value for d in devices]
+                            backend.tier.value,
+                            [d.status.value for d in devices],
                         )
                         continue
 
@@ -1126,7 +1194,10 @@ class DeviceBackendManager:
                 # returns the correct status to the frontend.
                 logger.warning(
                     "DeviceBackend: %s %s terminal for device %s: %s",
-                    backend.tier.value, operation, serial, exc,
+                    backend.tier.value,
+                    operation,
+                    serial,
+                    exc,
                 )
                 raise
             # -- pymobiledevice3 exception mapping (only when lib is loaded) --
@@ -1135,29 +1206,40 @@ class DeviceBackendManager:
                     if isinstance(exc, (PasscodeRequiredError, DeviceHasPasscodeSetError)):
                         logger.warning(
                             "DeviceBackend: %s %s device %s locked (passcode required): %s",
-                            backend.tier.value, operation, serial, exc,
+                            backend.tier.value,
+                            operation,
+                            serial,
+                            exc,
                         )
                         raise DeviceLockedError(
                             serial,
                             detail="Your iPhone is locked. Please unlock it and tap "
-                                   "'Trust This Computer' when prompted.",
+                            "'Trust This Computer' when prompted.",
                         ) from exc
-                    if isinstance(exc, (NotPairedError, PairingDialogResponsePendingError,
-                                        UserDeniedPairingError, FatalPairingError)):
+                    if isinstance(
+                        exc,
+                        (NotPairedError, PairingDialogResponsePendingError, UserDeniedPairingError, FatalPairingError),
+                    ):
                         logger.warning(
                             "DeviceBackend: %s %s device %s not trusted: %s",
-                            backend.tier.value, operation, serial, exc,
+                            backend.tier.value,
+                            operation,
+                            serial,
+                            exc,
                         )
                         raise DeviceNotTrustedError(
                             serial,
                             detail="Please tap 'Trust This Computer' on your iPhone "
-                                   "and enter your passcode, then try again.",
+                            "and enter your passcode, then try again.",
                         ) from exc
                     if isinstance(exc, (MuxException, ConnectionFailedToUsbmuxdError)):
                         error_msg = f"{type(exc).__name__}: {exc}"
                         logger.warning(
                             "DeviceBackend: %s %s usbmux connection failed for %s: %s",
-                            backend.tier.value, operation, serial, error_msg,
+                            backend.tier.value,
+                            operation,
+                            serial,
+                            error_msg,
                         )
                         attempted.append((backend.tier, error_msg))
                         last_exc = exc
@@ -1169,12 +1251,18 @@ class DeviceBackendManager:
                 if is_known_device:
                     logger.warning(
                         "DeviceBackend: %s %s failed for device %s (was previously connected): %s",
-                        backend.tier.value, operation, serial, error_msg,
+                        backend.tier.value,
+                        operation,
+                        serial,
+                        error_msg,
                     )
                 else:
                     logger.debug(
                         "DeviceBackend: %s %s failed for %s: %s",
-                        backend.tier.value, operation, serial, error_msg,
+                        backend.tier.value,
+                        operation,
+                        serial,
+                        error_msg,
                     )
 
                 attempted.append((backend.tier, error_msg))
@@ -1190,7 +1278,9 @@ class DeviceBackendManager:
         raise RuntimeError("\n".join(lines)) from last_exc
 
     async def browse_device(
-        self, serial: str, path: str,
+        self,
+        serial: str,
+        path: str,
     ) -> list[DeviceFileInfo]:
         """Browse a directory on a device with automatic 3-step fallback."""
 
@@ -1207,7 +1297,9 @@ class DeviceBackendManager:
         return await self._run_operation(serial, "browse", _browse, normalised_path)
 
     async def get_device_file_info(
-        self, serial: str, path: str,
+        self,
+        serial: str,
+        path: str,
     ) -> DeviceFileInfo:
         """Get file info with automatic 3-step fallback."""
 
@@ -1219,7 +1311,9 @@ class DeviceBackendManager:
         return await self._run_operation(serial, "file_info", _file_info, normalised_path)
 
     async def read_device_file(
-        self, serial: str, path: str,
+        self,
+        serial: str,
+        path: str,
     ) -> bytes:
         """Read a file from the device with automatic 3-step fallback."""
 
@@ -1259,6 +1353,7 @@ class DeviceBackendManager:
         if self._tier2._bridge_url:
             return _BridgeFileReader(serial, normalised_path, self._tier2._bridge_url)
         from backend.ios_device import AFCFileReader
+
         return AFCFileReader(serial, normalised_path)
 
     # ------------------------------------------------------------------

@@ -278,7 +278,7 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
           {getStatusIcon(item.final_status)}
         </div>
         {item.live_photo_group && (
-          <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-primary/80 text-primary-foreground rounded text-[9px] font-medium">
+          <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-primary/80 text-primary-foreground rounded text-[9px] font-normal">
             Live Photo
           </div>
         )}
@@ -287,7 +287,7 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
       {/* Info */}
       <div className="p-2.5">
         <p
-          className="text-xs font-medium text-foreground truncate"
+          className="text-xs font-semibold text-foreground truncate"
           title={item.file_name}
         >
           {item.file_name}
@@ -351,14 +351,14 @@ function ConfirmDialog({
               <button
                 onClick={onCancel}
                 disabled={loading}
-                className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted disabled:opacity-50"
+                className="px-4 py-2 text-sm font-normal text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={onConfirm}
                 disabled={loading}
-                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+                className="px-4 py-2 text-sm font-normal text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors disabled:opacity-50 inline-flex items-center gap-2"
               >
                 {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                 {confirmLabel}
@@ -422,7 +422,7 @@ class MediaGridBoundary extends Component<
           <p className="text-sm">Unable to load media</p>
           <button
             onClick={() => this.setState({ crashed: false })}
-            className="mt-3 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity"
+            className="mt-3 px-4 py-2 text-sm font-normal bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity"
           >
             Retry
           </button>
@@ -843,7 +843,7 @@ export default function LibraryPage() {
           <button
             type="button"
             onClick={() => setShowingRecent((r) => !r)}
-            className="px-2.5 py-1 bg-action text-white rounded-md font-medium hover:bg-action/90 active:scale-[0.95] transition-colors shrink-0"
+            className="px-2.5 py-1 bg-action text-white rounded-pill font-normal hover:bg-action/90 active:scale-[0.95] transition-colors shrink-0"
           >
             {showingRecent ? "Show all" : "Show recent"}
           </button>
