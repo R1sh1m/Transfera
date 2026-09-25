@@ -193,6 +193,28 @@ def test_empty_trash_removes_vault_files(test_client, tmp_path):
     assert test_client.get("/api/trash").json()["total"] == 0
 
 
+def test_model_status_no_deadlock(monkeypatch):
+    """start_background_download must return promptly (regression: plain
+    Lock re-acquired same-thread via download_status() deadlocked)."""
+    import threading
+
+    from backend.engines import clip
+
+    assert clip.download_status()["ready"] in (True, False)
+    monkeypatch.setattr(clip, "ensure_models", lambda: True)
+    saved = dict(clip._download_state)
+    try:
+        clip._download_state.update(status="idle", error=None)
+        out: dict = {}
+        t = threading.Thread(target=lambda: out.update(clip.start_background_download()))
+        t.start()
+        t.join(timeout=15)
+        assert not t.is_alive(), "start_background_download deadlocked"
+        assert out.get("status") in ("ready", "downloading"), out
+    finally:
+        clip._download_state.update(saved)
+
+
 def test_trash_favorite_flow(test_client):
     # Seed one completed item directly via API-visible list; create via DB is complex
     # here, so exercise the 404 paths + empty-trash shape instead.

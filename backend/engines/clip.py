@@ -59,8 +59,10 @@ _text_session = None  # onnxruntime InferenceSession | None
 _tokenizer = None  # tokenizers.Tokenizer | None
 
 # Background model-download state (read by the status endpoint).
+# RLock (not Lock): start_background_download() calls download_status()
+# while already holding it — a plain Lock would deadlock same-thread.
 _download_state: dict = {"status": "idle", "downloaded_bytes": 0, "error": None}
-_download_lock = threading.Lock()
+_download_lock = threading.RLock()
 
 
 def download_status() -> dict:
