@@ -145,7 +145,7 @@ def locate_archive_file(
                 return False
             if verify_hash and item.source_hash:
                 try:
-                    return bool(_verify_hash_fn(p, item.source_hash))
+                    return _verify_hash_fn(p, item.source_hash)
                 except OSError:
                     return False
             return True

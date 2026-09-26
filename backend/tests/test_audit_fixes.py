@@ -56,7 +56,7 @@ class TestSessionScopeCommitRetry:
                 assert session is mock_session
                 executed = True
 
-            assert executed is True
+            assert executed
             assert attempts == 2
 
 

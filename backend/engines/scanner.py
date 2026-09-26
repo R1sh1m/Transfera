@@ -398,9 +398,9 @@ async def _walk_ios_directory(
         tasks = [_walk_ios_directory(serial, sd) for sd in subdirs]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for res in results:
-            if isinstance(res, Exception):
+            if isinstance(res, BaseException):
                 logger.warning("Subdirectory walk failed: %s", res)
-            elif res:
+            elif isinstance(res, list):
                 all_files.extend(res)
 
     return all_files
@@ -483,7 +483,7 @@ async def _scan_local_files(
                     file_name=fpath.name,
                     file_size=stat.st_size,
                     extension=fpath.suffix.lower(),
-                    date_created=_ts_to_datetime(getattr(stat, "st_birthtime", stat.st_ctime)),
+                    date_created=_ts_to_datetime(getattr(stat, "st_birthtime", getattr(stat, "st_ctime", 0.0))),
                     date_modified=_ts_to_datetime(stat.st_mtime),
                 )
         lp_id = lp_groups.get(resolved)

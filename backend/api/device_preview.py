@@ -49,7 +49,7 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
         try:
             handle = await asyncio.to_thread(lambda: afc.fopen(path))
             try:
-                data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))
+                data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))  # type: ignore[arg-type]
                 return data if data else None
             finally:
                 try:

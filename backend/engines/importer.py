@@ -201,7 +201,7 @@ async def _import_single_item(
                 # st_ctime on Windows is the file creation time (unlike Linux where
                 # it's the inode change time).
                 if sys.platform == "win32":
-                    source_created_ts = src_stat.st_ctime
+                    source_created_ts = getattr(src_stat, "st_birthtime", getattr(src_stat, "st_ctime", None))
             except OSError as exc:
                 logger.debug(
                     "Could not stat source file %s for timestamp recovery: %s",
