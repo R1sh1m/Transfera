@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 PackageIdentifier: Transfera.Transfera
-PackageVersion: 2.5.0
+PackageVersion: 2.5.1
 PackageLocale: en-US
 PackageName: Transfera
 Publisher: Transfera Team

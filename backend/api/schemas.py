@@ -55,7 +55,7 @@ class BatchStatusEnum(str, Enum):
 # ---------------------------------------------------------------------------
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "2.5.0"
+    version: str = "2.5.1"
     port: int
     database: str = "connected"
 
