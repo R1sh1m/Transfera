@@ -53,6 +53,7 @@ from backend.api.schemas import (
     IOSDeviceFileEntry,
     IOSDeviceInfoRequest,
     IOSDeviceListResponse,
+    MediaItemDetail,
     MediaItemInfo,
     MediaList,
     PackageVerificationResponse,
@@ -390,7 +391,7 @@ async def browse_ios_device(req: IOSBrowseRequest, _: None = Depends(require_loc
     # than returning a bare 404/400 here, we first sniff the device
     # status from the most recent listing so we can differentiate
     # LOCKED / NOT_TRUSTED states early.
-    devices, _ = await manager.list_devices()
+    devices, _tier = await manager.list_devices()
     device = next((d for d in devices if d.serial == req.serial), None)
 
     if device is None:
@@ -582,7 +583,7 @@ async def get_ios_device_file_info(
 
     normalised_path = req.path.replace("\\", "/")
 
-    devices, _ = await manager.list_devices()
+    devices, _tier = await manager.list_devices()
     device = next((d for d in devices if d.serial == req.serial), None)
     if device is None:
         raise HTTPException(status_code=404, detail={"status": "disconnected", "message": "Device not found"})
@@ -2131,6 +2132,41 @@ async def list_media(
     )
 
 
+@router.get("/media/{item_id}", response_model=MediaItemDetail)
+async def get_media_item(
+    item_id: int,
+    _: None = Depends(require_local_token),
+) -> MediaItemDetail:
+    async with session_scope() as session:
+        item = await session.get(MediaItem, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Media item {item_id} not found")
+
+        info = _media_to_info(item)
+        dest_path = None
+        dest_exists = False
+
+        if item.session_id is not None:
+            session_obj = await session.get(TransferSession, item.session_id)
+            if session_obj and session_obj.dest_root:
+                from backend.engines.organizer import locate_archive_file
+
+                layout = getattr(session_obj, "folder_layout", "year/month")
+                try:
+                    candidate = locate_archive_file(Path(session_obj.dest_root), item, layout=layout)
+                    if candidate is not None:
+                        dest_path = str(candidate)
+                        dest_exists = True
+                except Exception:
+                    pass
+
+        return MediaItemDetail(
+            **info.model_dump(),
+            dest_path=dest_path,
+            dest_exists=dest_exists,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Thumbnail serving
 # ---------------------------------------------------------------------------
@@ -3323,8 +3359,8 @@ def _media_to_info(mi: MediaItem) -> MediaItemInfo:
         camera_model=mi.camera_model,
         gps_lat=mi.gps_lat,
         gps_lon=mi.gps_lon,
-        favorite=bool(mi.favorite),
-        trashed=bool(mi.trashed),
+        favorite=mi.favorite,
+        trashed=mi.trashed,
         blur_score=mi.blur_score,
         tags=_tags,
         caption=mi.caption,

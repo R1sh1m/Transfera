@@ -74,6 +74,15 @@ jobs:
         working-directory: frontend
         run: npm run build:native
 
+      - name: Pre-seed ExifTool (offline installer support)
+        # Downloads ExifTool into backend/bin/exiftool/ so electron-builder's
+        # extraResources ships it inside the installer. First-run download
+        # remains as fallback. Fail-closed: a release without ExifTool would
+        # silently regress offline installs.
+        run: |
+          .venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); print('preseded:', p); sys.exit(0 if p and p.is_file() else 1)"
+          if (Test-Path backend/bin/exiftool/exiftool.exe) { Write-Host "ExifTool pre-seed verified." } else { Write-Error "ExifTool pre-seed missing!"; exit 1 }
+
       - name: Prepare Code Signing
         shell: bash
         run: |

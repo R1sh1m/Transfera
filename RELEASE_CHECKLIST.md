@@ -21,6 +21,7 @@ The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml`
 | 5 | iPhone without Apple driver | Connect iPhone on a machine without the Apple Mobile Device driver / MSVC-built `wpd_helper.exe` | App runs normally for local-folder backup; device list shows iPhone as unavailable with guidance (install driver / build helper) instead of crashing |
 | 6 | Port occupied | Occupy `127.0.0.1:47821` (or `:5173` for `--frontend`) with another process, run `python run.py` | Orchestrator exits before spawning, naming the blocked port and owner, with the `netstat -ano \| findstr :<port>` / `taskkill /F /PID <pid>` remediation |
 | 7 | AV-locked exe | Run with antivirus real-time protection on (or simulate a lock on `backend/bin/wpd_helper.exe` during build) | Build surfaces the `LNK1104` guidance (close backend, retry, check AV/file-sync locks) instead of a raw linker dump; freshly-written binaries are not quarantined on launch |
+| 8 | Transfer complete notification | Complete a transfer, click the native OS notification | App opens/focuses and navigates to the HTML report or Dashboard session row |
 
 ## Sign-off
 

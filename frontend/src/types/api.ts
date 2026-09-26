@@ -189,6 +189,11 @@ export interface MediaItemInfo {
   caption?: string | null;
 }
 
+export interface MediaItemDetail extends MediaItemInfo {
+  dest_path?: string | null;
+  dest_exists?: boolean;
+}
+
 export interface MediaList {
   items: MediaItemInfo[];
   total: number;
@@ -618,7 +623,10 @@ export interface Tier2Status {
   devices_on_tier2: string[];
   error?: string;
   bridge_error?: string;
+  /** True when the WSL service (LxssManager) is broken — show the repair card. */
+  wsl_service_broken?: boolean;
 }
+
 
 export interface Tier2StepPreview {
   step_id: string;

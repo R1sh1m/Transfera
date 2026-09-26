@@ -14,6 +14,7 @@ import {
   Pause,
   X,
   ArrowLeft,
+  FolderOpen,
   Image,
   Film,
   Music,
@@ -43,6 +44,16 @@ import type { SessionProgress, RecentItemProgress } from "@/types/api";
 // Keep track of session IDs that have already been started to prevent double-triggering
 // on component mount/remount in React Strict Mode.
 const startedSessions = new Set<number>();
+
+const STATUS_LABELS: Record<string, string> = {
+  created: "Ready",
+  running: "Transferring",
+  paused: "Paused",
+  completed: "Completed",
+  completed_with_errors: "Done (with issues)",
+  failed: "Failed",
+  cancelled: "Stopped",
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -637,13 +648,16 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           </div>
         )}
 
-        {/* Hop Progress */}
+        {/* Step Progress */}
         {activeBatch && (
           <div className="space-y-3">
             <div className="p-3 bg-muted/50 rounded-md">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-normal text-foreground">
-                  Hop 1: Source {"->"} Cache
+                <span
+                  className="text-xs font-normal text-foreground"
+                  title="Hop 1: Reading files into temporary cache with BLAKE3 checksum"
+                >
+                  Step 1: Reading files
                 </span>
                 <span className="text-xs text-muted-foreground">
                   {activeBatch.hop1Progress}%
@@ -659,8 +673,11 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
 
             <div className="p-3 bg-muted/50 rounded-md">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-normal text-foreground">
-                  Hop 2: Cache {"->"} Archive
+                <span
+                  className="text-xs font-normal text-foreground"
+                  title="Hop 2: Verifying checksums and saving safely to destination"
+                >
+                  Step 2: Verifying &amp; saving
                 </span>
                 <span className="text-xs text-muted-foreground">
                   {activeBatch.hop2Progress}%
@@ -721,8 +738,8 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
               Status
             </p>
-            <p className="text-sm font-semibold text-foreground mt-0.5 capitalize">
-              {transfer.status}
+            <p className="text-sm font-semibold text-foreground mt-0.5">
+              {STATUS_LABELS[transfer.status] || transfer.status}
             </p>
           </div>
         </div>
@@ -991,7 +1008,7 @@ export default function TransferPage() {
   const handleCancel = async () => {
     if (!confirmCancel) {
       setConfirmCancel(true);
-      cancelTimerRef.current = setTimeout(() => setConfirmCancel(false), 2000);
+      cancelTimerRef.current = setTimeout(() => setConfirmCancel(false), 5000);
       return;
     }
     if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current);
@@ -1093,6 +1110,7 @@ export default function TransferPage() {
             <button
               onClick={handleCancel}
               disabled={cancelSession.isPending}
+              title={confirmCancel ? "Click again to confirm stopping transfer" : "Stop transfer"}
               className={cn(
                 "no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-normal transition-colors",
                 confirmCancel
@@ -1101,16 +1119,28 @@ export default function TransferPage() {
               )}
             >
               <X className="w-4 h-4" />
-              {confirmCancel && <span>Confirm?</span>}
+              <span>{confirmCancel ? "Confirm stop?" : "Cancel"}</span>
             </button>
           )}
           {isFinished && (
-            <button
-              onClick={() => setCurrentPage("library")}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
-            >
-              View Library
-            </button>
+            <div className="flex items-center gap-2">
+              {isElectron && transfer.destRoot && (
+                <button
+                  onClick={() => window.electronAPI?.openPath(transfer.destRoot)}
+                  className="no-drag inline-flex items-center gap-1.5 px-3.5 py-2 bg-secondary text-secondary-foreground rounded-pill text-sm font-normal hover:bg-secondary/80 transition-colors active:scale-[0.95]"
+                  title="Open destination folder on this computer"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  Open Folder
+                </button>
+              )}
+              <button
+                onClick={() => setCurrentPage("library")}
+                className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-action text-white rounded-pill text-sm font-normal hover:bg-action/90 transition-colors active:scale-[0.95]"
+              >
+                View Library
+              </button>
+            </div>
           )}
         </div>
       </div>

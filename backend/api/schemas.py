@@ -214,6 +214,11 @@ class MediaItemInfo(BaseModel):
     caption: str | None = None
 
 
+class MediaItemDetail(MediaItemInfo):
+    dest_path: str | None = None
+    dest_exists: bool = False
+
+
 class MediaList(BaseModel):
     items: list[MediaItemInfo]
     total: int

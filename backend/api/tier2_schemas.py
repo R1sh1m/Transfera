@@ -22,6 +22,9 @@ class Tier2StatusResponse(BaseModel):
     devices_on_tier2: list[str] = Field(default_factory=list)
     error: str | None = None
     bridge_error: str | None = None
+    # True when the WSL service itself is broken (E_UNEXPECTED / LxssManager crash).
+    # The UI should surface the repair card and not retry the bridge for this session.
+    wsl_service_broken: bool = False
 
 
 class Tier2StepPreview(BaseModel):

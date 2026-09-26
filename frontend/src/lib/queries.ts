@@ -37,6 +37,7 @@ import type {
   SessionActionResponse,
   SessionProgress,
   BatchList,
+  MediaItemDetail,
   MediaList,
   DuplicateCheckRequest,
   DuplicateReport,
@@ -482,6 +483,19 @@ export function useMediaList(params: {
       });
       return data;
     },
+  });
+}
+
+export function useMediaItem(id: number | null) {
+  return useQuery({
+    queryKey: ["media-item", id],
+    queryFn: async () => {
+      if (!id) return null;
+      const { data } = await apiClient.get<MediaItemDetail>(`/media/${id}`);
+      return data;
+    },
+    enabled: !!id,
+    staleTime: 30000,
   });
 }
 

@@ -208,6 +208,13 @@ def test_media_list(client: httpx.Client) -> None:
     _check("items" in data, "Missing 'items' key")
     _check("total" in data, "Missing 'total' key")
     _check("page" in data, "Missing 'page' key")
+    if data["items"]:
+        item_id = data["items"][0]["id"]
+        r_item = client.get(f"/api/media/{item_id}")
+        _assert_ok(r_item)
+        d_item = _json(r_item)
+        _check(d_item["id"] == item_id, "id mismatch")
+        _check("dest_path" in d_item, "Missing dest_path in detail")
 
 
 def test_media_list_pagination(client: httpx.Client) -> None:
@@ -216,6 +223,11 @@ def test_media_list_pagination(client: httpx.Client) -> None:
     data = _json(r)
     _check(data["page"] == 1, "page mismatch")
     _check(data["page_size"] == 10, "page_size mismatch")
+
+
+def test_media_item_detail_not_found(client: httpx.Client) -> None:
+    r = client.get("/api/media/99999999")
+    _check(r.status_code == 404, f"Expected 404, got {r.status_code}")
 
 
 def test_duplicates_check(client: httpx.Client) -> None:

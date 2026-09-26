@@ -114,7 +114,9 @@ async def get_tier2_status(_: None = Depends(require_local_token)) -> Tier2Statu
         devices_on_tier2=devices_on_tier2,
         error=wsl_status.error or usbipd_status.error or bridge_status.error,
         bridge_error=bridge_status.last_error,
+        wsl_service_broken=wsl_status.wsl_service_broken,
     )
+
 
 
 @router.get("/preview", response_model=Tier2SetupPreviewResponse)

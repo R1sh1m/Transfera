@@ -18,6 +18,7 @@ import {
   Music,
   FileText,
   Shield,
+  ShieldCheck,
   AlertTriangle,
   ArrowRightLeft,
   Copy,
@@ -88,24 +89,23 @@ function TierBadge({ tier }: { tier?: string | null }) {
     switch (tier) {
       case "tier1":
         return {
-          label: "Apple Support",
-          title: "Connected via: Apple Mobile Device Support (Tier 1)",
+          label: "via Apple driver",
+          title: "Connected via: Apple Mobile Device Support",
           icon: <Usb className="w-2.5 h-2.5" />,
-          className:
-            "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400",
-        };
-      case "wpd":
-        return {
-          label: "Windows",
-          title: "Connected via: Windows Portable Devices (WPD)",
-          icon: <HardDrive className="w-2.5 h-2.5" />,
           className:
             "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
         };
+      case "wpd":
+        return {
+          label: "via USB",
+          title: "Connected via: Windows Portable Devices",
+          icon: <HardDrive className="w-2.5 h-2.5" />,
+          className: "bg-muted text-muted-foreground",
+        };
       case "tier2":
         return {
-          label: "Open-source bridge",
-          title: "Connected via: Open-source WSL bridge (Tier 2)",
+          label: "via Linux bridge",
+          title: "Connected via: Open-source WSL bridge",
           icon: <Wifi className="w-2.5 h-2.5" />,
           className:
             "bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400",
@@ -285,14 +285,12 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
         setMode("folder");
       }
     } else {
-      const input = prompt(
-        "Enter source folder path:",
-        sourceRef?.type === "local_folder" ? sourceRef.path : "",
-      );
-      if (input !== null && input.trim()) {
-        onSourceChange({ type: "local_folder", path: input.trim() });
-        setMode("folder");
-      }
+      useTransferStore
+        .getState()
+        .showNotification(
+          "info",
+          "Folder browsing requires the desktop app. Please enter the folder path directly.",
+        );
     }
   };
 
@@ -626,15 +624,56 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                      connected right now — informational, not a warning */
                         if (activeTier && activeTier !== "none") {
                           return (
-                            <div className="flex items-start gap-2 bg-muted/50 border border-border rounded-lg p-2.5">
-                              <Smartphone className="w-3.5 h-3.5 text-muted-foreground mt-0.5 shrink-0" />
-                              <div>
-                                <p className="text-xs font-semibold text-foreground">
-                                  No devices connected
+                            <div className="space-y-2.5">
+                              <div className="flex items-start justify-between gap-2 bg-muted/40 border border-border rounded-lg p-3">
+                                <div className="flex items-start gap-2.5">
+                                  <Smartphone className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+                                  <div>
+                                    <p className="text-xs font-semibold text-foreground">
+                                      No devices detected yet
+                                    </p>
+                                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                                      Plug in your iPhone or iPad using a USB
+                                      cable.
+                                    </p>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => recoverMutation.mutate()}
+                                  disabled={recoverMutation.isPending}
+                                  className="text-[11px] text-primary hover:underline flex items-center gap-1 shrink-0"
+                                >
+                                  <RefreshCw
+                                    className={cn(
+                                      "w-3 h-3",
+                                      recoverMutation.isPending &&
+                                        "animate-spin",
+                                    )}
+                                  />
+                                  Scan again
+                                </button>
+                              </div>
+
+                              <div className="p-3 bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-lg text-xs space-y-1.5">
+                                <p className="font-semibold text-blue-900 dark:text-blue-300 text-[11px] uppercase tracking-wider">
+                                  Quick iPhone Connection Checklist
                                 </p>
-                                <p className="text-[10px] text-muted-foreground mt-0.5">
-                                  Connect your iPhone via USB and unlock it.
-                                </p>
+                                <ul className="space-y-1 text-[11px] text-blue-800 dark:text-blue-300/90 list-disc list-inside">
+                                  <li>
+                                    <strong>Unlock device:</strong> Screen must
+                                    be awake and unlocked with passcode
+                                  </li>
+                                  <li>
+                                    <strong>Trust prompt:</strong> Tap{" "}
+                                    <em>Trust This Computer</em> on your iPhone
+                                    if shown
+                                  </li>
+                                  <li>
+                                    <strong>Data cable:</strong> Ensure your
+                                    cable transfers data (not charging-only)
+                                  </li>
+                                </ul>
                               </div>
                             </div>
                           );
@@ -660,34 +699,55 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                             iosDevices.driver_status === "no_driver"
                           ) {
                             return (
-                              <div className="text-xs text-muted-foreground py-1">
-                                <DriverInstallerInline />
+                              <div className="space-y-3 py-1">
+                                <div className="text-xs text-muted-foreground">
+                                  <DriverInstallerInline />
+                                </div>
+                                <details className="text-[11px] text-muted-foreground">
+                                  <summary className="cursor-pointer hover:text-foreground transition-colors">
+                                    Advanced connection options (Linux bridge)
+                                  </summary>
+                                  <div className="mt-2">
+                                    <Tier2SetupPanel />
+                                  </div>
+                                </details>
                               </div>
                             );
                           }
 
                           /* Absolutely nothing is usable */
                           return (
-                            <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-2.5">
-                              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
-                              <div>
-                                <p className="text-xs font-normal text-amber-700 dark:text-amber-300">
-                                  Device support unavailable
-                                </p>
-                                <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-                                  No device backend is available. Install Apple
-                                  Mobile Device Support or set up the
-                                  open-source WSL bridge to connect your iPhone.
-                                </p>
+                            <div className="space-y-3 py-1">
+                              <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+                                <AlertTriangle className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                                <div className="space-y-2 flex-1">
+                                  <div>
+                                    <p className="text-xs font-semibold text-foreground">
+                                      Apple Device Support Required
+                                    </p>
+                                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                                      Install Apple Mobile Device Support to
+                                      connect and transfer files from your
+                                      iPhone.
+                                    </p>
+                                  </div>
+                                  <DriverInstallerInline />
+                                </div>
                               </div>
+                              <details className="text-[11px] text-muted-foreground">
+                                <summary className="cursor-pointer hover:text-foreground transition-colors">
+                                  Advanced connection options (Linux bridge)
+                                </summary>
+                                <div className="mt-2">
+                                  <Tier2SetupPanel />
+                                </div>
+                              </details>
                             </div>
                           );
                         }
 
                         return null;
                       })()}
-
-                      <Tier2SetupPanel />
                     </>
                   )}
 
@@ -767,19 +827,22 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                     </div>
                   ))}
 
-                  {/* Prefer Tier 2 setting — advanced option to use open-source bridge */}
-                  <PreferTier2Toggle
-                    attention={tier2Attention}
-                    activeTier={backendActiveTier}
-                  >
-                    {allDevices.length > 0 &&
-                      backendActiveTier !== "wpd" &&
-                      backendActiveTier !== "tier1" &&
-                      !readyDevices.some(
-                        (d) =>
-                          d.active_tier === "wpd" || d.active_tier === "tier1",
-                      ) && <Tier2SetupPanel />}
-                  </PreferTier2Toggle>
+                  {/* Prefer Tier 2 setting — only show when Apple driver is not already actively handling devices */}
+                  {backendActiveTier !== "tier1" &&
+                    readyDevices.every((d) => d.active_tier !== "tier1") && (
+                      <PreferTier2Toggle
+                        attention={tier2Attention}
+                        activeTier={backendActiveTier}
+                      >
+                        {allDevices.length > 0 &&
+                          backendActiveTier !== "wpd" &&
+                          !readyDevices.some(
+                            (d) =>
+                              d.active_tier === "wpd" ||
+                              d.active_tier === "tier1",
+                          ) && <Tier2SetupPanel />}
+                      </PreferTier2Toggle>
+                    )}
 
                   {/* Apple service elevation notification */}
                   <AnimatePresence>
@@ -1046,6 +1109,117 @@ function DriverInstallerInline() {
 }
 
 // ---------------------------------------------------------------------------
+// WslServiceBrokenCard — shown when the WSL service (LxssManager) is broken
+// ---------------------------------------------------------------------------
+const WSL_REPAIR_STEPS = [
+  { label: "Update WSL", cmd: "wsl --update" },
+  { label: "Shut down all distros", cmd: "wsl --shutdown" },
+  { label: "Restart Windows", cmd: "(restart your PC)" },
+  {
+    label: "If still broken — reinstall WSL",
+    cmd: "wsl --unregister Ubuntu && wsl --install -d Ubuntu",
+  },
+] as const;
+
+function WslServiceBrokenCard() {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copyCmd = (cmd: string) => {
+    navigator.clipboard.writeText(cmd).catch(() => {});
+    setCopied(cmd);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="rounded-xl border border-red-200 dark:border-red-800/60 bg-red-50 dark:bg-red-950/20 p-4 space-y-4"
+    >
+      {/* Header */}
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
+        <div>
+          <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+            Windows Subsystem for Linux isn't working
+          </p>
+          <p className="text-xs text-red-600/80 dark:text-red-400/80 mt-1 leading-relaxed">
+            The WSL service (LxssManager) returned a catastrophic failure. This
+            is a Windows-level issue unrelated to Transfera — it usually means
+            WSL needs to be updated or reinstalled.
+          </p>
+        </div>
+      </div>
+
+      {/* Repair steps */}
+      <div className="space-y-2 pl-8">
+        <p className="text-xs font-semibold text-foreground/70">
+          Run these commands in PowerShell (as Administrator):
+        </p>
+        {WSL_REPAIR_STEPS.map(({ label, cmd }) => (
+          <div key={cmd} className="flex items-center gap-2">
+            <div className="flex-1 flex items-center gap-2 bg-background/60 dark:bg-background/30 border border-border/60 rounded-lg px-3 py-1.5">
+              <span className="text-[11px] text-foreground/50 shrink-0 w-40 truncate">
+                {label}
+              </span>
+              <code className="text-[11px] font-mono text-foreground flex-1 min-w-0 truncate">
+                {cmd}
+              </code>
+            </div>
+            <button
+              type="button"
+              id={`wsl-repair-copy-${label.replace(/\s+/g, "-").toLowerCase()}`}
+              onClick={() => copyCmd(cmd)}
+              title="Copy to clipboard"
+              className="p-1.5 rounded-md hover:bg-red-100 dark:hover:bg-red-900/30 active:scale-[0.95] transition-all text-red-500 dark:text-red-400 shrink-0"
+            >
+              {copied === cmd ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Escape hatches */}
+      <div className="pl-8 pt-1 space-y-1.5">
+        <p className="text-xs text-foreground/50 mb-2">
+          Or continue without iPhone-direct (WSL not required):
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <a
+            href="#folder-source"
+            id="wsl-broken-use-folder"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById("source-folder-btn")?.click();
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background border border-border text-xs font-normal hover:bg-muted active:scale-[0.95] transition-all"
+          >
+            <FolderOpen className="w-3 h-3" />
+            Browse a folder
+          </a>
+          <a
+            href="#wpd-source"
+            id="wsl-broken-use-wpd"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById("source-devices-btn")?.click();
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background border border-border text-xs font-normal hover:bg-muted active:scale-[0.95] transition-all"
+          >
+            <HardDrive className="w-3 h-3" />
+            Use USB / WPD device
+          </a>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tier2SetupPanel — step-by-step wizard for WSL2 + usbipd-win setup
 // ---------------------------------------------------------------------------
 function Tier2SetupPanel() {
@@ -1208,6 +1382,11 @@ function Tier2SetupPanel() {
   // Don't show if no Apple devices detected at all (nothing to fall back to)
   if (!tier2Status.isLoading && !status) {
     return null;
+  }
+
+  // WSL service broken — show repair card instead of retry loop
+  if (status?.wsl_service_broken) {
+    return <WslServiceBrokenCard />;
   }
 
   return (
@@ -1843,6 +2022,7 @@ export default function DeviceSetupPage() {
   const selectedFilesRef = useRef(selectedFiles);
   selectedFilesRef.current = selectedFiles;
   const [startError, setStartError] = useState<string | null>(null);
+  const [confirmForget, setConfirmForget] = useState(false);
   const [pendingDrive, setPendingDrive] = useState<{
     driveLetter: string;
     volumeName: string | null;
@@ -1949,7 +2129,11 @@ export default function DeviceSetupPage() {
           files.slice(0, 3),
         );
       }
-      const name = sessionName.trim() || `backup-${Date.now()}`;
+      const defaultName =
+        sourceRef?.type === "device"
+          ? `iPhone Backup – ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
+          : `Backup – ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+      const name = sessionName.trim() || defaultName;
       try {
         const session = await createSession.mutateAsync({
           session_name: name,
@@ -2192,12 +2376,14 @@ export default function DeviceSetupPage() {
                 placeholder="Where to store the backup archive..."
                 className={cn(
                   "w-full px-3 py-2.5 bg-background border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring transition-colors",
-                  destPath.trim().length > 0
+                  destPath.trim().length > 0 && destPathValid?.exists
                     ? "border-green-300 dark:border-green-700"
-                    : "border-border",
+                    : destPathStale
+                      ? "border-amber-300 dark:border-amber-700"
+                      : "border-border",
                 )}
               />
-              {destPath.trim().length > 0 && (
+              {destPath.trim().length > 0 && destPathValid?.exists && (
                 <FolderCheck className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-green-500 dark:text-green-400" />
               )}
             </div>
@@ -2212,8 +2398,10 @@ export default function DeviceSetupPage() {
                   );
                   if (selected) setDestPath(selected);
                 } else {
-                  const input = prompt("Enter destination path:", destPath);
-                  if (input !== null) setDestPath(input);
+                  showNotification(
+                    "info",
+                    "Folder browsing requires the desktop app. Please enter the destination path directly.",
+                  );
                 }
               }}
               className="no-drag px-4 py-2.5 bg-primary text-primary-foreground rounded-pill text-sm font-normal hover:bg-primary/90 active:scale-[0.95] transition-all flex items-center gap-1.5"
@@ -2285,7 +2473,7 @@ export default function DeviceSetupPage() {
 
         <div>
           <label className="text-sm font-semibold text-foreground mb-1.5 block">
-            Session Name{" "}
+            Backup Name{" "}
             <span className="text-muted-foreground font-normal">
               (optional)
             </span>
@@ -2294,7 +2482,11 @@ export default function DeviceSetupPage() {
             type="text"
             value={sessionName}
             onChange={(e) => setSessionName(e.target.value)}
-            placeholder="My Backup"
+            placeholder={
+              sourceRef?.type === "device"
+                ? `iPhone Backup – ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
+                : `Backup – ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
+            }
             className="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring transition-colors"
           />
         </div>
@@ -2353,30 +2545,49 @@ export default function DeviceSetupPage() {
                     Last import: session #
                     {deviceImportState.last_import_session_id ?? "—"}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (
-                        deviceSerial &&
-                        confirm(
-                          "This will force a full re-scan on next import. Continue?",
-                        )
-                      ) {
-                        clearDeviceState.mutate(deviceSerial);
-                        setSetupOnlyNewMode(false);
-                      }
-                    }}
-                    disabled={clearDeviceState.isPending}
-                    className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <RefreshCw
-                      className={cn(
-                        "w-3 h-3",
-                        clearDeviceState.isPending && "animate-spin",
-                      )}
-                    />
-                    Forget last import
-                  </button>
+                  {confirmForget ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-amber-600 dark:text-amber-400">
+                        Force full scan?
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (deviceSerial) {
+                            clearDeviceState.mutate(deviceSerial);
+                            setSetupOnlyNewMode(false);
+                          }
+                          setConfirmForget(false);
+                        }}
+                        disabled={clearDeviceState.isPending}
+                        className="text-xs text-destructive hover:underline font-semibold"
+                      >
+                        Yes, forget
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmForget(false)}
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmForget(true)}
+                      disabled={clearDeviceState.isPending}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <RefreshCw
+                        className={cn(
+                          "w-3 h-3",
+                          clearDeviceState.isPending && "animate-spin",
+                        )}
+                      />
+                      Forget last import
+                    </button>
+                  )}
                 </div>
               </>
             ) : (
@@ -2490,12 +2701,85 @@ export default function DeviceSetupPage() {
         ) : null}
 
         {config && (
-          <div className="mt-4 pt-3 border-t border-border flex items-center gap-4 text-xs text-muted-foreground">
-            <span>Batch size: {config.batch_size}</span>
-            <span>Max retries: {config.max_retry}</span>
-            <span>Port: {config.port}</span>
-          </div>
+          <details className="mt-4 pt-3 border-t border-border">
+            <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+              Developer &amp; engine info
+            </summary>
+            <div className="flex items-center gap-4 text-xs text-muted-foreground mt-2 font-mono">
+              <span>Batch size: {config.batch_size}</span>
+              <span>Max retries: {config.max_retry}</span>
+              <span>Port: {config.port}</span>
+            </div>
+          </details>
         )}
+      </motion.div>
+
+      {/* How Transfera Protects Your Media */}
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.18 }}
+        className="bg-card border border-border rounded-xl p-5"
+      >
+        <details className="group">
+          <summary className="flex items-center justify-between cursor-pointer list-none">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4.5 h-4.5 text-action" />
+              <span className="text-sm font-semibold text-foreground">
+                How Transfera Protects Your Media
+              </span>
+            </div>
+            <ChevronRight className="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-90" />
+          </summary>
+
+          <div className="mt-4 pt-3 border-t border-border grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div className="p-3 bg-muted/30 border border-border/60 rounded-lg space-y-1">
+              <p className="font-semibold text-foreground flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-action" />
+                Two-Stage Verification
+              </p>
+              <p className="text-muted-foreground text-[11px] leading-relaxed">
+                Files are streamed to a temporary cache with cryptographic
+                BLAKE3 hashes. The app verifies every byte before final saving.
+              </p>
+            </div>
+
+            <div className="p-3 bg-muted/30 border border-border/60 rounded-lg space-y-1">
+              <p className="font-semibold text-foreground flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-action" />
+                Zero Overwrites
+              </p>
+              <p className="text-muted-foreground text-[11px] leading-relaxed">
+                Transfera never replaces existing files. If identical names
+                exist, numerical suffixes (e.g. _001) preserve all your photos
+                safely.
+              </p>
+            </div>
+
+            <div className="p-3 bg-muted/30 border border-border/60 rounded-lg space-y-1">
+              <p className="font-semibold text-foreground flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-action" />
+                Smart Date Organization
+              </p>
+              <p className="text-muted-foreground text-[11px] leading-relaxed">
+                Photos and videos are neatly sorted into Year/Month/Day folders
+                using camera EXIF timestamps, so you never have to file them
+                manually.
+              </p>
+            </div>
+
+            <div className="p-3 bg-muted/30 border border-border/60 rounded-lg space-y-1">
+              <p className="font-semibold text-foreground flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-action" />
+                Crash &amp; Disconnect Recovery
+              </p>
+              <p className="text-muted-foreground text-[11px] leading-relaxed">
+                If your PC restarts, sleeps, or the cable disconnects, Transfera
+                automatically resumes from the exact file it left off on.
+              </p>
+            </div>
+          </div>
+        </details>
       </motion.div>
 
       {/* Start Button */}

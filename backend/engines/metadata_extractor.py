@@ -271,10 +271,14 @@ def _fetch_latest_version() -> str | None:
     return _normalise_candidate_version(candidates[0])
 
 
-def _download_exiftool() -> Path | None:
+def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
     """
     Download the official ExifTool Windows zip, extract exiftool.exe,
     and clean up the archive. Returns the path to the extracted binary.
+
+    ``dest_dir`` selects the install root (defaults to the user-data
+    ``EXIFTOOL_DIR``). Release builds pass ``backend/bin/exiftool`` so the
+    binary ships inside the installer and first-run works offline.
     """
     import tempfile
 
@@ -320,7 +324,7 @@ def _download_exiftool() -> Path | None:
 
                 logger.info("Download complete: %d bytes -- extracting", zip_path.stat().st_size)
 
-                extracted = _extract_from_zip(zip_path)
+                extracted = _extract_from_zip(zip_path, dest_dir)
                 if extracted and extracted.is_file():
                     return extracted
             except (URLError, OSError, TimeoutError) as exc:
@@ -335,10 +339,14 @@ def _download_exiftool() -> Path | None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def _extract_from_zip(zip_path: Path) -> Path | None:
+def _extract_from_zip(zip_path: Path, dest_dir: Path | str | None = None) -> Path | None:
     """
     Extract the ExifTool distribution from the downloaded zip into the local
-    bin directory, resolving to EXIFTOOL_DIR/exiftool.exe.
+    bin directory, resolving to ``<dest>/exiftool.exe``.
+
+    ``dest_dir`` defaults to the user-data ``EXIFTOOL_DIR``; release builds
+    pass ``backend/bin/exiftool`` (``PACKAGED_EXIFTOOL_DIR``) so the binary
+    ships inside the installer.
 
     Layouts handled:
       * legacy: single dir with `exiftool.exe` / `exiftool(-k).exe` at root.
@@ -349,7 +357,8 @@ def _extract_from_zip(zip_path: Path) -> Path | None:
     """
     from pathlib import PurePath as _PurePath
 
-    EXIFTOOL_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(dest_dir) if dest_dir else EXIFTOOL_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -376,10 +385,10 @@ def _extract_from_zip(zip_path: Path) -> Path | None:
             # Extract the executable plus its bundled runtime tree (if any).
             # The exe lives one directory below the archive root
             # (<root>/exiftool(-k).exe); strip that root so the layout lands
-            # as EXIFTOOL_DIR/exiftool.exe + EXIFTOOL_DIR/exiftool_files/.
+            # as <out_dir>/exiftool.exe + <out_dir>/exiftool_files/.
             exe_entry = exe_names[0]
             root_prefix = exe_entry.rsplit("/", 1)[0] + "/"
-            target = EXIFTOOL_DIR / _EXIFTOOL_EXE_NAME
+            target = out_dir / _EXIFTOOL_EXE_NAME
 
             for member in zf.namelist():
                 if not member.startswith(root_prefix):
@@ -387,10 +396,10 @@ def _extract_from_zip(zip_path: Path) -> Path | None:
                 rel = member[len(root_prefix) :]
                 if not rel or rel.endswith("/"):
                     continue
-                # Zip-slip guard: stay inside EXIFTOOL_DIR
-                dest = EXIFTOOL_DIR / _PurePath(rel)
+                # Zip-slip guard: stay inside out_dir
+                dest = out_dir / _PurePath(rel)
                 try:
-                    dest.relative_to(EXIFTOOL_DIR)
+                    dest.relative_to(out_dir)
                 except ValueError:
                     logger.warning("Skipping suspicious zip entry: %s", member)
                     continue

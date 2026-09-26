@@ -6,6 +6,7 @@
 import { useState } from "react";
 import {
   History,
+  FolderOpen,
   ChevronLeft,
   ChevronRight,
   Loader2,
@@ -178,12 +179,27 @@ export default function TransferHistoryTable() {
                   </p>
                 </td>
                 <td className="py-2.5 pr-3 max-w-[180px]">
-                  <p
-                    className="text-xs text-foreground truncate"
-                    title={session.dest_root}
-                  >
-                    {truncatePath(session.dest_root)}
-                  </p>
+                  <div className="flex items-center gap-1 group/folder">
+                    <p
+                      className="text-xs text-foreground truncate"
+                      title={session.dest_root}
+                    >
+                      {truncatePath(session.dest_root)}
+                    </p>
+                    {isElectron && session.dest_root && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          window.electronAPI?.openPath(session.dest_root);
+                        }}
+                        className="p-1 rounded text-muted-foreground hover:text-foreground opacity-0 group-hover/folder:opacity-100 transition-opacity shrink-0"
+                        title="Open folder in Explorer"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </td>
                 <td className="py-2.5 pr-3 whitespace-nowrap">
                   <span className="text-xs text-foreground">

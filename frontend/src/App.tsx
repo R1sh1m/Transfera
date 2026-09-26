@@ -473,9 +473,9 @@ function BackendDownScreen() {
               First-Time Setup
             </h1>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Transfera needs to download and configure a portable Python
-              runtime (~15MB zip) and its backend libraries. This requires an
-              active internet connection and will take about 1-2 minutes.
+              Transfera needs to download and configure its processing tools
+              (~200–400 MB). This requires an active internet connection and
+              takes about 3–10 minutes depending on your connection.
             </p>
           </div>
 
@@ -537,11 +537,11 @@ function BackendDownScreen() {
           <ServerCrash className="w-8 h-8 text-red-500" />
         </div>
         <h1 className="text-xl font-bold text-foreground">
-          Backend Unavailable
+          Engine Unavailable
         </h1>
         <p className="text-sm text-muted-foreground">
-          The Transfera backend could not be reached. Please ensure the backend
-          process is running and try again.
+          Transfera couldn&apos;t start its engine. Try clicking Retry, or close
+          and reopen the app.
         </p>
         <button
           onClick={handleRetry}
@@ -549,7 +549,7 @@ function BackendDownScreen() {
           className="no-drag inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-pill text-sm font-normal hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
         >
           <RefreshCw className={cn("w-4 h-4", retrying && "animate-spin")} />
-          {retrying ? "Retrying..." : "Retry Connection"}
+          {retrying ? "Retrying..." : "Retry"}
         </button>
       </div>
     </motion.div>

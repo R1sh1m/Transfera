@@ -30,6 +30,7 @@ import {
 } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import TransferHistoryTable from "@/components/TransferHistoryTable";
+import MediaDetailModal from "@/components/MediaDetailModal";
 import {
   CapabilitiesBadge,
   DuplicatesPanel,
@@ -152,7 +153,13 @@ function useMasonryColumns(
 // ---------------------------------------------------------------------------
 // LibraryCard
 // ---------------------------------------------------------------------------
-function LibraryCard({ item }: { item: MediaItemInfo }) {
+function LibraryCard({
+  item,
+  onSelect,
+}: {
+  item: MediaItemInfo;
+  onSelect?: (item: MediaItemInfo) => void;
+}) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [noThumb, setNoThumb] = useState(false);
   const extLower = item.extension?.toLowerCase();
@@ -229,7 +236,8 @@ function LibraryCard({ item }: { item: MediaItemInfo }) {
       layout
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-card border border-border rounded-lg overflow-hidden group"
+      onClick={() => onSelect?.(item)}
+      className="bg-card border border-border hover:border-primary/50 rounded-lg overflow-hidden group cursor-pointer transition-all hover:shadow-xs"
     >
       {/* Preview Area */}
       <div
@@ -448,6 +456,8 @@ export default function LibraryPage() {
   const [section, setSection] = useState<LibrarySection>("vault");
   const [semanticQuery, setSemanticQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<MediaItemInfo | null>(null);
+  const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const [regenStatus, setRegenStatus] = useState<"idle" | "loading" | "done">(
     "idle",
   );
@@ -809,7 +819,7 @@ export default function LibraryPage() {
               : "border-input text-muted-foreground hover:bg-muted hover:text-foreground",
             regenStatus === "loading" && "opacity-60 cursor-not-allowed",
           )}
-          title="Re-generate thumbnails for items missing preview images"
+          title="Re-generate and refresh preview thumbnails for your library"
         >
           {regenStatus === "loading" ? (
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -818,7 +828,7 @@ export default function LibraryPage() {
           ) : (
             <RefreshCw className="w-4 h-4" />
           )}
-          {regenStatus === "done" ? "Done" : "Regen Thumbnails"}
+          {regenStatus === "done" ? "Updated" : "Refresh Previews"}
         </button>
 
         <button
@@ -961,10 +971,16 @@ export default function LibraryPage() {
         ) : library.items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
             <HardDrive className="w-12 h-12 mb-3 opacity-30" />
-            <p className="text-sm">No items in library yet</p>
-            <p className="text-xs mt-1">
-              Complete a transfer to see files here
+            <p className="text-sm font-semibold text-foreground">No items in library yet</p>
+            <p className="text-xs text-muted-foreground mt-1 max-w-xs text-center">
+              Complete your first backup to safely store and view your photos and videos here.
             </p>
+            <button
+              onClick={() => setCurrentPage("setup")}
+              className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"
+            >
+              Start a Transfer
+            </button>
           </div>
         ) : (
           <MediaGridBoundary>
@@ -973,7 +989,11 @@ export default function LibraryPage() {
                 {columns.map((col, colIdx) => (
                   <div key={colIdx} className="flex-1 space-y-2">
                     {col.map((item) => (
-                      <LibraryCard key={item.id} item={item} />
+                      <LibraryCard
+                        key={item.id}
+                        item={item}
+                        onSelect={setSelectedItem}
+                      />
                     ))}
                   </div>
                 ))}
@@ -984,7 +1004,8 @@ export default function LibraryPage() {
                   {library.items.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md hover:bg-muted/50 transition-colors"
+                      onClick={() => setSelectedItem(item)}
+                      className="flex items-center gap-3 px-3 py-2 bg-card border border-border hover:border-primary/50 hover:bg-muted/50 rounded-md transition-all cursor-pointer"
                     >
                       <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
                         {getIcon(item.extension)}
@@ -1028,6 +1049,11 @@ export default function LibraryPage() {
           </>
         )}
       </div>
+
+      <MediaDetailModal
+        item={selectedItem}
+        onClose={() => setSelectedItem(null)}
+      />
     </div>
   );
 }

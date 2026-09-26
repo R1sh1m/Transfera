@@ -273,6 +273,39 @@ def test_zip_extraction() -> None:
 
 
 # ======================================================================
+# 7b. Zip extraction to an explicit dest dir (release pre-seed path)
+# ======================================================================
+def test_zip_extraction_dest_dir() -> None:
+    print("\n=== Zip Extraction (explicit dest_dir) ===")
+
+    _reset_state()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        inner_dir = tmp / "exiftool_13.59_64"
+        inner_dir.mkdir()
+        (inner_dir / me._EXIFTOOL_EXE_NAME).write_bytes(b"fake-exiftool-binary")
+
+        zip_path = tmp / "exiftool-13.59_64.zip"
+        with me.zipfile.ZipFile(zip_path, "w") as zf:
+            zf.write(inner_dir / me._EXIFTOOL_EXE_NAME, f"exiftool-13.59_64/{me._EXIFTOOL_EXE_NAME}")
+
+        dest = tmp / "packaged" / "exiftool"
+        result = me._extract_from_zip(zip_path, dest)
+
+        _check(
+            "Extraction to dest_dir returns a Path",
+            result is not None and isinstance(result, Path),
+        )
+        if result:
+            _check(
+                "Extracted file exists under dest_dir",
+                result.is_file() and result.parent == dest,
+            )
+    _reset_state()
+
+
+# ======================================================================
 # 8. Download URL construction
 # ======================================================================
 def test_download_url_construction() -> None:

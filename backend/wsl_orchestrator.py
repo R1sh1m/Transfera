@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from backend.config import DATA_DIR
 
@@ -38,6 +39,77 @@ STATE_FILE = STATE_DIR / "tier2_state.json"
 BRIDGE_SCRIPT_NAME = "wsl_bridge.py"
 BRIDGE_INSTALL_PATH = "/opt/transfera-bridge"
 DISTRO_SAVE_PATH = DATA_DIR / "wsl_distro.txt"
+
+# ---------------------------------------------------------------------------
+# WSL service-level failure signatures
+# These indicate the WSL *service* (LxssManager) itself is broken, which is
+# distinct from "not installed" or "distro not found".  When any of these are
+# present in wsl.exe output the caller should stop retrying and show the
+# repair card instead.
+# ---------------------------------------------------------------------------
+WSL_SERVICE_BROKEN_SIGNATURES: list[str] = [
+    "e_unexpected",          # COM HRESULT 0x8000FFFF
+    "catastrophic failure",  # human-readable form of E_UNEXPECTED
+    "4294967295",            # rc == 0xFFFFFFFF returned as signed -1
+    "wsl/service",           # wsl --status "WSL/Service" subsystem error
+    "lxss",                  # LxssManager service errors
+    "0x8000ffff",            # hex form of E_UNEXPECTED
+    "failed to attach disk", # kernel module not loaded
+    "element not found",     # registry/service entry missing after corrupt update
+]
+
+
+def classify_wsl_failure(
+    rc: int,
+    stdout: str,
+    stderr: str,
+) -> Literal["service_broken", "not_installed", "transient", "ok"]:
+    """Classify a failed ``wsl.exe`` invocation into one of four buckets.
+
+    Parameters
+    ----------
+    rc:
+        Return code from the subprocess (``proc.returncode``).
+    stdout, stderr:
+        Decoded text from the process streams.
+
+    Returns
+    -------
+    ``"service_broken"``
+        The WSL *service* itself is broken (E_UNEXPECTED / 0xFFFFFFFF /
+        LxssManager crash). Repair required — stop retrying.
+    ``"not_installed"``
+        WSL feature or distro is simply not present.
+    ``"transient"``
+        Likely a timing / lock issue; caller may retry.
+    ``"ok"``
+        No failure detected (rc == 0).
+    """
+    if rc == 0:
+        return "ok"
+
+    combined = (stdout + stderr).lower()
+
+    # 0xFFFFFFFF returned as unsigned 32-bit or as signed Python int
+    if rc in (4294967295, -1):
+        return "service_broken"
+
+    for sig in WSL_SERVICE_BROKEN_SIGNATURES:
+        if sig in combined:
+            return "service_broken"
+
+    not_installed_hints = [
+        "not installed",
+        "no distribution",
+        "wsl_e_distro_not_found",
+        "please install a distribution",
+        "install ubuntu",
+    ]
+    for hint in not_installed_hints:
+        if hint in combined:
+            return "not_installed"
+
+    return "transient"
 
 # ---------------------------------------------------------------------------
 # Distro name resolution
@@ -178,6 +250,10 @@ class WSLStatus:
     virtualization_available: bool = False
     kernel_version: str | None = None
     error: str | None = None
+    # True when the WSL *service* (LxssManager) itself is broken, distinct from
+    # "not installed".  When True the UI should show the repair card and stop
+    # retrying bridge/network waits for the rest of the session.
+    wsl_service_broken: bool = False
 
 
 @dataclass
@@ -467,8 +543,23 @@ class WSLOrchestrator:
         status.virtualization_available = await self._check_virtualization()
 
         try:
-            rc, out, _ = await _run_cmd("wsl", "--list", "--verbose", timeout=10)
-            if rc == 0 and out.strip():
+            rc, out, err = await _run_cmd("wsl", "--list", "--verbose", timeout=10)
+            failure_class = classify_wsl_failure(rc, out, err)
+            if failure_class == "service_broken":
+                status.wsl_installed = False
+                status.wsl_service_broken = True
+                status.error = (
+                    "Windows Subsystem for Linux service is not responding "
+                    f"(rc={rc}). The WSL service (LxssManager) may be crashed "
+                    "or corrupted."
+                )
+                logger.error(
+                    "WSL service-level failure detected (rc=%s, class=service_broken). "
+                    "stdout=%r stderr=%r",
+                    rc, out[:200], err[:200],
+                )
+                return status
+            elif rc == 0 and out.strip():
                 status.wsl_installed = True
                 # First: use the dynamic resolver (saved → default → Ubuntu → first)
                 resolved = get_transfera_wsl_distro()
@@ -815,6 +906,23 @@ class WSLOrchestrator:
 
         # Wait for WSL networking to be ready before spawning the bridge
         # so it doesn't try to bind before the interface is up.
+        # Skip the wait entirely if the WSL service is known-broken — probing
+        # wsl.exe in that state would just loop for 20 s and still fail.
+        _feasibility = await self.check_feasibility()
+        if _feasibility.wsl_service_broken:
+            logger.error(
+                "start_bridge: WSL service is broken — aborting bridge start, "
+                "skipping 20s network wait"
+            )
+            status.error = (
+                "Windows Subsystem for Linux itself isn't working. "
+                "Please run 'wsl --update', then 'wsl --shutdown', restart Windows, "
+                "and try again. If the issue persists, reinstall WSL from the "
+                "Microsoft Store."
+            )
+            status.error_code = "WSL_SERVICE_BROKEN"
+            return status
+
         network_ok = False
         for _ in range(20):
             try:

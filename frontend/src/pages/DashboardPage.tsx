@@ -15,6 +15,7 @@ import {
   RefreshCw,
   ArrowRight,
   Folder,
+  FolderOpen,
   Archive,
   Loader2,
   Copy,
@@ -742,6 +743,18 @@ function SessionRow({ session }: { session: SessionInfo }) {
               Resume
             </button>
           )}
+          {["completed", "completed_with_errors"].includes(session.status) &&
+            session.dest_root &&
+            isElectron && (
+              <button
+                onClick={() => window.electronAPI?.openPath(session.dest_root)}
+                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+                title="Open destination folder in Explorer"
+              >
+                <FolderOpen className="w-3 h-3" />
+                Folder
+              </button>
+            )}
           {["completed", "completed_with_errors", "failed"].includes(
             session.status,
           ) &&
@@ -760,10 +773,10 @@ function SessionRow({ session }: { session: SessionInfo }) {
           ) &&
             !session.session_report_path && (
               <span
-                className="text-[10px] text-muted-foreground italic"
-                title="Report not generated — session did not complete"
+                className="text-xs text-muted-foreground"
+                title="Report not available — session did not complete"
               >
-                No report
+                —
               </span>
             )}
           {["completed", "completed_with_errors", "failed"].includes(
@@ -905,11 +918,11 @@ function WslSetupCard({ onDismiss }: { onDismiss: () => void }) {
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-foreground">
-          Set up WSL bridge for iPhone
+          Advanced iPhone Connection (Optional)
         </p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          WSL2 + usbipd-win gives you an open-source path to access iPhones when
-          the Apple driver is not available.
+          If standard Apple drivers are unavailable on your PC, you can connect
+          iPhones using an advanced background bridge.
         </p>
         <div className="flex items-center gap-2 mt-2">
           <button
@@ -918,7 +931,7 @@ function WslSetupCard({ onDismiss }: { onDismiss: () => void }) {
             }}
             className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded-md hover:bg-primary/90 transition-colors"
           >
-            Open Setup Wizard
+            Open Advanced Setup
           </button>
           <button
             onClick={onDismiss}
@@ -961,7 +974,7 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
           .getState()
           .showNotification(
             "error",
-            result.message || "pymobiledevice3 install failed",
+            result.message || "Failed to install iPhone support",
           );
         return;
       }
@@ -969,7 +982,7 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
         .getState()
         .showNotification(
           "success",
-          "pymobiledevice3 installed. Open-source AFC is now available.",
+          "iPhone support installed. Direct device access is ready.",
         );
       onDismiss();
     } catch (err) {
@@ -986,11 +999,11 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-foreground">
-          Install open-source iOS library
+          Install iPhone Support (Free)
         </p>
         <p className="text-xs text-muted-foreground mt-0.5">
-          pymobiledevice3 provides driverless iPhone access via AFC. Install it
-          now for open-source device support without Apple's driver.
+          Adds direct iPhone backup capability to Transfera without needing
+          Apple software or iTunes installed.
         </p>
         <div className="flex items-center gap-2 mt-2">
           <button
@@ -1000,7 +1013,7 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
           >
             {installPymobiledevice3.isPending
               ? "Installing..."
-              : "Install pymobiledevice3"}
+              : "Install iPhone Support"}
           </button>
           <button
             onClick={onDismiss}
@@ -1014,6 +1027,17 @@ function Pymobiledevice3InstallCard({ onDismiss }: { onDismiss: () => void }) {
   );
 }
 
+const DISMISSED_CARDS_STORAGE_KEY = "transfera_dismissed_setup_cards";
+
+function getInitialDismissedCards(): string[] {
+  try {
+    const raw = localStorage.getItem(DISMISSED_CARDS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
@@ -1024,10 +1048,18 @@ export default function DashboardPage() {
   const destRoot = useTransferStore((s) => s.transfer.destRoot);
 
   const { data: backendStatus } = useDeviceBackendStatus();
-  const [dismissedCards, setDismissedCards] = useState<string[]>([]);
+  const [dismissedCards, setDismissedCards] = useState<string[]>(getInitialDismissedCards);
 
   const dismissCard = (id: string) => {
-    setDismissedCards((prev) => [...prev, id]);
+    setDismissedCards((prev) => {
+      const next = [...prev, id];
+      try {
+        localStorage.setItem(DISMISSED_CARDS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
   };
 
   const showAppleCard =
@@ -1056,7 +1088,7 @@ export default function DashboardPage() {
       <div>
         <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Live system metrics and session management
+          Your backup history and system status
         </p>
       </div>
 
