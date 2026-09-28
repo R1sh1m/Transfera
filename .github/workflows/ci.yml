@@ -1,7 +1,8 @@
 # Transfera v2 — CI Pipeline
 #
-# Three parallel jobs: backend tests, frontend type-check, and lint.
-# Target: under 3 minutes total (no Playwright / E2E yet).
+# Four parallel jobs: backend tests, frontend type-check, lint, and Rust
+# (Tauri shell fmt + clippy + check on the Windows target).
+# Target: under 5 minutes total (no Playwright / E2E yet).
 
 name: CI
 
@@ -137,6 +138,48 @@ jobs:
       - name: Type-check frontend
         run: npm run typecheck
         working-directory: frontend
+
+  # ---------------------------------------------------------------------------
+  # Rust (Tauri shell) — fmt + clippy + check.
+  # Windows runner: the shell is Windows-only (WPD/COM helpers, NSIS bundle)
+  # and placeholder sidecar/resource exes are staged so the tauri build
+  # script's existence checks pass without packaging real binaries.
+  # ---------------------------------------------------------------------------
+  rust-checks:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend/src-tauri
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+
+      - name: Stage placeholder sidecar + resources (existence checks only)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path binaries, resources -Force | Out-Null
+          foreach ($f in @("binaries/transfera-engine-x86_64-pc-windows-msvc.exe", "resources/wpd_helper.exe", "resources/exiftool.exe")) {
+            if (-not (Test-Path $f)) { New-Item -ItemType File -Path $f -Force | Out-Null }
+          }
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy -- -D warnings
+
+      - name: Check
+        run: cargo check
 
   # ---------------------------------------------------------------------------
   # Dependency Review (PRs only)

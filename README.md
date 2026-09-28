@@ -16,19 +16,14 @@ Transfera copies your pictures and videos into one tidy, organized archive folde
 
 You need **Windows 10 or 11**. Nothing else to install.
 
-### Option 1: Portable — no installation at all (recommended for testing)
+### Option 1: Setup installer
 
-1. Go to **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)** and download `Transfera-Portable-X.Y.Z.zip`.
-2. Right-click it → **Extract All** → open the folder → double-click `Transfera.exe`.
-
-That is everything. No admin rights, no setup wizard. To remove it, just delete the folder.
-
-### Option 2: Setup installer
-
-1. From **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**, download `Transfera-Setup-X.Y.Z.exe` and run it.
+1. From **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**, download `Transfera-X.Y.Z-x64-setup.exe` and run it.
 2. It adds a Start-menu shortcut. To remove it later: Settings → Apps → Transfera → Uninstall.
 
-### Option 3: One command (winget)
+Small print: everything ships inside the installer (app, engine, AI runtime, helpers) — no first-launch downloads, no setup wizard. App data (library database, settings) lives in `%APPDATA%\Transfera` — delete that folder too for a fully clean removal. The AI search *weights* (~207 MB) download once when you first press **Get AI models** in the Library.
+
+### Option 2: One command (winget)
 
 ```powershell
 winget install --id Transfera.Transfera -e
@@ -43,7 +38,7 @@ You may see this warning the first time you run Transfera. It appears because th
 - You can verify your download yourself. Compare its fingerprint against `SHA256SUMS.txt` from the same release page:
 
   ```powershell
-  certutil -hashfile Transfera-Portable-X.Y.Z.zip SHA256
+  certutil -hashfile Transfera-X.Y.Z-x64-setup.exe SHA256
   ```
 
   If the long code matches, the file is exactly what GitHub built.
@@ -106,6 +101,8 @@ You need just two tools installed first (everything else — Python packages, np
 
 ```powershell
 winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS.LTS
+# For the Tauri shell (WebView2 app — the only packaged shell):
+winget install -e --id Rustlang.Rustup
 ```
 
 Then:
@@ -113,17 +110,18 @@ Then:
 ```powershell
 git clone https://github.com/R1sh1m/Transfera.git
 cd Transfera
-python run.py              # full app (backend + Electron window)
+python run.py              # full app (backend + Tauri window)
 ```
 
 | Command | What it does |
 |---|---|
 | `python run.py` | Start everything (recommended) |
 | `python run.py --backend` | API only, on `http://127.0.0.1:47821` |
-| `python run.py --frontend` | Electron + Vite dev shell only |
+| `python run.py --frontend` | Tauri dev shell only (adopts a running backend) |
+| `python run.py --tauri` | Backend + Tauri dev shell (WebView2) |
 | `python run.py --skip-deps` | Skip setup checks (fast relaunch) |
 
-First launch takes 2–4 minutes (creates `.venv`, installs packages, builds the frontend, downloads ExifTool). Later launches skip finished steps. Press **Ctrl+C** to stop everything cleanly.
+First launch takes 2–4 minutes (creates `.venv`, installs packages — AI runtime included from day one — builds the frontend, downloads ExifTool). Later launches skip finished steps. Press **Ctrl+C** to stop everything cleanly.
 
 Building the iPhone helper from source additionally needs MSVC (Visual Studio 2022 Build Tools with the C++ workload) — without it, folder backup still works fully; only iPhone/WPD detection stays unavailable.
 
@@ -135,7 +133,7 @@ Building the iPhone helper from source additionally needs MSVC (Visual Studio 20
 cd frontend && npm run typecheck                    # frontend types
 ```
 
-Keep `frontend/package.json`, `pyproject.toml`, and `winget/Transfera.Transfera.yaml` on the same version — the release workflow enforces `v<that-version>` tags against all three.
+Keep `frontend/package.json`, `pyproject.toml`, `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/Cargo.toml`, and `winget/Transfera.Transfera.yaml` on the same version — the release workflow enforces `v<that-version>` tags against all five.
 
 ### How it works (60 seconds)
 
@@ -152,8 +150,8 @@ Transfera/
 │   ├── requirements.txt   # backend deps (incl. onnxruntime for AI search)
 │   ├── data/              # runtime DB, cache, exports, logs, models (ignored)
 │   └── tests/             # pytest suite (isolated temp DBs — never touches yours)
-├── frontend/              # Electron 33 + React 18 + Vite + TypeScript + Tailwind
-│   ├── electron/          # main process, preload IPC
+├── frontend/              # Tauri 2 + React 18 + Vite + TypeScript + Tailwind
+│   ├── src-tauri/         # Tauri 2 shell (WebView2): lifecycle, tray, sidecar, updater
 │   └── src/pages/         # Dashboard, DeviceSetup, Transfer, Library
 ├── native/wpd_helper/     # C++ WPD helper source + build.bat
 └── .github/workflows/     # ci.yml (tests/typecheck/lint) + release.yml (build+sign)

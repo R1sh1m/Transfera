@@ -724,6 +724,28 @@ Horizontal result rail shown above the vault grid while a semantic query is acti
 - Count line: `text-xs text-muted-foreground` — "N semantic hits (keyword|clip) for “query”"
 - Rail: `flex gap-2 overflow-x-auto` of `w-20 shrink-0` cells (`aspect-square rounded-md bg-muted` thumb + `text-[10px] truncate` filename)
 
+### `component.liquid-glass`
+
+Apple-2025 material for floating chrome only (TitleBar, tab rows, action bars, modals, toasts). Never on content tiles, cards, or buttons.
+
+**Specs:**
+- Fill: `color-mix(var(--card) 68%, transparent)` (`.glass`) or 76% for bars (`.glass-bar`)
+- `backdrop-filter: blur(20-24px) saturate(180%)`, 1px `rgba(255,255,255,0.16)` border + inset top highlight
+- The one exception to the no-chrome-shadow rule: floaters carry `0 8px 32px rgba(0,0,0,0.12)` so the material lifts above Mica/WebView2
+- Disabled under `prefers-reduced-transparency` / `prefers-reduced-motion` (falls back to solid `var(--card)`)
+- Single accent unchanged; glass is neutral, only the active pill inside is Action Blue
+
+### `component.vault-card-perf`
+
+Library vault rendering contract (fixes the masonry column-update jank):
+
+**Specs:**
+- Cards are `React.memo` + `.vault-card` (`content-visibility: auto`, `contain-intrinsic-size: auto 260px`) — offscreen cards skip layout/paint
+- No Framer `layout` prop on cards; enter animation is the CSS `.vault-card-enter` keyframe (disabled under reduced-motion)
+- Thumbnails via shared 4-slot queue + `IntersectionObserver(rootMargin 400px)`; `<img loading="lazy" decoding="async">`
+- Column distribution is a pure `useMemo` over a bucketed 2/3/4 count — pixel resizes that don't change the bucket cost nothing
+- Store subscriptions are primitive-scoped; WS `hop1/hop2/scan_progress` events skip their patch when the displayed percent is unchanged
+
 ## Known Gaps
 
 - Form validation and error states were not surfaced on the analyzed pages; only the neutral search input is documented.
