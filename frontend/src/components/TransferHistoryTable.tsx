@@ -14,7 +14,8 @@ import {
 } from "lucide-react";
 import { useSessionList } from "@/lib/queries";
 import { StatusBadge } from "@/pages/DashboardPage";
-import { cn, isElectron, parseBackendDate } from "@/lib/utils";
+import { cn, parseBackendDate } from "@/lib/utils";
+import { isDesktop, openPath } from "@/lib/desktop";
 import type { SessionInfo } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -79,8 +80,8 @@ function formatDuration(
 
 function handleOpenReport(session: SessionInfo) {
   if (!session.session_report_path) return;
-  if (isElectron && window.electronAPI?.openPath) {
-    window.electronAPI.openPath(session.session_report_path);
+  if (isDesktop) {
+    openPath(session.session_report_path);
   } else {
     window.open(`/api/sessions/${session.id}/report?fmt=html`, "_blank");
   }
@@ -186,12 +187,12 @@ export default function TransferHistoryTable() {
                     >
                       {truncatePath(session.dest_root)}
                     </p>
-                    {isElectron && session.dest_root && (
+                    {isDesktop && session.dest_root && (
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          window.electronAPI?.openPath(session.dest_root);
+                          openPath(session.dest_root);
                         }}
                         className="p-1 rounded text-muted-foreground hover:text-foreground opacity-0 group-hover/folder:opacity-100 transition-opacity shrink-0"
                         title="Open folder in Explorer"

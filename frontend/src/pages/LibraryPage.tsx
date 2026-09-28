@@ -3,7 +3,15 @@
 // Masonry view of completed items with infinite scroll.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useRef, useCallback, useState, Component } from "react";
+import {
+  useEffect,
+  useRef,
+  useCallback,
+  useState,
+  Component,
+  memo,
+  useMemo,
+} from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Image,
@@ -43,6 +51,7 @@ import apiClient from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
 import { cn } from "@/lib/utils";
 import { fetchThumbnail } from "@/lib/thumbnail-fetch";
+import { createThumbQueue } from "@/lib/thumb-queue";
 import type { MediaItemInfo, HopStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -116,44 +125,60 @@ function formatSize(bytes: number) {
 }
 
 // ---------------------------------------------------------------------------
-// Masonry Grid Column Heights
+// Masonry Grid Column Distribution (pure, memoized — no setState loop)
 // ---------------------------------------------------------------------------
-function useMasonryColumns(
+// Previously this was a useState+useEffect that called setColumns on every
+// items/width change, re-rendering the whole grid at file-rate during
+// transfers and on every pixel of window resize. Now: pure useMemo over a
+// bucketed column count (2/3/4), so pixel resizes that don't change the
+// bucket cost nothing, and Framer `layout` measurement is gone (see
+// LibraryCard). Offscreen cards additionally skip layout/paint via
+// `.vault-card { content-visibility: auto }` in index.css.
+function colCountForWidth(containerWidth: number): number {
+  return containerWidth > 900 ? 4 : containerWidth > 600 ? 3 : 2;
+}
+
+function distributeMasonry(
   items: MediaItemInfo[],
-  containerWidth: number,
-  gap = 8,
-) {
-  const [columns, setColumns] = useState<MediaItemInfo[][]>([]);
+  colCount: number,
+): MediaItemInfo[][] {
+  const cols: MediaItemInfo[][] = Array.from({ length: colCount }, () => []);
+  const heights = Array(colCount).fill(0);
 
-  useEffect(() => {
-    const colCount = containerWidth > 900 ? 4 : containerWidth > 600 ? 3 : 2;
-    const cols: MediaItemInfo[][] = Array.from({ length: colCount }, () => []);
-    const heights = Array(colCount).fill(0);
-
-    for (const item of items) {
-      const shortestCol = heights.indexOf(Math.min(...heights));
-      const col = cols[shortestCol];
-      if (col) {
-        col.push(item);
-      }
-      // Vary height by extension type
-      const isVideo =
-        item.extension === ".mp4" ||
-        item.extension === ".mov" ||
-        item.extension === ".mkv";
-      heights[shortestCol] += isVideo ? 220 : 160;
+  for (const item of items) {
+    const shortestCol = heights.indexOf(Math.min(...heights));
+    const col = cols[shortestCol];
+    if (col) {
+      col.push(item);
     }
+    // Vary height by extension type
+    const isVideo =
+      item.extension === ".mp4" ||
+      item.extension === ".mov" ||
+      item.extension === ".mkv";
+    heights[shortestCol] += isVideo ? 220 : 160;
+  }
 
-    setColumns(cols);
-  }, [items, containerWidth, gap]);
-
-  return columns;
+  return cols;
 }
 
 // ---------------------------------------------------------------------------
-// LibraryCard
+// LibraryCard — memoized, queue-gated thumbnails, no Framer layout thrash.
 // ---------------------------------------------------------------------------
-function LibraryCard({
+// Perf notes:
+// - `memo` + stable `onSelect` (useCallback at call site) means a column
+//   rebalance re-renders only moved cards, not all N.
+// - The old `motion.div layout` forced Framer to measure every card on every
+//   render (layout thrash at 200+ cards). Enter animation is now a cheap CSS
+//   keyframe (`.vault-card-enter`), disabled under reduced-motion.
+// - Thumbnails go through a shared 4-slot queue + IntersectionObserver
+//   (same pattern as TransferPage's PreviewThumbnail), so a 50-item page
+//   fires ~4 concurrent fetches instead of ~50. Offscreen cards never fetch.
+// - `content-visibility: auto` (`.vault-card`) lets the browser skip
+//   layout/paint for offscreen cards entirely.
+const libraryThumbQueue = createThumbQueue(4);
+
+const LibraryCard = memo(function LibraryCard({
   item,
   onSelect,
 }: {
@@ -162,6 +187,8 @@ function LibraryCard({
 }) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [noThumb, setNoThumb] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const cellRef = useRef<HTMLDivElement>(null);
   const extLower = item.extension?.toLowerCase();
   const isImage =
     extLower &&
@@ -197,9 +224,30 @@ function LibraryCard({
     );
   const isFailed = item.thumbnail_status === "failed";
 
+  // Only observe visibility / fetch when a thumbnail can exist.
   useEffect(() => {
-    if (isFailed || noThumb) return;
-    // Allow fetching if thumbnail_status is 'ready' OR 'pending' (endpoint generates on demand)
+    const el = cellRef.current;
+    if (!el || isFailed || noThumb) return;
+    if (
+      item.thumbnail_status !== "ready" &&
+      item.thumbnail_status !== "pending"
+    )
+      return;
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          setVisible(true);
+          obs.disconnect();
+        }
+      },
+      { rootMargin: "400px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [item.id, item.thumbnail_status, isFailed, noThumb]);
+
+  useEffect(() => {
+    if (!visible || isFailed || noThumb) return;
     if (
       item.thumbnail_status !== "ready" &&
       item.thumbnail_status !== "pending"
@@ -208,21 +256,52 @@ function LibraryCard({
 
     const controller = new AbortController();
     let cancelled = false;
+    let slotHeld = false;
 
-    fetchThumbnail(item.id, item.updated_at, controller.signal).then((url) => {
-      if (cancelled) return;
-      if (url) {
-        setThumbUrl(url);
-      } else {
-        setNoThumb(true);
+    libraryThumbQueue.request(async () => {
+      if (cancelled) {
+        libraryThumbQueue.release();
+        return;
+      }
+      slotHeld = true;
+      try {
+        const url = await fetchThumbnail(
+          item.id,
+          item.updated_at,
+          controller.signal,
+        );
+        if (cancelled) return;
+        if (url) {
+          setThumbUrl(url);
+        } else {
+          setNoThumb(true);
+        }
+      } catch {
+        if (!cancelled) setNoThumb(true);
+      } finally {
+        if (slotHeld) {
+          slotHeld = false;
+          libraryThumbQueue.release();
+        }
       }
     });
 
     return () => {
       cancelled = true;
       controller.abort();
+      if (slotHeld) {
+        slotHeld = false;
+        libraryThumbQueue.release();
+      }
     };
-  }, [item.id, item.thumbnail_status, isFailed, noThumb]);
+  }, [
+    visible,
+    item.id,
+    item.thumbnail_status,
+    item.updated_at,
+    isFailed,
+    noThumb,
+  ]);
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
@@ -232,12 +311,10 @@ function LibraryCard({
   }, [thumbUrl]);
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
+    <div
+      ref={cellRef}
       onClick={() => onSelect?.(item)}
-      className="bg-card border border-border hover:border-primary/50 rounded-lg overflow-hidden group cursor-pointer transition-all hover:shadow-xs"
+      className="vault-card vault-card-enter bg-card border border-border hover:border-primary/50 rounded-lg overflow-hidden group cursor-pointer transition-colors hover:shadow-xs"
     >
       {/* Preview Area */}
       <div
@@ -259,6 +336,8 @@ function LibraryCard({
           <img
             src={thumbUrl}
             alt={item.file_name}
+            loading="lazy"
+            decoding="async"
             className="w-full h-full object-cover"
             onError={() => {
               setThumbUrl(null);
@@ -309,9 +388,9 @@ function LibraryCard({
           </span>
         </div>
       </div>
-    </motion.div>
+    </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Confirm Dialog
@@ -464,7 +543,6 @@ export default function LibraryPage() {
   const [showClearDialog, setShowClearDialog] = useState(false);
   const clearLibrary = useClearLibrary();
 
-  const library = useTransferStore((s) => s.library);
   const appendLibraryItems = useTransferStore((s) => s.appendLibraryItems);
   const resetLibrary = useTransferStore((s) => s.resetLibrary);
   const setLoadingMore = useTransferStore((s) => s.setLoadingMore);
@@ -524,7 +602,6 @@ export default function LibraryPage() {
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
   const filterKeyRef = useRef(0);
   const loadedPages = useRef<Set<number>>(new Set());
 
@@ -596,30 +673,65 @@ export default function LibraryPage() {
       });
   }, [data, queryClient]);
 
-  // Measure container
+  // Measure container — bucketed + rAF-debounced. Only the 2/3/4-column
+  // bucket is stored, so pixel-level resizes that don't change the bucket
+  // cost nothing (previously every pixel fired setState → full masonry
+  // rebalance → N card re-renders during a window drag).
+  const [colBucket, setColBucket] = useState(3);
   useEffect(() => {
     if (!containerRef.current) return;
+    let raf = 0;
     const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setContainerWidth(entry.contentRect.width);
-      }
+      const w = entries[0]?.contentRect.width;
+      if (w == null) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        setColBucket((prev) => {
+          const next = colCountForWidth(w);
+          return next === prev ? prev : next;
+        });
+      });
     });
     observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
   }, []);
 
-  const columns = useMasonryColumns(library.items, containerWidth);
+  // Narrow store subscription: primitives only, so transfer-progress polls
+  // (500ms) and WS hop events don't re-render this page unless the library
+  // list itself changed.
+  const libraryItems = useTransferStore((s) => s.library.items);
+  const libraryTotal = useTransferStore((s) => s.library.total);
+  const libraryPage = useTransferStore((s) => s.library.page);
+  const libraryTotalPages = useTransferStore((s) => s.library.totalPages);
+  const libraryIsLoadingMore = useTransferStore((s) => s.library.isLoadingMore);
+
+  // Pure memoized distribution — no setState loop. Recomputes only when the
+  // item list identity or the column bucket changes.
+  const columns: MediaItemInfo[][] = useMemo(
+    () => distributeMasonry(libraryItems, colBucket),
+    [libraryItems, colBucket],
+  );
+
+  // Stable select handler so memo(LibraryCard) isn't defeated by a new
+  // closure on every render.
+  const handleSelectItem = useCallback(
+    (item: MediaItemInfo) => setSelectedItem(item),
+    [],
+  );
 
   // Infinite scroll observer
   const loadMore = useCallback(() => {
-    if (library.isLoadingMore || isFetching) return;
-    if (library.total === 0 || library.page > library.totalPages) return;
+    if (libraryIsLoadingMore || isFetching) return;
+    if (libraryTotal === 0 || libraryPage > libraryTotalPages) return;
     setLoadingMore(true);
     setFetchPage((p) => p + 1);
   }, [
-    library.isLoadingMore,
-    library.page,
-    library.totalPages,
+    libraryIsLoadingMore,
+    libraryPage,
+    libraryTotalPages,
     isFetching,
     setLoadingMore,
   ]);
@@ -682,7 +794,7 @@ export default function LibraryPage() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">Library</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {library.total} items completed
+            {libraryTotal} items completed
           </p>
         </div>
         <CapabilitiesBadge />
@@ -833,7 +945,7 @@ export default function LibraryPage() {
 
         <button
           onClick={() => setShowClearDialog(true)}
-          disabled={library.total === 0}
+          disabled={libraryTotal === 0}
           className="flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border border-input text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           title="Clear all library entries"
         >
@@ -863,7 +975,7 @@ export default function LibraryPage() {
       <ConfirmDialog
         open={showClearDialog}
         title="Clear Library"
-        description={`This will permanently remove all ${library.total} library item(s), their database records, and generated thumbnails from the app.\n\nThis only clears app-managed records and cached thumbnails — your actual photos and videos at the transfer destination are NOT affected and will not be deleted.\n\nThis action cannot be undone.`}
+        description={`This will permanently remove all ${libraryTotal} library item(s), their database records, and generated thumbnails from the app.\n\nThis only clears app-managed records and cached thumbnails — your actual photos and videos at the transfer destination are NOT affected and will not be deleted.\n\nThis action cannot be undone.`}
         confirmLabel="Clear Library"
         onConfirm={() => {
           if (pollIntervalRef.current) {
@@ -953,7 +1065,7 @@ export default function LibraryPage() {
       <div ref={containerRef} className="flex-1 overflow-y-auto">
         {section !== "vault" ? null : viewMode === "history" ? (
           <TransferHistoryTable />
-        ) : isLoading && library.items.length === 0 ? (
+        ) : isLoading && libraryItems.length === 0 ? (
           <div className="grid grid-cols-3 gap-3">
             {Array.from({ length: 9 }).map((_, i) => (
               <div
@@ -968,12 +1080,15 @@ export default function LibraryPage() {
               </div>
             ))}
           </div>
-        ) : library.items.length === 0 ? (
+        ) : libraryItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
             <HardDrive className="w-12 h-12 mb-3 opacity-30" />
-            <p className="text-sm font-semibold text-foreground">No items in library yet</p>
+            <p className="text-sm font-semibold text-foreground">
+              No items in library yet
+            </p>
             <p className="text-xs text-muted-foreground mt-1 max-w-xs text-center">
-              Complete your first backup to safely store and view your photos and videos here.
+              Complete your first backup to safely store and view your photos
+              and videos here.
             </p>
             <button
               onClick={() => setCurrentPage("setup")}
@@ -992,7 +1107,7 @@ export default function LibraryPage() {
                       <LibraryCard
                         key={item.id}
                         item={item}
-                        onSelect={setSelectedItem}
+                        onSelect={handleSelectItem}
                       />
                     ))}
                   </div>
@@ -1001,7 +1116,7 @@ export default function LibraryPage() {
             ) : (
               <div className="space-y-1">
                 <AnimatePresence>
-                  {library.items.map((item) => (
+                  {libraryItems.map((item) => (
                     <div
                       key={item.id}
                       onClick={() => setSelectedItem(item)}
@@ -1031,19 +1146,19 @@ export default function LibraryPage() {
         )}
 
         {/* Infinite scroll sentinel — only for non-history views */}
-        {viewMode !== "history" && library.page <= library.totalPages && (
+        {viewMode !== "history" && libraryPage <= libraryTotalPages && (
           <>
             <div ref={sentinelRef} className="h-10" />
-            {(library.isLoadingMore || isFetching) && (
+            {(libraryIsLoadingMore || isFetching) && (
               <div className="flex justify-center py-4">
                 <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
               </div>
             )}
-            {library.total > library.items.length &&
-              !library.isLoadingMore &&
+            {libraryTotal > libraryItems.length &&
+              !libraryIsLoadingMore &&
               !isFetching && (
                 <p className="text-center text-xs text-muted-foreground py-2">
-                  {library.items.length} of {library.total} items shown
+                  {libraryItems.length} of {libraryTotal} items shown
                 </p>
               )}
           </>

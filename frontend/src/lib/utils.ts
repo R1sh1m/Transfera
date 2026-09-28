@@ -101,9 +101,8 @@ export function extractErrorMessage(error: unknown): string {
   return toUserFriendlyError(error);
 }
 
-export const isElectron: boolean =
-  typeof window !== "undefined" &&
-  !!(window as unknown as Record<string, unknown>).electronAPI;
+// NOTE: isElectron was removed with the Electron shell (Tauri-only now).
+// Shell detection lives in "@/lib/desktop" (isTauri / isDesktop / shellKind).
 
 // Backend timestamps are naive UTC ("2026-09-24T18:14:30.23") — SQLite has
 // no tz storage. `new Date()` parses those as *local* time, shifting every

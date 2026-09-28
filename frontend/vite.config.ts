@@ -42,6 +42,9 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
+    // strictPort must stay false for `run.py --frontend` (Electron dev may
+    // already hold 5173); `tauri dev` pins the port via its own config and
+    // fails loudly on collision, which is what we want there.
     strictPort: false,
     proxy: {
       "/api": {

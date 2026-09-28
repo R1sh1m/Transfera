@@ -1,0 +1,26 @@
+[package]
+name = "transfera"
+version = "2.5.1"
+description = "Transfera v2 - Local media backup desktop app (Tauri shell)"
+authors = ["Transfera Team"]
+edition = "2021"
+
+# Keep in sync: frontend/package.json ↔ pyproject.toml ↔
+# winget/Transfera.Transfera.yaml ↔ src-tauri/tauri.conf.json (release.yml gates all four).
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

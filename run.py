@@ -647,9 +647,15 @@ def _wait_for_backend_readiness(proc: subprocess.Popen, port: int) -> None:
     )
 
 
-def _launch_frontend_dev() -> subprocess.Popen | None:
-    _info(f"Starting Electron dev shell (Vite + Electron on port {VITE_PORT})...")
-    cmd = ["npm", "run", "electron:dev"]
+def _launch_tauri_dev() -> subprocess.Popen | None:
+    """Start the Tauri dev shell (WebView2 + Vite HMR).
+
+    The backend is managed by run.py, so the shell adopts it via its
+    /api/health probe (TRANSFERA_EXTERNAL_BACKEND=1) instead of spawning
+    the (not yet frozen) sidecar. Requires `cargo` + WebView2 runtime.
+    """
+    _info("Starting Tauri dev shell (WebView2 + Vite HMR)...")
+    cmd = ["npm", "run", "tauri:dev"]
     env = {**os.environ, "TRANSFERA_EXTERNAL_BACKEND": "1"}
     try:
         proc = subprocess.Popen(
@@ -661,10 +667,10 @@ def _launch_frontend_dev() -> subprocess.Popen | None:
             shell=IS_WINDOWS,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
         )
-        _ok(f"Electron dev process started (PID {proc.pid})")
+        _ok(f"Tauri dev process started (PID {proc.pid})")
         return proc
     except OSError as exc:
-        _err(f"Failed to start Electron dev shell: {exc}")
+        _err(f"Failed to start Tauri dev shell: {exc}")
         return None
 
 
@@ -745,7 +751,7 @@ def _sweep_remaining(label: str) -> bool:
     remaining = _get_transfera_processes(exclude_pid=own_pid)
     if remaining:
         # Fallback: kill by image name for known stubborn processes
-        for img in ("electron.exe", "node.exe", "python.exe"):
+        for img in ("transfera.exe", "node.exe", "python.exe"):
             if img == "python.exe":
                 try:
                     subprocess.run(
@@ -845,12 +851,18 @@ def _check_stray_processes() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Transfera development stack orchestrator")
     parser.add_argument("--backend", action="store_true", help="Start backend only")
-    parser.add_argument("--frontend", action="store_true", help="Start Vite dev server only")
+    parser.add_argument(
+        "--frontend", action="store_true", help="Start Tauri dev shell only (adopts an already-running backend)"
+    )
+    parser.add_argument("--tauri", action="store_true", help="Start backend + Tauri dev shell (WebView2)")
     parser.add_argument("--skip-deps", action="store_true", help="Skip dependency checks")
     args = parser.parse_args()
 
     if args.backend and args.frontend:
         _err("--backend and --frontend are mutually exclusive -- pass only one, or neither for the full stack")
+        sys.exit(2)
+    if args.tauri and (args.backend or args.frontend):
+        _err("--tauri cannot be combined with --backend/--frontend -- it starts backend + Tauri shell together")
         sys.exit(2)
 
     start_backend = not args.frontend
@@ -870,7 +882,7 @@ def main() -> None:
     |          Transfera v2  Dev Stack           |
     |     Backend : http://127.0.0.1:{BACKEND_PORT}      |
     |     Frontend: http://127.0.0.1:{BACKEND_PORT}      |
-    |     Electron: Vite + Electron (dev)   |
+    |     Shell   : Tauri dev (WebView2 + Vite HMR) |
     +------------------------------------------+
 {_C.RESET}""")
 
@@ -940,7 +952,7 @@ def main() -> None:
         _wait_for_backend_readiness(_backend_proc, BACKEND_PORT)
 
     if start_frontend:
-        _frontend_proc = _launch_frontend_dev()
+        _frontend_proc = _launch_tauri_dev()
         if _frontend_proc is None:
             _err("Cannot continue without frontend -- exiting")
             _terminate_process_tree(_backend_proc, "Backend")
