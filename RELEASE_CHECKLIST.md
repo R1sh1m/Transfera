@@ -2,13 +2,14 @@
 
 Run through this matrix before publishing a GitHub release tag (`v*`).
 The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml` ↔
+`frontend/src-tauri/tauri.conf.json` ↔ `frontend/src-tauri/Cargo.toml` ↔
 `winget/Transfera.Transfera.yaml` (`PackageVersion`) all matching the tag.
 
 ## Pre-flight
 
-- [ ] `frontend/package.json`, `pyproject.toml`, `winget/Transfera.Transfera.yaml` versions all equal the tag (without the leading `v`).
-- [ ] `python run.py` boots clean on a dev machine (backend `:47821` healthy, Electron window opens).
-- [ ] `SHA256SUMS.txt` generated and verified in CI for every shipped `.exe`.
+- [ ] `frontend/package.json`, `pyproject.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `winget/Transfera.Transfera.yaml` versions all equal the tag (without the leading `v`).
+- [ ] `python run.py` boots clean on a dev machine (backend `:47821` healthy, Tauri window opens).
+- [ ] `SHA256SUMS.txt` generated and verified in CI for the shipped Tauri installer.
 
 ## Test matrix
 
@@ -22,6 +23,10 @@ The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml`
 | 6 | Port occupied | Occupy `127.0.0.1:47821` (or `:5173` for `--frontend`) with another process, run `python run.py` | Orchestrator exits before spawning, naming the blocked port and owner, with the `netstat -ano \| findstr :<port>` / `taskkill /F /PID <pid>` remediation |
 | 7 | AV-locked exe | Run with antivirus real-time protection on (or simulate a lock on `backend/bin/wpd_helper.exe` during build) | Build surfaces the `LNK1104` guidance (close backend, retry, check AV/file-sync locks) instead of a raw linker dump; freshly-written binaries are not quarantined on launch |
 | 8 | Transfer complete notification | Complete a transfer, click the native OS notification | App opens/focuses and navigates to the HTML report or Dashboard session row |
+| 9 | Tauri fresh install | Remove `%APPDATA%/Transfera`, install Tauri NSIS build, launch offline-capable | Dashboard reachable with zero first-run downloads (frozen sidecar + single-file ExifTool bundled); no setup screen for base |
+| 10 | Tauri sidecar crash | Kill `transfera-engine` mid-transfer | `backend:down` screen appears; Resume recovers via `recovery.py`, no partials in archive |
+| 11 | Second launch while running | Launch Tauri app twice | Single-instance focuses existing window; no second backend on `:47821` |
+| 12 | 10k-file scroll (perf) | 10k-file library, scroll vault + resize window | No visible jank; columns update without full-grid flash (memoized cards, bucketed masonry, queued thumbnails) |
 
 ## Sign-off
 
