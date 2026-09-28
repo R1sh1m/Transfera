@@ -118,7 +118,6 @@ async def get_tier2_status(_: None = Depends(require_local_token)) -> Tier2Statu
     )
 
 
-
 @router.get("/preview", response_model=Tier2SetupPreviewResponse)
 async def get_setup_preview(_: None = Depends(require_local_token)) -> Tier2SetupPreviewResponse:
     """

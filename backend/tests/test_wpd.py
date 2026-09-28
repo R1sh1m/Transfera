@@ -2,6 +2,7 @@
 Quick smoke test for WpdBackend.
 Run: python -m backend.tests.test_wpd
 """
+
 from __future__ import annotations
 
 import asyncio

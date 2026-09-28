@@ -93,6 +93,7 @@ class UnifiedDeviceManager:
         ``needs_elevation``, ``elevation_command``, ``exit_code``.
         """
         from backend.ios_driver_installer import ensure_apple_service_running as _ensure_service
+
         result = await _ensure_service()
         return {
             "state": result.state,

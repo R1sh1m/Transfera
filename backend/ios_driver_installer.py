@@ -105,9 +105,7 @@ def _find_winget() -> str:
     w = shutil.which("winget")
     if w:
         return w
-    fallback = os.path.expandvars(
-        "%LOCALAPPDATA%\\Microsoft\\WindowsApps\\winget.exe"
-    )
+    fallback = os.path.expandvars("%LOCALAPPDATA%\\Microsoft\\WindowsApps\\winget.exe")
     if os.path.isfile(fallback):
         return fallback
     raise FileNotFoundError("winget not found on PATH or in WindowsApps")
@@ -123,7 +121,8 @@ def build_install_args(version: str | None = None) -> list[str]:
     args: list[str] = [
         "install",
         "-e",
-        "--id", APPLE_DRIVER_PACKAGE_ID,
+        "--id",
+        APPLE_DRIVER_PACKAGE_ID,
         "--accept-package-agreements",
         "--accept-source-agreements",
         "--silent",
@@ -227,7 +226,9 @@ def verify_package() -> PackageVerification:
             timeout=30,
         )
         if result.returncode != 0:
-            error_msg = result.stderr.strip() or result.stdout.strip() or f"winget show exited with code {result.returncode}"
+            error_msg = (
+                result.stderr.strip() or result.stdout.strip() or f"winget show exited with code {result.returncode}"
+            )
             logger.warning("Package verification failed: %s", error_msg)
             pkg = PackageVerification(
                 success=False,
@@ -530,8 +531,7 @@ async def ensure_apple_service_running() -> AppleServiceStatus:
         return AppleServiceStatus(
             state="error",
             message=(
-                f"sc start returned exit code {start_result.returncode}: "
-                f"{start_stderr.strip() or start_stdout.strip()}"
+                f"sc start returned exit code {start_result.returncode}: {start_stderr.strip() or start_stdout.strip()}"
             ),
             exit_code=start_result.returncode,
         )

@@ -72,10 +72,12 @@ class TestEnsureServiceRunning:
         assert result.state == "running"
         assert result.exit_code == 0
         assert mock_sc.call_count == 2
-        mock_sc.assert_has_calls([
-            call(["query", APPLE_SERVICE_NAME], 10),
-            call(["start", APPLE_SERVICE_NAME], 30),
-        ])
+        mock_sc.assert_has_calls(
+            [
+                call(["query", APPLE_SERVICE_NAME], 10),
+                call(["start", APPLE_SERVICE_NAME], 30),
+            ]
+        )
 
     @patch("backend.ios_driver_installer._run_sc_command")
     async def test_stopped_and_start_needs_elevation(self, mock_sc):
@@ -159,6 +161,7 @@ class TestAutoRecoverUSB:
     @staticmethod
     def _mock_attach_result(attached: bool = True, error: str | None = None):
         from backend.wsl_orchestrator import Tier2DeviceStatus
+
         return Tier2DeviceStatus(
             busid="1-1",
             bound=True,
@@ -222,7 +225,8 @@ class TestAutoRecoverUSB:
         )
         orch.attach_device = AsyncMock(
             return_value=self._mock_attach_result(
-                attached=False, error="access denied (5)",
+                attached=False,
+                error="access denied (5)",
             ),
         )
         result = await orch.auto_recover_apple_device()
@@ -233,11 +237,13 @@ class TestAutoRecoverUSB:
     async def test_multiple_apple_devices_mixed_states(self):
         """Multiple devices: one attached, one needs bind, one auto-attached."""
         orch = WSLOrchestrator()
-        orch.list_usb_devices = AsyncMock(return_value=[
-            self._apple_device(busid="1-1", attached=True),        # already good
-            self._apple_device(busid="1-2", bound=False),          # needs bind
-            self._apple_device(busid="1-3", bound=True, attached=False),  # can attach
-        ])
+        orch.list_usb_devices = AsyncMock(
+            return_value=[
+                self._apple_device(busid="1-1", attached=True),  # already good
+                self._apple_device(busid="1-2", bound=False),  # needs bind
+                self._apple_device(busid="1-3", bound=True, attached=False),  # can attach
+            ]
+        )
         orch.attach_device = AsyncMock(
             return_value=self._mock_attach_result(attached=True),
         )

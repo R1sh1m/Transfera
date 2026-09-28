@@ -25,6 +25,7 @@ These tests document bugs that were identified and fixed:
    lock-wait retry strategy and exposed ``error_code="APT_LOCK_TIMEOUT"``
    in the response so the frontend can show a targeted message.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -103,15 +104,17 @@ class TestAptLockTimeout:
     def test_error_code_surfaced(self, mock_get_manager, test_client):
         """When provision_linux fails due to apt lock, error_code is set."""
         mock_orch = MagicMock()
-        mock_orch.provision_linux = AsyncMock(return_value=Tier2StepResult(
-            step_id="provision_linux",
-            completed=False,
-            error="Failed to Update package lists: "
-                  "E: Could not get lock /var/lib/apt/lists/lock. "
-                  "It is held by process 1186 (apt-get)",
-            error_code="APT_LOCK_TIMEOUT",
-            details={"steps_completed": []},
-        ))
+        mock_orch.provision_linux = AsyncMock(
+            return_value=Tier2StepResult(
+                step_id="provision_linux",
+                completed=False,
+                error="Failed to Update package lists: "
+                "E: Could not get lock /var/lib/apt/lists/lock. "
+                "It is held by process 1186 (apt-get)",
+                error_code="APT_LOCK_TIMEOUT",
+                details={"steps_completed": []},
+            )
+        )
         mock_manager = MagicMock()
         mock_manager.get_orchestrator.return_value = mock_orch
         mock_get_manager.return_value = mock_manager
@@ -131,13 +134,15 @@ class TestAptLockTimeout:
     def test_other_error_no_error_code(self, mock_get_manager, test_client):
         """A non-lock error does not set error_code."""
         mock_orch = MagicMock()
-        mock_orch.provision_linux = AsyncMock(return_value=Tier2StepResult(
-            step_id="provision_linux",
-            completed=False,
-            error="Failed to Update package lists: apt-get returned exit code 1",
-            error_code=None,
-            details={"steps_completed": []},
-        ))
+        mock_orch.provision_linux = AsyncMock(
+            return_value=Tier2StepResult(
+                step_id="provision_linux",
+                completed=False,
+                error="Failed to Update package lists: apt-get returned exit code 1",
+                error_code=None,
+                details={"steps_completed": []},
+            )
+        )
         mock_manager = MagicMock()
         mock_manager.get_orchestrator.return_value = mock_orch
         mock_get_manager.return_value = mock_manager
@@ -156,13 +161,15 @@ class TestAptLockTimeout:
     def test_success_no_error_code(self, mock_get_manager, test_client):
         """A successful provision does not set error_code or error."""
         mock_orch = MagicMock()
-        mock_orch.provision_linux = AsyncMock(return_value=Tier2StepResult(
-            step_id="provision_linux",
-            completed=True,
-            error=None,
-            error_code=None,
-            details={"steps_completed": ["Update package lists", "Install USB/IP tools, Python, usbmuxd"]},
-        ))
+        mock_orch.provision_linux = AsyncMock(
+            return_value=Tier2StepResult(
+                step_id="provision_linux",
+                completed=True,
+                error=None,
+                error_code=None,
+                details={"steps_completed": ["Update package lists", "Install USB/IP tools, Python, usbmuxd"]},
+            )
+        )
         mock_manager = MagicMock()
         mock_manager.get_orchestrator.return_value = mock_orch
         mock_get_manager.return_value = mock_manager
@@ -239,6 +246,7 @@ class TestThumbnailBrokenFile:
         )
         db_session.add(item)
         import asyncio
+
         asyncio.run(db_session.commit())
 
         cached_path = Path("/nonexistent/schedule_test_cached.jpg")
@@ -255,10 +263,12 @@ class TestThumbnailBrokenFile:
         status = None
         while time.monotonic() < deadline:
             import asyncio
+
             async def _check():
                 async with __import__("backend.database.manager", fromlist=["session_scope"]).session_scope() as s:
                     upd = await s.get(MediaItem, item.id)
                     return upd.thumbnail_status if upd else None
+
             status = asyncio.run(_check())
             if status == "failed":
                 break
@@ -277,6 +287,7 @@ class TestThumbnailBrokenFile:
         import io
 
         from PIL import Image
+
         img = Image.open(io.BytesIO(data))
         assert img.format == "JPEG"
         assert img.size == (120, 120)

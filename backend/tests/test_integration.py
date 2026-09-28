@@ -273,7 +273,10 @@ def test_scan_missing_source(client: httpx.Client) -> None:
 
 def test_full_pipeline(client: httpx.Client) -> None:
     """Test scan -> batch -> hop1 -> hop2 pipeline with temp files."""
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as src_dir, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as dest_dir:
+    with (
+        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as src_dir,
+        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as dest_dir,
+    ):
         src = Path(src_dir)
         dest = Path(dest_dir)
 
@@ -302,8 +305,10 @@ def test_full_pipeline(client: httpx.Client) -> None:
         r2 = client.get(f"/api/sessions/{sid}")
         if r2.status_code == 200:
             session_data = _json(r2)
-            _check(session_data["status"] in ("created", "running", "completed"),
-                   f"Unexpected status: {session_data['status']}")
+            _check(
+                session_data["status"] in ("created", "running", "completed"),
+                f"Unexpected status: {session_data['status']}",
+            )
 
 
 # ======================================================================

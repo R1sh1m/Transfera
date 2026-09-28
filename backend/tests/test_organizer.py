@@ -102,6 +102,7 @@ def test_organizer_basic() -> None:
 
         # Item with a known created_at
         from datetime import datetime
+
         item = MediaItem(
             source_path="/src/photo.jpg",
             file_name="photo.jpg",
@@ -133,6 +134,7 @@ def test_organizer_year_month() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "archive"
         from datetime import datetime
+
         item = MediaItem(
             source_path="/src/video.mp4",
             file_name="video.mp4",
@@ -199,6 +201,7 @@ def test_organizer_conflict() -> None:
         existing.write_bytes(b"existing")
 
         from datetime import datetime
+
         item = MediaItem(
             source_path="/src/photo.jpg",
             file_name="photo.jpg",
@@ -306,6 +309,7 @@ async def test_no_duplicates() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -339,6 +343,7 @@ async def test_exact_duplicates() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -391,6 +396,7 @@ async def test_potential_duplicates() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -445,6 +451,7 @@ async def test_hash_collision_different_size() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -470,9 +477,11 @@ async def test_hash_collision_different_size() -> None:
             session.add(archived)
 
         report = await scan_batch_duplicates(batch_ids[0])
-        _check("Same hash + different size = NOT exact dup",
-               len(report.exact_duplicates) == 0,
-               f"got {len(report.exact_duplicates)}")
+        _check(
+            "Same hash + different size = NOT exact dup",
+            len(report.exact_duplicates) == 0,
+            f"got {len(report.exact_duplicates)}",
+        )
 
 
 # ======================================================================
@@ -499,6 +508,7 @@ async def test_check_batch_ws_event() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -566,6 +576,7 @@ async def test_check_batch_no_duplicates() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -590,6 +601,7 @@ def test_organizer_flat() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "archive"
         from datetime import datetime
+
         item = MediaItem(
             source_path="/src/img.png",
             file_name="img.png",

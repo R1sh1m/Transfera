@@ -19,12 +19,14 @@ from backend.database.models import HopStatus, MediaItem, TransferBatch
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Report data structures
 # ---------------------------------------------------------------------------
 @dataclass
 class DuplicateEntry:
     """A single detected duplicate / potential-duplicate."""
+
     item_id: int
     file_name: str
     source_path: str
@@ -41,6 +43,7 @@ class DuplicateEntry:
 @dataclass
 class DuplicateReport:
     """Full report returned by ``check_batch()``."""
+
     batch_id: int
     session_id: int
     checked_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -116,11 +119,7 @@ async def scan_batch_duplicates(
         if batch is None:
             raise ValueError(f"TransferBatch {batch_id} does not exist")
 
-        result = await session.execute(
-            select(MediaItem)
-            .where(MediaItem.batch_id == batch_id)
-            .order_by(MediaItem.id)
-        )
+        result = await session.execute(select(MediaItem).where(MediaItem.batch_id == batch_id).order_by(MediaItem.id))
         items = list(result.scalars().all())
 
         if not items:
@@ -149,8 +148,7 @@ async def scan_batch_duplicates(
             # Incomplete, cancelled, or failed transfers from other sessions must NEVER be flagged as
             # vaulted duplicates.
             archive_result = await session.execute(
-                select(MediaItem)
-                .where(
+                select(MediaItem).where(
                     MediaItem.id.notin_([i.id for i in items]),
                     MediaItem.final_status == HopStatus.COMPLETED.value,
                     or_(*conditions),
@@ -218,19 +216,21 @@ def _detect_duplicates(
         if item_hash and item_hash in hash_index:
             for archived in hash_index[item_hash]:
                 if archived.file_size == item.file_size:
-                    report.exact_duplicates.append(DuplicateEntry(
-                        item_id=item.id,
-                        file_name=item.file_name,
-                        source_path=item.source_path,
-                        source_hash=item.source_hash,
-                        file_size=item.file_size,
-                        match_type="exact",
-                        matched_path=archived.source_path,
-                        matched_item_id=archived.id,
-                        matched_file_size=archived.file_size,
-                        matched_date_taken=_make_matched_date(archived),
-                        matched_thumbnail_url=_make_matched_url(archived),
-                    ))
+                    report.exact_duplicates.append(
+                        DuplicateEntry(
+                            item_id=item.id,
+                            file_name=item.file_name,
+                            source_path=item.source_path,
+                            source_hash=item.source_hash,
+                            file_size=item.file_size,
+                            match_type="exact",
+                            matched_path=archived.source_path,
+                            matched_item_id=archived.id,
+                            matched_file_size=archived.file_size,
+                            matched_date_taken=_make_matched_date(archived),
+                            matched_thumbnail_url=_make_matched_url(archived),
+                        )
+                    )
                     break
 
         # --- Potential match (name matches, hash differs or missing) ---
@@ -242,7 +242,26 @@ def _detect_duplicates(
                 # Only flag if hash is present and differs
                 if item_hash and archived.source_hash:
                     if item_hash != archived.source_hash.lower():
-                        report.potential_duplicates.append(DuplicateEntry(
+                        report.potential_duplicates.append(
+                            DuplicateEntry(
+                                item_id=item.id,
+                                file_name=item.file_name,
+                                source_path=item.source_path,
+                                source_hash=item.source_hash,
+                                file_size=item.file_size,
+                                match_type="potential",
+                                matched_path=archived.source_path,
+                                matched_item_id=archived.id,
+                                matched_file_size=archived.file_size,
+                                matched_date_taken=_make_matched_date(archived),
+                                matched_thumbnail_url=_make_matched_url(archived),
+                            )
+                        )
+                        break
+                elif not item_hash and archived.file_size == item.file_size:
+                    # Same name, same size, no hash — potential
+                    report.potential_duplicates.append(
+                        DuplicateEntry(
                             item_id=item.id,
                             file_name=item.file_name,
                             source_path=item.source_path,
@@ -254,27 +273,14 @@ def _detect_duplicates(
                             matched_file_size=archived.file_size,
                             matched_date_taken=_make_matched_date(archived),
                             matched_thumbnail_url=_make_matched_url(archived),
-                        ))
-                        break
-                elif not item_hash and archived.file_size == item.file_size:
-                    # Same name, same size, no hash — potential
-                    report.potential_duplicates.append(DuplicateEntry(
-                        item_id=item.id,
-                        file_name=item.file_name,
-                        source_path=item.source_path,
-                        source_hash=item.source_hash,
-                        file_size=item.file_size,
-                        match_type="potential",
-                        matched_path=archived.source_path,
-                        matched_item_id=archived.id,
-                        matched_file_size=archived.file_size,
-                        matched_date_taken=_make_matched_date(archived),
-                        matched_thumbnail_url=_make_matched_url(archived),
-                    ))
+                        )
+                    )
                     break
 
     logger.info(
-        "Duplicate scan batch %d: %s", batch_id, report.summary,
+        "Duplicate scan batch %d: %s",
+        batch_id,
+        report.summary,
     )
     return report
 
@@ -312,50 +318,54 @@ async def check_batch(
         report.processing_paused = True
         logger.warning(
             "DUPLICATES DETECTED in batch %d: %s — processing paused.",
-            batch_id, report.summary,
+            batch_id,
+            report.summary,
         )
 
         # Emit WebSocket alert with full matched item details
-        await event_bus.emit("duplicates_detected", {
-            "batch_id": report.batch_id,
-            "session_id": report.session_id,
-            "exact_count": len(report.exact_duplicates),
-            "potential_count": len(report.potential_duplicates),
-            "summary": report.summary,
-            "exact_duplicates": [
-                {
-                    "item_id": e.item_id,
-                    "file_name": e.file_name,
-                    "source_path": e.source_path,
-                    "source_hash": e.source_hash,
-                    "file_size": e.file_size,
-                    "match_type": e.match_type,
-                    "matched_path": e.matched_path,
-                    "matched_item_id": e.matched_item_id,
-                    "matched_file_size": e.matched_file_size,
-                    "matched_date_taken": e.matched_date_taken,
-                    "matched_thumbnail_url": e.matched_thumbnail_url,
-                }
-                for e in report.exact_duplicates
-            ],
-            "potential_duplicates": [
-                {
-                    "item_id": e.item_id,
-                    "file_name": e.file_name,
-                    "source_path": e.source_path,
-                    "source_hash": e.source_hash,
-                    "file_size": e.file_size,
-                    "match_type": e.match_type,
-                    "matched_path": e.matched_path,
-                    "matched_item_id": e.matched_item_id,
-                    "matched_file_size": e.matched_file_size,
-                    "matched_date_taken": e.matched_date_taken,
-                    "matched_thumbnail_url": e.matched_thumbnail_url,
-                }
-                for e in report.potential_duplicates
-            ],
-            "paused_at": report.checked_at.isoformat(),
-        })
+        await event_bus.emit(
+            "duplicates_detected",
+            {
+                "batch_id": report.batch_id,
+                "session_id": report.session_id,
+                "exact_count": len(report.exact_duplicates),
+                "potential_count": len(report.potential_duplicates),
+                "summary": report.summary,
+                "exact_duplicates": [
+                    {
+                        "item_id": e.item_id,
+                        "file_name": e.file_name,
+                        "source_path": e.source_path,
+                        "source_hash": e.source_hash,
+                        "file_size": e.file_size,
+                        "match_type": e.match_type,
+                        "matched_path": e.matched_path,
+                        "matched_item_id": e.matched_item_id,
+                        "matched_file_size": e.matched_file_size,
+                        "matched_date_taken": e.matched_date_taken,
+                        "matched_thumbnail_url": e.matched_thumbnail_url,
+                    }
+                    for e in report.exact_duplicates
+                ],
+                "potential_duplicates": [
+                    {
+                        "item_id": e.item_id,
+                        "file_name": e.file_name,
+                        "source_path": e.source_path,
+                        "source_hash": e.source_hash,
+                        "file_size": e.file_size,
+                        "match_type": e.match_type,
+                        "matched_path": e.matched_path,
+                        "matched_item_id": e.matched_item_id,
+                        "matched_file_size": e.matched_file_size,
+                        "matched_date_taken": e.matched_date_taken,
+                        "matched_thumbnail_url": e.matched_thumbnail_url,
+                    }
+                    for e in report.potential_duplicates
+                ],
+                "paused_at": report.checked_at.isoformat(),
+            },
+        )
 
     return report
 
@@ -365,16 +375,20 @@ async def resume_after_duplicates(batch_id: int) -> None:
     Called after the user reviews the DuplicateReport and decides to
     proceed.  Emits a ``"duplicates_resolved"`` event.
     """
-    await event_bus.emit("duplicates_resolved", {
-        "batch_id": batch_id,
-        "resolved_at": datetime.now(UTC).isoformat(),
-    })
+    await event_bus.emit(
+        "duplicates_resolved",
+        {
+            "batch_id": batch_id,
+            "resolved_at": datetime.now(UTC).isoformat(),
+        },
+    )
     logger.info("Duplicates resolved for batch %d — processing resumed.", batch_id)
 
 
 # ---------------------------------------------------------------------------
 # Pre-scan (hash-free, filename + size match)
 # ---------------------------------------------------------------------------
+
 
 async def prescan_against_library(
     candidates: list[dict],
@@ -401,22 +415,17 @@ async def prescan_against_library(
     if not candidates:
         return {"checked": 0, "likely_duplicate_count": 0, "likely_duplicate_paths": []}
 
-
     from backend.database.manager import session_scope
     from backend.database.models import HopStatus
 
     async with session_scope() as session:
         result = await session.execute(
-            select(MediaItem.file_name, MediaItem.file_size).where(
-                MediaItem.final_status == HopStatus.COMPLETED.value
-            )
+            select(MediaItem.file_name, MediaItem.file_size).where(MediaItem.final_status == HopStatus.COMPLETED.value)
         )
         rows = result.fetchall()
 
     # Build O(1) lookup set: (lowercase_name, size_bytes) -> True
-    library_set: set[tuple[str, int]] = {
-        (row[0].lower(), row[1]) for row in rows if row[0] and row[1] is not None
-    }
+    library_set: set[tuple[str, int]] = {(row[0].lower(), row[1]) for row in rows if row[0] and row[1] is not None}
 
     likely_duplicate_paths: list[str] = []
     for c in candidates:

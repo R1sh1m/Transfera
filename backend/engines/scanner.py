@@ -115,9 +115,18 @@ def _sort_key(meta: FileMetadata) -> datetime:
 # ---------------------------------------------------------------------------
 
 # Extensions we attempt EXIF extraction for on iOS devices
-_IOS_EXIF_IMAGE_EXTS = frozenset({
-    ".jpg", ".jpeg", ".heic", ".heif", ".tiff", ".tif", ".webp", ".dng",
-})
+_IOS_EXIF_IMAGE_EXTS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".heic",
+        ".heif",
+        ".tiff",
+        ".tif",
+        ".webp",
+        ".dng",
+    }
+)
 _IOS_EXIF_VIDEO_EXTS = frozenset({".mov", ".mp4", ".m4v", ".3gp"})
 
 
@@ -169,6 +178,7 @@ async def _extract_ios_file_date(
                     raw = exif.get(36867) or exif.get(36868) or exif.get(306)
                     if raw and str(raw).strip():
                         from backend.engines.metadata_extractor import _parse_exif_datetime
+
                         dt = _parse_exif_datetime(str(raw).strip())
                         if dt is not None:
                             return dt
@@ -241,7 +251,8 @@ async def _scan_ios_device(
     # 1. Recursively collect all media files from the device
     logger.info(
         "Scanning iOS device %s at %s (cutoff=%s)",
-        serial, afc_path,
+        serial,
+        afc_path,
         cutoff_datetime.isoformat() if cutoff_datetime else "none",
     )
 
@@ -257,12 +268,10 @@ async def _scan_ios_device(
     lockdown = None
     try:
         from backend.ios_device import _get_afc_service
+
         afc_service, lockdown = await _get_afc_service(serial)
     except Exception:
-        logger.warning(
-            "Could not open AFC service for EXIF extraction; "
-            "iOS items will get dates from Hop 2 instead"
-        )
+        logger.warning("Could not open AFC service for EXIF extraction; iOS items will get dates from Hop 2 instead")
 
     try:
         for fi in device_files:
@@ -305,7 +314,9 @@ async def _scan_ios_device(
             if afc_service is not None:
                 try:
                     exif_date = await _extract_ios_file_date(
-                        afc_service, fi.path, ext,
+                        afc_service,
+                        fi.path,
+                        ext,
                     )
                     if exif_date is not None:
                         meta.date_taken = exif_date
@@ -328,7 +339,8 @@ async def _scan_ios_device(
     if skipped_by_cutoff > 0:
         logger.info(
             "Skipped %d files at or before cutoff from device %s",
-            skipped_by_cutoff, serial,
+            skipped_by_cutoff,
+            serial,
         )
 
     total = len(entries)
@@ -365,9 +377,7 @@ async def _scan_ios_device(
     return inserted_ids
 
 
-async def _walk_ios_directory(
-    serial: str, path: str
-) -> list:
+async def _walk_ios_directory(serial: str, path: str) -> list:
     """
     Recursively walk an iOS device directory via unified manager.
 
@@ -433,18 +443,17 @@ async def _scan_local_files(
         if allowed_paths is not None:
             # Selective mode: only process explicitly listed paths
             media_files = sorted(
-                Path(p) for p in allowed_paths
-                if Path(p).is_file() and Path(p).suffix.lower() in ALL_MEDIA_EXTENSIONS
+                Path(p) for p in allowed_paths if Path(p).is_file() and Path(p).suffix.lower() in ALL_MEDIA_EXTENSIONS
             )
             logger.info(
                 "Selective scan: %d pre-selected files (skipped rglob of %s)",
-                len(media_files), source,
+                len(media_files),
+                source,
             )
         else:
             # Full scan
             media_files = sorted(
-                p for p in source.rglob("*")
-                if p.is_file() and p.suffix.lower() in ALL_MEDIA_EXTENSIONS
+                p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in ALL_MEDIA_EXTENSIONS
             )
     else:
         logger.error("Source path does not exist: %s", source)
@@ -537,10 +546,7 @@ def _schedule_local_thumbnails(
     from backend.engines.thumbnail_cache import thumbnail_cache
     from backend.engines.thumbnailer import generate_thumbnail_bytes
 
-    id_to_path = {
-        row_id: fpath
-        for row_id, (fpath, _meta, _lp) in zip(item_ids, entries)
-    }
+    id_to_path = {row_id: fpath for row_id, (fpath, _meta, _lp) in zip(item_ids, entries)}
 
     # Use up to 8 workers, capped at the number of logical CPUs.  Pillow image
     # decode + JPEG re-encode is CPU-bound and benefits linearly from cores.
@@ -563,15 +569,11 @@ def _schedule_local_thumbnails(
 
     def _generate_all() -> None:
         from backend.engines.cache_manager import _ensure_thumb_worker, _thumb_update_queue
+
         _ensure_thumb_worker()
 
-        with ThreadPoolExecutor(
-            max_workers=worker_count, thread_name_prefix="prescan-thumb"
-        ) as pool:
-            futures = {
-                pool.submit(_generate_one, rid, fp): rid
-                for rid, fp in id_to_path.items()
-            }
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="prescan-thumb") as pool:
+            futures = {pool.submit(_generate_one, rid, fp): rid for rid, fp in id_to_path.items()}
             for future in as_completed(futures):
                 result = future.result()
                 if result is not None:
@@ -581,7 +583,8 @@ def _schedule_local_thumbnails(
 
         logger.debug(
             "Pre-scan thumbnail batch complete: %d total (%d workers)",
-            len(id_to_path), worker_count,
+            len(id_to_path),
+            worker_count,
         )
 
     t = threading.Thread(target=_generate_all, daemon=True, name="pre-scan-thumbnails")
@@ -753,9 +756,7 @@ async def _upsert_media_item(
     Resolves the item's date using the shared fallback chain and stores it
     along with provenance (date_source).
     """
-    lookup = select(MediaItem.id, MediaItem.final_status).where(
-        MediaItem.source_path == meta.file_path
-    )
+    lookup = select(MediaItem.id, MediaItem.final_status).where(MediaItem.source_path == meta.file_path)
     if session_id is not None:
         lookup = lookup.where(MediaItem.session_id == session_id)
     result = await session.execute(lookup)
@@ -768,11 +769,7 @@ async def _upsert_media_item(
             # associated with the *current* session, not a stale one from
             # an earlier scan that happened to share the same source_path.
             if session_id is not None:
-                stmt = (
-                    update(MediaItem)
-                    .where(MediaItem.id == existing_id)
-                    .values(session_id=session_id)
-                )
+                stmt = update(MediaItem).where(MediaItem.id == existing_id).values(session_id=session_id)
                 await session.execute(stmt)
             logger.debug("Reusing existing row id=%d for %s", existing_id, meta.file_path)
             return existing_id

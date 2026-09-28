@@ -60,8 +60,8 @@ class SessionStatus(str, enum.Enum):
 class BatchStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
-    LOADING = "loading"        # Hop 1 in progress (source -> cache)
-    ARCHIVED = "archived"      # Hop 2 in progress (cache -> destination)
+    LOADING = "loading"  # Hop 1 in progress (source -> cache)
+    ARCHIVED = "archived"  # Hop 2 in progress (cache -> destination)
     COMPLETED = "completed"
     FAILED = "failed"
     PARTIAL = "partial"
@@ -89,15 +89,9 @@ class MediaItem(Base):
     extension: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # --- Hop state machine ---
-    hop1_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=HopStatus.PENDING.value
-    )
-    hop2_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=HopStatus.PENDING.value
-    )
-    final_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=HopStatus.PENDING.value
-    )
+    hop1_status: Mapped[str] = mapped_column(String(32), nullable=False, default=HopStatus.PENDING.value)
+    hop2_status: Mapped[str] = mapped_column(String(32), nullable=False, default=HopStatus.PENDING.value)
+    final_status: Mapped[str] = mapped_column(String(32), nullable=False, default=HopStatus.PENDING.value)
 
     # --- Foreign keys ---
     batch_id: Mapped[int | None] = mapped_column(
@@ -112,90 +106,48 @@ class MediaItem(Base):
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # --- Thumbnail ---
-    thumbnail_path: Mapped[str | None] = mapped_column(
-        String(4096), nullable=True
-    )
+    thumbnail_path: Mapped[str | None] = mapped_column(String(4096), nullable=True)
     thumbnail_status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending"
     )  # 'pending' | 'ready' | 'failed'
 
     # --- Date resolution ---
-    date_taken: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    date_taken: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     date_source: Mapped[str | None] = mapped_column(
         String(32), nullable=True
     )  # "exif", "file_modified", or None (unsorted)
 
     # --- Live Photo grouping ---
-    live_photo_group: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    live_photo_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # --- Intelligence: perceptual + semantic identity (offline-first) ---
-    phash: Mapped[str | None] = mapped_column(
-        String(16), nullable=True, default=None
-    )
-    width: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, default=None
-    )
-    height: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, default=None
-    )
-    duration_s: Mapped[float | None] = mapped_column(
-        Float, nullable=True, default=None
-    )
-    camera_make: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, default=None
-    )
-    camera_model: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, default=None
-    )
-    gps_lat: Mapped[float | None] = mapped_column(
-        Float, nullable=True, default=None
-    )
-    gps_lon: Mapped[float | None] = mapped_column(
-        Float, nullable=True, default=None
-    )
-    favorite: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
-    trashed: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
-    trashed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, default=None
-    )
-    blur_score: Mapped[float | None] = mapped_column(
-        Float, nullable=True, default=None
-    )
-    tags_json: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None
-    )
-    caption: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None
-    )
+    phash: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    camera_make: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    camera_model: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    gps_lat: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    gps_lon: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    trashed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    blur_score: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    tags_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # --- Original capture time (extracted pre-copy for sort order) ---
-    original_capture_time: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    original_capture_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- Timestamps ---
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )
 
     # --- Relationships ---
-    batch: Mapped[TransferBatch | None] = relationship(
-        back_populates="items", lazy="selectin"
-    )
-    session: Mapped[TransferSession | None] = relationship(
-        back_populates="items", lazy="selectin"
-    )
+    batch: Mapped[TransferBatch | None] = relationship(back_populates="items", lazy="selectin")
+    session: Mapped[TransferSession | None] = relationship(back_populates="items", lazy="selectin")
 
     __table_args__ = (
         Index("ix_media_items_hop1_status", "hop1_status"),
@@ -243,12 +195,8 @@ class TransferSession(Base):
     session_name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_root: Mapped[str] = mapped_column(String(4096), nullable=False)
     dest_root: Mapped[str] = mapped_column(String(4096), nullable=False)
-    transfer_mode: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="copy"
-    )
-    status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=SessionStatus.CREATED.value
-    )
+    transfer_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="copy")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=SessionStatus.CREATED.value)
 
     # --- Counters ---
     total_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -264,22 +212,16 @@ class TransferSession(Base):
     total_batches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # --- Volume tracking ---
-    total_bytes_volume: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True, default=None
-    )
+    total_bytes_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
 
     # --- Report path ---
-    session_report_path: Mapped[str | None] = mapped_column(
-        String(4096), nullable=True, default=None
-    )
+    session_report_path: Mapped[str | None] = mapped_column(String(4096), nullable=True, default=None)
 
     # --- Error tracking ---
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- Folder layout ---
-    folder_layout: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="year/month"
-    )
+    folder_layout: Mapped[str] = mapped_column(String(32), nullable=False, default="year/month")
 
     # --- Incremental import ---
     only_new_mode: Mapped[bool] = mapped_column(nullable=False, default=False)
@@ -288,51 +230,31 @@ class TransferSession(Base):
     selected_files_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # --- Duplicate resolution persistence ---
-    resolved_batch_id: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, default=None
-    )
-    duplicate_resolutions_json: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None
-    )
+    resolved_batch_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    duplicate_resolutions_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # --- Pause / resume timing ---
-    paused_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, default=None
-    )
-    total_paused_ms: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0
-    )
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    total_paused_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # --- Speed tracking ---
-    speed_samples: Mapped[str | None] = mapped_column(
-        Text, nullable=True, default=None
-    )
+    speed_samples: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # --- Timestamps ---
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- Relationships ---
     batches: Mapped[list[TransferBatch]] = relationship(
         back_populates="session", lazy="selectin", cascade="all, delete-orphan"
     )
-    items: Mapped[list[MediaItem]] = relationship(
-        back_populates="session", lazy="selectin"
-    )
+    items: Mapped[list[MediaItem]] = relationship(back_populates="session", lazy="selectin")
 
-    __table_args__ = (
-        Index("ix_transfer_sessions_status", "status"),
-    )
+    __table_args__ = (Index("ix_transfer_sessions_status", "status"),)
 
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("status", SessionStatus.CREATED.value)
@@ -370,9 +292,7 @@ class TransferBatch(Base):
         Integer, ForeignKey("transfer_sessions.id", ondelete="CASCADE"), nullable=False
     )
     batch_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=BatchStatus.PENDING.value
-    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=BatchStatus.PENDING.value)
 
     # --- Counters ---
     total_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -383,30 +303,18 @@ class TransferBatch(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- Timestamps ---
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- Relationships ---
-    session: Mapped[TransferSession] = relationship(
-        back_populates="batches", lazy="selectin"
-    )
-    items: Mapped[list[MediaItem]] = relationship(
-        back_populates="batch", lazy="selectin"
-    )
+    session: Mapped[TransferSession] = relationship(back_populates="batches", lazy="selectin")
+    items: Mapped[list[MediaItem]] = relationship(back_populates="batch", lazy="selectin")
 
-    __table_args__ = (
-        Index("ix_transfer_batches_session_id", "session_id"),
-    )
+    __table_args__ = (Index("ix_transfer_batches_session_id", "session_id"),)
 
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("batch_number", 1)
@@ -445,9 +353,7 @@ class DeviceImportState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     device_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    last_successful_cutoff: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_successful_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_import_session_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("transfer_sessions.id", ondelete="SET NULL"), nullable=True
     )
@@ -455,9 +361,7 @@ class DeviceImportState(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )
 
-    __table_args__ = (
-        Index("ix_device_import_states_device_id", "device_id"),
-    )
+    __table_args__ = (Index("ix_device_import_states_device_id", "device_id"),)
 
     def __init__(self, **kwargs: object) -> None:
         now = _utcnow()
@@ -469,6 +373,7 @@ class DeviceImportState(Base):
 
     def __repr__(self) -> str:
         return f"<DeviceImportState device_id={self.device_id!r} cutoff={self.last_successful_cutoff}>"
+
 
 # ---------------------------------------------------------------------------
 # persons / faces (offline face clustering — SCRFD + ArcFace via ONNX,
@@ -482,9 +387,7 @@ class Person(Base):
     face_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cover_face_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )
@@ -498,18 +401,12 @@ class Face(Base):
     __tablename__ = "faces"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    media_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False
-    )
-    person_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("persons.id", ondelete="SET NULL"), nullable=True
-    )
+    media_id: Mapped[int] = mapped_column(Integer, ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False)
+    person_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("persons.id", ondelete="SET NULL"), nullable=True)
     bbox_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     embedding_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
     person: Mapped[Person | None] = relationship(back_populates="faces", lazy="selectin")
 
@@ -525,9 +422,7 @@ class Face(Base):
 class MediaEmbedding(Base):
     __tablename__ = "media_embeddings"
 
-    media_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("media_items.id", ondelete="CASCADE"), primary_key=True
-    )
+    media_id: Mapped[int] = mapped_column(Integer, ForeignKey("media_items.id", ondelete="CASCADE"), primary_key=True)
     model: Mapped[str] = mapped_column(String(64), nullable=False, default="keyword-v1")
     dim: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     vector_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)

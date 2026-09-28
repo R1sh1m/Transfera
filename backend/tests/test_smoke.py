@@ -101,9 +101,7 @@ async def smoke_test() -> None:
 
             # 7. Verify all items completed
             async with session_scope() as session:
-                result = await session.execute(
-                    select(MediaItem.final_status).where(MediaItem.session_id == session_id)
-                )
+                result = await session.execute(select(MediaItem.final_status).where(MediaItem.session_id == session_id))
                 statuses = [r[0] for r in result.all()]
                 all_done = all(s == HopStatus.COMPLETED.value for s in statuses)
             _check("All items COMPLETED", all_done)

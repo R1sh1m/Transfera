@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 # Register pillow-heif opener so Image.open() can decode HEIC/HEIF files
 try:
     from pillow_heif import register_heif_opener
+
     register_heif_opener()
     logger.debug("pillow-heif registered for HEIC/HEIF support")
 except ImportError:
     logger.warning(
-        "pillow-heif not installed — HEIC files will fall back to mtime. "
-        "Install with: pip install pillow-heif"
+        "pillow-heif not installed — HEIC files will fall back to mtime. Install with: pip install pillow-heif"
     )
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".heic", ".png", ".webp", ".tiff", ".tif", ".bmp", ".avif", ".jxl"}
@@ -104,9 +104,7 @@ def _try_getexif(img, file_path: Path):
         if exif:
             return exif
     except AttributeError:
-        logger.warning(
-            "_getexif() unexpectedly unavailable for JPEG: %s", file_path
-        )
+        logger.warning("_getexif() unexpectedly unavailable for JPEG: %s", file_path)
     except Exception as exc:
         logger.warning("_getexif() failed for JPEG %s: %s", file_path, exc)
     return None
@@ -178,6 +176,7 @@ def _extract_video_capture_time(file_path: Path) -> datetime | None:
     # 1. Try ExifTool for DateTimeOriginal or CreateDate (handles .mov, .m4v, .3gp better)
     try:
         from backend.engines.metadata_extractor import extract_metadata_batch
+
         results = extract_metadata_batch([file_path])
         meta = results.get(str(file_path.resolve()))
         if meta and meta.date_taken:
@@ -192,9 +191,12 @@ def _extract_video_capture_time(file_path: Path) -> datetime | None:
         result = subprocess.run(
             [
                 "ffprobe",
-                "-v", "quiet",
-                "-print_format", "json",
-                "-show_entries", "format_tags=creation_time",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_entries",
+                "format_tags=creation_time",
                 str(file_path),
             ],
             capture_output=True,

@@ -87,9 +87,7 @@ async def test_database() -> None:
         _check("Foreign keys enabled", fk_enabled == 1, f"got: {fk_enabled}")
 
         # Verify tables exist
-        result = await conn.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        )
+        result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
         tables = {row[0] for row in result.fetchall()}
         _check("media_items table exists", "media_items" in tables)
         _check("transfer_sessions table exists", "transfer_sessions" in tables)
@@ -97,9 +95,7 @@ async def test_database() -> None:
 
     # Verify indexes
     async with engine.connect() as conn:
-        result = await conn.execute(
-            text("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'ix_%'")
-        )
+        result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'ix_%'"))
         indexes = {row[0] for row in result.fetchall()}
         expected_indexes = {
             "ix_media_items_hop1_status",
@@ -151,8 +147,7 @@ async def test_database() -> None:
 
         _check("Session created with id", ts.id is not None)
         _check("Batch linked to session", tb.session_id == ts.id)
-        _check("MediaItem linked to batch & session",
-               mi.batch_id == tb.id and mi.session_id == ts.id)
+        _check("MediaItem linked to batch & session", mi.batch_id == tb.id and mi.session_id == ts.id)
 
         # Touch method
         old_updated = mi.updated_at
@@ -204,15 +199,11 @@ async def test_database() -> None:
             pass  # already deleted by cascade
 
     async with get_session() as session:
-        result = await session.execute(
-            text("SELECT id FROM transfer_sessions WHERE id = :sid"), {"sid": sid}
-        )
+        result = await session.execute(text("SELECT id FROM transfer_sessions WHERE id = :sid"), {"sid": sid})
         remaining = result.fetchall()
         _check("Cascade delete removes session", len(remaining) == 0)
 
-        result = await session.execute(
-            text("SELECT id FROM transfer_batches WHERE session_id = :sid"), {"sid": sid}
-        )
+        result = await session.execute(text("SELECT id FROM transfer_batches WHERE session_id = :sid"), {"sid": sid})
         _check("Cascade delete removes batches", len(result.fetchall()) == 0)
 
 
@@ -233,8 +224,7 @@ def test_hashing_sync() -> None:
             h_b3 = hash_file(tmp_path, algorithm="blake3")
             _check("BLAKE3 produces 64-char hex", len(h_b3) == 64 and all(c in "0123456789abcdef" for c in h_b3))
             _check("BLAKE3 verify correct", verify_hash(tmp_path, h_b3, algorithm="blake3"))
-            _check("BLAKE3 verify wrong hash fails",
-                   not verify_hash(tmp_path, "0" * 64, algorithm="blake3"))
+            _check("BLAKE3 verify wrong hash fails", not verify_hash(tmp_path, "0" * 64, algorithm="blake3"))
         else:
             _check("BLAKE3 skipped (not installed)", True)
 
@@ -252,8 +242,7 @@ def test_hashing_sync() -> None:
         hash_file(tmp_path, algorithm="sha256", chunk_size=16, on_progress=_on_progress)
         _check("Progress callback invoked", len(progress_calls) > 0)
         if progress_calls:
-            _check("Final progress == file size",
-                   progress_calls[-1][1] == tmp_path.stat().st_size)
+            _check("Final progress == file size", progress_calls[-1][1] == tmp_path.stat().st_size)
 
         # File not found
         try:
@@ -277,15 +266,13 @@ async def test_hashing_async() -> None:
     try:
         if _BLAKE3_AVAILABLE:
             h_b3 = await hash_file_async(tmp_path, algorithm="blake3")
-            _check("Async BLAKE3 produces 64-char hex",
-                   len(h_b3) == 64 and all(c in "0123456789abcdef" for c in h_b3))
+            _check("Async BLAKE3 produces 64-char hex", len(h_b3) == 64 and all(c in "0123456789abcdef" for c in h_b3))
         else:
             _check("Async BLAKE3 skipped (not installed)", True)
 
         h_sha = await hash_file_async(tmp_path, algorithm="sha256")
         _check("Async SHA-256 produces 64-char hex", len(h_sha) == 64)
-        _check("Async SHA-256 matches sync SHA-256",
-               h_sha == hash_file(tmp_path, algorithm="sha256"))
+        _check("Async SHA-256 matches sync SHA-256", h_sha == hash_file(tmp_path, algorithm="sha256"))
     finally:
         os.unlink(tmp_path)
 

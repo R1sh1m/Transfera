@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from backend.config import EXIFTOOL_DIR, PACKAGED_EXIFTOOL_DIR
+from backend.config import EXIFTOOL_DIR, PACKAGED_EXIFTOOL_DIR, PACKAGED_EXIFTOOL_EXE
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +137,9 @@ _bootstrap_done = False
 
 def _bootstrap_exiftool() -> str | None:
     """
-    Resolve the ExifTool binary path using a four-tier fallback:
+    Resolve the ExifTool binary path using a five-tier fallback:
 
+      0. Single-file Tauri resource (src-tauri/resources/exiftool.exe, ~12 MB)
       1. Packaged read-only app resources (backend/bin/exiftool/)
       2. Writable user AppData local storage (AppData/Roaming/.../bin/exiftool/)
       3. System PATH via shutil.which()
@@ -150,6 +151,15 @@ def _bootstrap_exiftool() -> str | None:
     if _bootstrap_done:
         return _resolved_exiftool
     _bootstrap_done = True
+
+    # Tier 0: Single-file Tauri resource (preferred — 12 MB vs 33 MB tree)
+    try:
+        if PACKAGED_EXIFTOOL_EXE.is_file():
+            logger.info("ExifTool found as single-file resource at %s", PACKAGED_EXIFTOOL_EXE)
+            _resolved_exiftool = str(PACKAGED_EXIFTOOL_EXE)
+            return _resolved_exiftool
+    except OSError:
+        pass
 
     # Tier 1: Packaged binary (prioritized for Microsoft Store and offline support)
     if _PACKAGED_EXIFTOOL.is_file():

@@ -37,11 +37,7 @@ CUTOFF_SAFETY_OVERLAP = timedelta(seconds=60)
 async def get_device_state(device_id: str) -> DeviceImportState | None:
     """Return the import state for a device, or None if no record exists."""
     async with session_scope() as session:
-        result = await session.execute(
-            select(DeviceImportState).where(
-                DeviceImportState.device_id == device_id
-            )
-        )
+        result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         return result.scalar_one_or_none()
 
 
@@ -61,11 +57,7 @@ async def get_cutoff_datetime(device_id: str) -> datetime | None:
 async def list_all_device_states() -> list[DeviceImportState]:
     """Return all device import states, ordered by most recently updated."""
     async with session_scope() as session:
-        result = await session.execute(
-            select(DeviceImportState).order_by(
-                DeviceImportState.updated_at.desc()
-            )
-        )
+        result = await session.execute(select(DeviceImportState).order_by(DeviceImportState.updated_at.desc()))
         return list(result.scalars().all())
 
 
@@ -85,11 +77,7 @@ async def upsert_device_state(
     incremental imports.
     """
     async with session_scope() as session:
-        result = await session.execute(
-            select(DeviceImportState).where(
-                DeviceImportState.device_id == device_id
-            )
-        )
+        result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         state = result.scalar_one_or_none()
 
         if state is None:
@@ -102,7 +90,9 @@ async def upsert_device_state(
             session.add(state)
             logger.info(
                 "Created device import state for %s (cutoff=%s, session=%d)",
-                device_id, cutoff.isoformat(), session_id,
+                device_id,
+                cutoff.isoformat(),
+                session_id,
             )
         else:
             state.last_successful_cutoff = cutoff
@@ -112,7 +102,9 @@ async def upsert_device_state(
             state.touch()
             logger.info(
                 "Updated device import state for %s (cutoff=%s, session=%d)",
-                device_id, cutoff.isoformat(), session_id,
+                device_id,
+                cutoff.isoformat(),
+                session_id,
             )
 
         await session.flush()
@@ -126,11 +118,7 @@ async def clear_device_state(device_id: str) -> bool:
     Returns True if a record was deleted, False if no record existed.
     """
     async with session_scope() as session:
-        result = await session.execute(
-            select(DeviceImportState).where(
-                DeviceImportState.device_id == device_id
-            )
-        )
+        result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         state = result.scalar_one_or_none()
         if state is None:
             return False
@@ -173,15 +161,14 @@ async def compute_cutoff_from_session(
         if ts.status not in final_states:
             logger.info(
                 "Session %d is in state '%s' — not a final state, skipping cutoff update",
-                session_id, ts.status,
+                session_id,
+                ts.status,
             )
             return None
 
         # 2. Fetch all items for this session, ordered by date_taken (oldest first)
         result = await session.execute(
-            select(MediaItem)
-            .where(MediaItem.session_id == session_id)
-            .order_by(MediaItem.date_taken.asc().nullslast())
+            select(MediaItem).where(MediaItem.session_id == session_id).order_by(MediaItem.date_taken.asc().nullslast())
         )
         items = list(result.scalars().all())
 
@@ -202,10 +189,12 @@ async def compute_cutoff_from_session(
             if failed_item.date_taken is not None:
                 cutoff = failed_item.date_taken
                 logger.info(
-                    "Session %d cutoff set to oldest failed item's date: %s "
-                    "(item %d: %s, status=%s)",
-                    session_id, cutoff.isoformat(),
-                    failed_item.id, failed_item.file_name, failed_item.final_status,
+                    "Session %d cutoff set to oldest failed item's date: %s (item %d: %s, status=%s)",
+                    session_id,
+                    cutoff.isoformat(),
+                    failed_item.id,
+                    failed_item.file_name,
+                    failed_item.final_status,
                 )
             else:
                 # Item has no resolved date — use the session's created_at as a
@@ -215,7 +204,9 @@ async def compute_cutoff_from_session(
                 logger.warning(
                     "Session %d: oldest failed item %d has no date — using session "
                     "created_at as conservative cutoff: %s",
-                    session_id, failed_item.id, cutoff.isoformat(),
+                    session_id,
+                    failed_item.id,
+                    cutoff.isoformat(),
                 )
         else:
             # All items succeeded — cutoff = the newest item's mtime
@@ -223,18 +214,20 @@ async def compute_cutoff_from_session(
             if newest_item.date_taken is not None:
                 cutoff = newest_item.date_taken
                 logger.info(
-                    "Session %d: all items succeeded — cutoff set to newest item's date: %s "
-                    "(item %d: %s)",
-                    session_id, cutoff.isoformat(),
-                    newest_item.id, newest_item.file_name,
+                    "Session %d: all items succeeded — cutoff set to newest item's date: %s (item %d: %s)",
+                    session_id,
+                    cutoff.isoformat(),
+                    newest_item.id,
+                    newest_item.file_name,
                 )
             else:
                 # Very unlikely: newest item has no date. Use session completed_at.
                 cutoff = ts.completed_at or ts.created_at
                 logger.warning(
-                    "Session %d: newest item %d has no date — using session "
-                    "completed_at as cutoff: %s",
-                    session_id, newest_item.id, cutoff.isoformat(),
+                    "Session %d: newest item %d has no date — using session completed_at as cutoff: %s",
+                    session_id,
+                    newest_item.id,
+                    cutoff.isoformat(),
                 )
 
         return cutoff

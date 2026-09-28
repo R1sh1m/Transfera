@@ -1,0 +1,8 @@
+# Transfera v2 - OPTIONAL on-board AI dependencies (MobileCLIP semantic search)
+# NOT installed by default: ~120 MB (onnxruntime + numpy + tokenizers + hub).
+# Installed on demand into the app's Python when the user presses
+# "Get AI models" (see backend/engines/clip.py ensure_ai_packages).
+# Kept separate so the base install and first-run stay lean.
+onnxruntime>=1.20,<2.0
+tokenizers>=0.21,<1.0
+numpy>=1.26,<3.0
