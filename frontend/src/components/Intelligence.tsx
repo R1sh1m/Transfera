@@ -83,7 +83,10 @@ export function CapabilitiesBadge() {
   const download = useDownloadModels();
   const [wantModels, setWantModels] = useState(false);
   const { data: modelStatus } = useModelStatus(wantModels);
-  const downloading = modelStatus?.status === "downloading";
+  const busy =
+    modelStatus?.status === "downloading" ||
+    modelStatus?.status === "installing-packages";
+  const downloading = busy;
   const clipReady = data?.semantic_mode === "clip";
   const showGetModels = !!data && !clipReady && !downloading;
   const mb = modelStatus
@@ -110,7 +113,7 @@ export function CapabilitiesBadge() {
           }}
           disabled={download.isPending}
           className="px-3 py-1 rounded-pill border border-border text-xs hover:bg-muted active:scale-[0.95] disabled:opacity-40"
-          title="Download the on-board AI vision model once (~210 MB) to enable true semantic search"
+          title="Download the on-board AI libraries (~120 MB) and vision model (~210 MB) once to enable true semantic search"
         >
           Get AI models
         </button>
@@ -118,9 +121,11 @@ export function CapabilitiesBadge() {
       {downloading && (
         <span
           className="px-2 py-0.5 rounded-pill border border-border"
-          title="Downloading on-board AI models in the background"
+          title="Installing AI libraries and downloading on-board AI models in the background"
         >
-          Downloading AI… {mb} MB
+          {modelStatus?.status === "installing-packages"
+            ? "Installing AI libraries…"
+            : `Downloading AI… ${mb} MB`}
         </span>
       )}
       <button

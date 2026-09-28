@@ -23,7 +23,17 @@ import {
   Loader2,
 } from "lucide-react";
 import { useTransferStore } from "@/store/transfer";
-import { cn, isElectron } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import {
+  isTauri,
+  minimizeWindow,
+  maximizeWindow,
+  closeWindow,
+  onBackendDown,
+  onBackendStarting,
+  onBackendReady,
+  getBackendStatus,
+} from "@/lib/desktop";
 import { useHealth } from "@/lib/queries";
 import type { UIState } from "@/store/transfer";
 
@@ -131,7 +141,7 @@ function NotificationToast() {
           initial={{ opacity: 0, y: 20, x: 20 }}
           animate={{ opacity: 1, y: 0, x: 0 }}
           exit={{ opacity: 0, y: 20 }}
-          className="fixed bottom-4 right-4 z-50 bg-card border border-border rounded-lg p-3 flex items-center gap-3 max-w-sm"
+          className="fixed bottom-4 right-4 z-50 glass rounded-lg p-3 flex items-center gap-3 max-w-sm"
         >
           {notifIcons[notification.type]}
           <p className="text-sm text-foreground flex-1">
@@ -150,18 +160,16 @@ function NotificationToast() {
 }
 
 // ---------------------------------------------------------------------------
-// Window Controls (min / max / close) — shared by the TitleBar and every
-// fullscreen overlay (first-time setup, starting, backend-down), because the
-// frameless window otherwise leaves those screens with no way to move,
-// minimize, or close the app. Rendered only under Electron; the overlays
-// reuse this single component so controls are never duplicated.
+// Window Controls (min / max / close) — Tauri frameless window only.
+// Rendered solely in the packaged shell; under `vite dev` there is no
+// frameless window to control, so nothing renders.
 // ---------------------------------------------------------------------------
 function WindowControls() {
-  if (!isElectron) return null;
+  if (!isTauri) return null;
   return (
     <div className="no-drag flex items-center gap-1">
       <button
-        onClick={() => window.electronAPI?.minimizeWindow()}
+        onClick={() => minimizeWindow()}
         title="Minimize to Tray"
         className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
       >
@@ -170,7 +178,7 @@ function WindowControls() {
         </svg>
       </button>
       <button
-        onClick={() => window.electronAPI?.maximizeWindow()}
+        onClick={() => maximizeWindow()}
         title="Maximize"
         className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted text-muted-foreground"
       >
@@ -186,7 +194,7 @@ function WindowControls() {
         </svg>
       </button>
       <button
-        onClick={() => window.electronAPI?.closeWindow()}
+        onClick={() => closeWindow()}
         title="Close"
         className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-muted-foreground"
       >
@@ -210,7 +218,10 @@ function WindowControls() {
 // ---------------------------------------------------------------------------
 function TitleBar() {
   return (
-    <div className="drag-region h-10 flex items-center justify-between px-4 border-b border-border bg-card/80 backdrop-blur-xs shrink-0">
+    <div
+      data-tauri-drag-region
+      className="drag-region glass-bar h-10 flex items-center justify-between px-4 border-b border-border bg-card/80 shrink-0"
+    >
       <div className="flex items-center gap-2">
         <div className="w-6 h-6 rounded-md bg-primary flex items-center justify-center">
           <HardDrive className="w-3.5 h-3.5 text-primary-foreground" />
@@ -301,74 +312,30 @@ function PageRouter() {
 
 // ---------------------------------------------------------------------------
 // Backend Down Screen
+// The Tauri shell ships the frozen sidecar — there is no first-run Python
+// install. backend:down therefore always means "engine failed", answered
+// with Retry (health probe) rather than a setup wizard.
 // ---------------------------------------------------------------------------
 function BackendDownScreen() {
   const serverDown = useTransferStore((s) => s.ui.serverDown);
   const [retrying, setRetrying] = useState(false);
-  const [needsSetup, setNeedsSetup] = useState(false);
-  const [installing, setInstalling] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [installProgress, setInstallProgress] = useState<{
-    step: string;
-    percent: number;
-    error?: string;
-  }>({
-    step: "Ready to configure",
-    percent: 0,
-  });
-
-  // Check if Python is installed on mount / serverDown status change
-  useEffect(() => {
-    if (serverDown && isElectron && window.electronAPI?.checkPythonInstalled) {
-      window.electronAPI
-        .checkPythonInstalled()
-        .then((status: { installed: boolean }) => {
-          if (!status.installed) {
-            setNeedsSetup(true);
-          } else {
-            setNeedsSetup(false);
-          }
-        });
-    }
-  }, [serverDown]);
 
   // Listen for backend:starting — show a loading state instead of the error screen
   useEffect(() => {
-    if (isElectron && window.electronAPI?.onBackendStarting) {
-      const unsub = window.electronAPI.onBackendStarting(() => {
-        setIsStarting(true);
-      });
-      return unsub;
-    }
+    const unsub = onBackendStarting(() => {
+      setIsStarting(true);
+    });
+    return unsub;
   }, []);
 
   // Listen for backend:ready — clear the starting/error state
   useEffect(() => {
-    if (isElectron && window.electronAPI?.onBackendReady) {
-      const unsub = window.electronAPI.onBackendReady(() => {
-        setIsStarting(false);
-        useTransferStore.getState().setServerDown(false);
-      });
-      return unsub;
-    }
-  }, []);
-
-  // Bind install progress listener
-  useEffect(() => {
-    if (isElectron && window.electronAPI?.onInstallProgress) {
-      const unsub = window.electronAPI.onInstallProgress(
-        (data: { step: string; percent: number; error?: string }) => {
-          setInstallProgress(data);
-          if (data.step === "Completed") {
-            // Setup finished, backend is running!
-            useTransferStore.getState().setServerDown(false);
-            setInstalling(false);
-            setNeedsSetup(false);
-          }
-        },
-      );
-      return unsub;
-    }
+    const unsub = onBackendReady(() => {
+      setIsStarting(false);
+      useTransferStore.getState().setServerDown(false);
+    });
+    return unsub;
   }, []);
 
   if (!serverDown && !isStarting) return null;
@@ -400,42 +367,25 @@ function BackendDownScreen() {
     );
   }
 
-  const handleStartSetup = async () => {
-    if (!isElectron || !window.electronAPI?.installPython) return;
-    setInstalling(true);
-    setInstallProgress({ step: "Initializing setup...", percent: 0 });
-    try {
-      await window.electronAPI.installPython();
-    } catch (err: any) {
-      setInstallProgress((prev) => ({
-        ...prev,
-        error: err.message || String(err),
-      }));
-      setInstalling(false);
-    }
-  };
-
   const handleRetry = async () => {
     setRetrying(true);
-    if (isElectron && window.electronAPI?.getBackendStatus) {
-      try {
-        const status = await window.electronAPI.getBackendStatus();
-        if (status.running) {
-          useTransferStore.getState().setServerDown(false);
-          setRetrying(false);
-          return;
-        }
-        // Backend is still launching — show starting state
-        if (status.starting) {
-          setIsStarting(true);
-          setRetrying(false);
-          return;
-        }
-      } catch {
-        // ignore
+    try {
+      const status = await getBackendStatus();
+      if (status.running) {
+        useTransferStore.getState().setServerDown(false);
+        setRetrying(false);
+        return;
       }
+      // Backend is still launching — show starting state
+      if (status.starting) {
+        setIsStarting(true);
+        setRetrying(false);
+        return;
+      }
+    } catch {
+      // ignore
     }
-    // In browser mode or if Electron check fails, try health endpoint directly
+    // Direct health-endpoint probe as a second chance
     try {
       const res = await fetch("/api/health");
       if (res.ok) {
@@ -448,80 +398,6 @@ function BackendDownScreen() {
     }
     setTimeout(() => setRetrying(false), 2000);
   };
-
-  if (needsSetup) {
-    return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
-      >
-        <div className="absolute top-3 right-3">
-          <WindowControls />
-        </div>
-        <div className="text-center space-y-6 max-w-md mx-auto px-6">
-          <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
-            <RefreshCw
-              className={cn(
-                "w-8 h-8 text-primary",
-                installing && "animate-spin",
-              )}
-            />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-2xl font-bold text-foreground">
-              First-Time Setup
-            </h1>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              Transfera needs to download and configure its processing tools
-              (~200–400 MB). This requires an active internet connection and
-              takes about 3–10 minutes depending on your connection.
-            </p>
-          </div>
-
-          {installing || installProgress.percent > 0 ? (
-            <div className="space-y-4">
-              <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-                <div
-                  className="bg-primary h-2.5 rounded-full transition-all duration-300"
-                  style={{ width: `${installProgress.percent}%` }}
-                />
-              </div>
-              <div className="flex justify-between items-center text-xs text-muted-foreground">
-                <span className="truncate max-w-[80%] font-semibold">
-                  {installProgress.step}
-                </span>
-                <span className="font-mono">{installProgress.percent}%</span>
-              </div>
-            </div>
-          ) : null}
-
-          {installProgress.error ? (
-            <div className="p-3.5 bg-destructive/10 text-destructive text-xs rounded-lg border border-destructive/20 text-left space-y-1">
-              <div className="font-semibold">Setup failed:</div>
-              <div className="font-mono break-all leading-normal">
-                {installProgress.error}
-              </div>
-            </div>
-          ) : null}
-
-          <div className="pt-2">
-            <button
-              onClick={handleStartSetup}
-              disabled={installing}
-              className="no-drag w-full inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50"
-            >
-              {installing
-                ? "Installing Requirements..."
-                : installProgress.error
-                  ? "Retry Setup"
-                  : "Start Setup"}
-            </button>
-          </div>
-        </div>
-      </motion.div>
-    );
-  }
 
   return (
     <motion.div
@@ -584,61 +460,13 @@ function BackendRecoveryWatcher() {
 // App
 // ---------------------------------------------------------------------------
 export default function App() {
-  // Listen for backend:down IPC from Electron main process
+  // Listen for backend:down from the Tauri shell — flip into the
+  // Engine Unavailable screen (BackendRecoveryWatcher clears it on return).
   useEffect(() => {
-    if (isElectron && window.electronAPI?.onBackendDown) {
-      const unsub = window.electronAPI.onBackendDown(() => {
-        useTransferStore.getState().setServerDown(true);
-      });
-      return unsub;
-    }
-  }, []);
-
-  // Listen for notification:click IPC — when user clicks a native notification,
-  // navigate to that completed session's report (the artifact that represents
-  // its outcome), with a Dashboard fallback if no report exists.
-  useEffect(() => {
-    if (isElectron && window.electronAPI?.onNotificationClick) {
-      const unsub = window.electronAPI.onNotificationClick(
-        async (sessionId: number) => {
-          const store = useTransferStore.getState();
-
-          // Fetch session info to determine the right destination
-          try {
-            const { API_BASE_URL, getLocalToken } =
-              await import("@/lib/api-client");
-            const token = getLocalToken();
-            const res = await fetch(
-              `${API_BASE_URL}/api/sessions/${sessionId}`,
-              token ? { headers: { "X-Local-Token": token } } : undefined,
-            );
-            if (!res.ok) throw new Error("Failed to fetch session");
-            const session = await res.json();
-
-            if (session.session_report_path) {
-              // Open the HTML report directly — this is the artifact that
-              // represents the completed session's actual outcome.
-              if (window.electronAPI?.openPath) {
-                window.electronAPI.openPath(session.session_report_path);
-              } else {
-                window.open(
-                  `/api/sessions/${sessionId}/report?fmt=html`,
-                  "_blank",
-                );
-              }
-              return;
-            }
-          } catch {
-            // Fetch failed or no report — fall through to Dashboard
-          }
-
-          // Fallback: navigate to Dashboard, where the session appears
-          // in the Recent Sessions list with View/Report actions.
-          store.setCurrentPage("dashboard");
-        },
-      );
-      return unsub;
-    }
+    const unsub = onBackendDown(() => {
+      useTransferStore.getState().setServerDown(true);
+    });
+    return unsub;
   }, []);
 
   return (

@@ -24,7 +24,8 @@ import {
 } from "lucide-react";
 import { useMediaItem } from "@/lib/queries";
 import { fetchThumbnail } from "@/lib/thumbnail-fetch";
-import { isElectron, parseBackendDate } from "@/lib/utils";
+import { parseBackendDate } from "@/lib/utils";
+import { isDesktop, showItemInFolder, openPath } from "@/lib/desktop";
 import type { MediaItemInfo } from "@/types/api";
 
 interface MediaDetailModalProps {
@@ -113,17 +114,18 @@ export default function MediaDetailModal({
   );
 
   const handleShowInFolder = () => {
-    if (detail?.dest_path && isElectron && window.electronAPI?.showItemInFolder) {
-      window.electronAPI.showItemInFolder(detail.dest_path);
-    } else if (item.source_path && isElectron && window.electronAPI?.showItemInFolder) {
-      window.electronAPI.showItemInFolder(item.source_path);
+    if (!isDesktop) return;
+    if (detail?.dest_path) {
+      showItemInFolder(detail.dest_path);
+    } else if (item.source_path) {
+      showItemInFolder(item.source_path);
     }
   };
 
   const handleOpenFile = () => {
     const p = detail?.dest_path || item.source_path;
-    if (p && isElectron && window.electronAPI?.openPath) {
-      window.electronAPI.openPath(p);
+    if (p && isDesktop) {
+      openPath(p);
     }
   };
 
@@ -158,7 +160,10 @@ export default function MediaDetailModal({
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-muted/20">
             <div className="flex items-center gap-2 min-w-0 pr-4">
-              <h3 className="text-base font-semibold text-foreground truncate" title={activeItem.file_name}>
+              <h3
+                className="text-base font-semibold text-foreground truncate"
+                title={activeItem.file_name}
+              >
                 {activeItem.file_name}
               </h3>
               {activeItem.extension && (
@@ -216,7 +221,9 @@ export default function MediaDetailModal({
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-500" />
                 <div>
                   <p className="font-semibold">Transfer Issue</p>
-                  <p className="mt-0.5 opacity-90 break-words">{activeItem.error_message}</p>
+                  <p className="mt-0.5 opacity-90 break-words">
+                    {activeItem.error_message}
+                  </p>
                 </div>
               </div>
             )}
@@ -238,8 +245,13 @@ export default function MediaDetailModal({
                   <Calendar className="w-3.5 h-3.5 text-muted-foreground/70" />
                   Date Captured
                 </p>
-                <p className="text-sm font-semibold text-foreground mt-1 truncate" title={formatDate(activeItem.date_taken)}>
-                  {activeItem.date_taken ? formatDate(activeItem.date_taken) : "From file date"}
+                <p
+                  className="text-sm font-semibold text-foreground mt-1 truncate"
+                  title={formatDate(activeItem.date_taken)}
+                >
+                  {activeItem.date_taken
+                    ? formatDate(activeItem.date_taken)
+                    : "From file date"}
                 </p>
               </div>
 
@@ -248,31 +260,43 @@ export default function MediaDetailModal({
                   <Camera className="w-3.5 h-3.5 text-muted-foreground/70" />
                   Camera
                 </p>
-                <p className="text-sm font-semibold text-foreground mt-1 truncate" title={activeItem.camera_model || activeItem.camera_make || "—"}>
-                  {activeItem.camera_model || activeItem.camera_make || "Unknown"}
+                <p
+                  className="text-sm font-semibold text-foreground mt-1 truncate"
+                  title={
+                    activeItem.camera_model || activeItem.camera_make || "—"
+                  }
+                >
+                  {activeItem.camera_model ||
+                    activeItem.camera_make ||
+                    "Unknown"}
                 </p>
               </div>
 
               {activeItem.width && activeItem.height && (
                 <div className="p-3 bg-muted/30 border border-border/60 rounded-xl">
-                  <p className="text-[11px] text-muted-foreground">Dimensions</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Dimensions
+                  </p>
                   <p className="text-sm font-semibold text-foreground mt-1">
                     {activeItem.width} × {activeItem.height}
                   </p>
                 </div>
               )}
 
-              {isVideo && activeItem.duration_s != null && activeItem.duration_s > 0 && (
-                <div className="p-3 bg-muted/30 border border-border/60 rounded-xl">
-                  <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-                    <Clock className="w-3.5 h-3.5 text-muted-foreground/70" />
-                    Duration
-                  </p>
-                  <p className="text-sm font-semibold text-foreground mt-1">
-                    {Math.floor(activeItem.duration_s / 60)}m {Math.floor(activeItem.duration_s % 60)}s
-                  </p>
-                </div>
-              )}
+              {isVideo &&
+                activeItem.duration_s != null &&
+                activeItem.duration_s > 0 && (
+                  <div className="p-3 bg-muted/30 border border-border/60 rounded-xl">
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-muted-foreground/70" />
+                      Duration
+                    </p>
+                    <p className="text-sm font-semibold text-foreground mt-1">
+                      {Math.floor(activeItem.duration_s / 60)}m{" "}
+                      {Math.floor(activeItem.duration_s % 60)}s
+                    </p>
+                  </div>
+                )}
 
               <div className="p-3 bg-muted/30 border border-border/60 rounded-xl">
                 <p className="text-[11px] text-muted-foreground">Protection</p>
@@ -308,7 +332,10 @@ export default function MediaDetailModal({
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <p className="text-xs text-muted-foreground font-mono bg-background border border-border/80 px-2.5 py-1.5 rounded-lg flex-1 truncate select-all" title={targetPath}>
+                  <p
+                    className="text-xs text-muted-foreground font-mono bg-background border border-border/80 px-2.5 py-1.5 rounded-lg flex-1 truncate select-all"
+                    title={targetPath}
+                  >
                     {targetPath || "Path not available"}
                   </p>
                   <button
@@ -327,8 +354,13 @@ export default function MediaDetailModal({
 
               {item.source_path && item.source_path !== targetPath && (
                 <div className="pt-2 border-t border-border/50">
-                  <p className="text-[11px] text-muted-foreground mb-0.5">Original Source Path:</p>
-                  <p className="text-[11px] text-muted-foreground/80 font-mono truncate select-all" title={item.source_path}>
+                  <p className="text-[11px] text-muted-foreground mb-0.5">
+                    Original Source Path:
+                  </p>
+                  <p
+                    className="text-[11px] text-muted-foreground/80 font-mono truncate select-all"
+                    title={item.source_path}
+                  >
                     {item.source_path}
                   </p>
                 </div>
@@ -339,11 +371,13 @@ export default function MediaDetailModal({
           {/* Footer Actions */}
           <div className="px-6 py-4 border-t border-border bg-muted/10 flex items-center justify-between gap-3">
             <div className="text-xs text-muted-foreground">
-              {detail?.dest_exists ? "Verified and ready on your computer." : "Safe two-stage verified vault."}
+              {detail?.dest_exists
+                ? "Verified and ready on your computer."
+                : "Safe two-stage verified vault."}
             </div>
 
             <div className="flex items-center gap-2">
-              {isElectron && (
+              {isDesktop && (
                 <button
                   onClick={handleOpenFile}
                   className="px-4 py-2 text-sm font-normal rounded-pill border border-border hover:bg-muted text-foreground transition-colors active:scale-[0.95] flex items-center gap-1.5"
@@ -352,7 +386,7 @@ export default function MediaDetailModal({
                   Open File
                 </button>
               )}
-              {isElectron && (
+              {isDesktop && (
                 <button
                   onClick={handleShowInFolder}
                   className="px-5 py-2 text-sm font-normal rounded-pill bg-action text-white hover:bg-action/90 active:scale-[0.95] transition-all flex items-center gap-1.5 shadow-xs"
@@ -361,12 +395,16 @@ export default function MediaDetailModal({
                   Show in Folder
                 </button>
               )}
-              {!isElectron && (
+              {!isDesktop && (
                 <button
                   onClick={handleCopyPath}
                   className="px-5 py-2 text-sm font-normal rounded-pill bg-action text-white hover:bg-action/90 active:scale-[0.95] transition-all flex items-center gap-1.5"
                 >
-                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  {copied ? (
+                    <Check className="w-4 h-4" />
+                  ) : (
+                    <Copy className="w-4 h-4" />
+                  )}
                   {copied ? "Copied" : "Copy Path"}
                 </button>
               )}

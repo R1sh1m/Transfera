@@ -43,12 +43,8 @@ import {
   useInstallPymobiledevice3,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
-import {
-  cn,
-  extractErrorMessage,
-  isElectron,
-  parseBackendDate,
-} from "@/lib/utils";
+import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
+import { isDesktop, openPath, runElevated } from "@/lib/desktop";
 import type { SessionInfo, SessionStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -677,8 +673,8 @@ function SessionRow({ session }: { session: SessionInfo }) {
 
   const handleViewReport = () => {
     if (!session.session_report_path) return;
-    if (isElectron && window.electronAPI?.openPath) {
-      window.electronAPI.openPath(session.session_report_path);
+    if (isDesktop) {
+      openPath(session.session_report_path);
     } else {
       window.open(`/api/sessions/${session.id}/report?fmt=html`, "_blank");
     }
@@ -745,9 +741,9 @@ function SessionRow({ session }: { session: SessionInfo }) {
           )}
           {["completed", "completed_with_errors"].includes(session.status) &&
             session.dest_root &&
-            isElectron && (
+            isDesktop && (
               <button
-                onClick={() => window.electronAPI?.openPath(session.dest_root)}
+                onClick={() => openPath(session.dest_root)}
                 className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
                 title="Open destination folder in Explorer"
               >
@@ -815,9 +811,9 @@ function DriverSetupCard({
       // Try non-elevated install via backend API first
       const result = await installDriver.mutateAsync();
       if (!result.success) {
-        // If winget failed and Electron is available, try elevated install
-        if (isElectron && window.electronAPI?.installDriverElevated) {
-          const elevated = await window.electronAPI.installDriverElevated({
+        // If winget failed and the Tauri shell is available, try elevated install
+        if (isDesktop) {
+          const elevated = await runElevated({
             executable: "winget",
             args: [
               "install",
@@ -1048,7 +1044,9 @@ export default function DashboardPage() {
   const destRoot = useTransferStore((s) => s.transfer.destRoot);
 
   const { data: backendStatus } = useDeviceBackendStatus();
-  const [dismissedCards, setDismissedCards] = useState<string[]>(getInitialDismissedCards);
+  const [dismissedCards, setDismissedCards] = useState<string[]>(
+    getInitialDismissedCards,
+  );
 
   const dismissCard = (id: string) => {
     setDismissedCards((prev) => {

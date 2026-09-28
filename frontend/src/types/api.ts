@@ -215,7 +215,7 @@ export interface CapabilitiesResponse {
 }
 
 export interface ModelDownloadStatus {
-  status: "idle" | "downloading" | "ready" | "error";
+  status: "idle" | "installing-packages" | "downloading" | "ready" | "error";
   ready: boolean;
   missing: string[];
   downloaded_bytes: number;
@@ -626,7 +626,6 @@ export interface Tier2Status {
   /** True when the WSL service (LxssManager) is broken — show the repair card. */
   wsl_service_broken?: boolean;
 }
-
 
 export interface Tier2StepPreview {
   step_id: string;

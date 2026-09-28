@@ -6,12 +6,21 @@
 
 import axios from "axios";
 
-// In packaged Electron (file:// protocol), window.location.origin resolves to 'file://'.
-// Fall back to direct backend connection on port 47821.
+// In packaged shells the page is not served over http(s) from the backend:
+// - Electron: file:// protocol → window.location.origin is 'file://'.
+// - Tauri: http://tauri.localhost (custom protocol, no backend attached).
+// Both fall back to a direct backend connection on 127.0.0.1. The port is
+// backend/config.py PORT; kept in sync with vite.config.ts proxy + Tauri
+// sidecar args (single source of truth remains backend/config.py).
+const _origin = typeof window !== "undefined" ? window.location.origin : "";
+const _protocol = typeof window !== "undefined" ? window.location.protocol : "";
 export const API_BASE_URL =
-  !window.location.origin || window.location.origin.startsWith("file://")
+  !_origin ||
+  _origin.startsWith("file://") ||
+  _origin.includes("tauri.localhost") ||
+  _protocol === "asset:"
     ? "http://127.0.0.1:47821"
-    : window.location.origin;
+    : _origin;
 
 // Augment Axios config to support our retry flag
 declare module "axios" {

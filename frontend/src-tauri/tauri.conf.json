@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Transfera",
+  "version": "2.5.1",
+  "identifier": "com.transfera.app",
+  "build": {
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Transfera",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "category": "Utility",
+    "publisher": "Transfera Team",
+    "copyright": "Copyright © 2026 Transfera Team",
+    "resources": ["resources/wpd_helper.exe", "resources/exiftool.exe"],
+    "externalBin": ["binaries/transfera-engine"]
+  }
+}

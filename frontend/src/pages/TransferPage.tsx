@@ -38,7 +38,8 @@ import {
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
 import { useTransferWs } from "@/hooks/use-transfer-ws";
-import { cn, isElectron } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { isDesktop, openPath, setTrayProgress } from "@/lib/desktop";
 import type { SessionProgress, RecentItemProgress } from "@/types/api";
 
 // Keep track of session IDs that have already been started to prevent double-triggering
@@ -397,20 +398,19 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
           </div>
         ) : (
           <div className="columns-3 gap-2">
-            <AnimatePresence>
-              {recentFiles.map((file, i) => {
-                const opacity =
-                  i === 0 ? 1.0 : i < 3 ? 0.9 : i < 9 ? 0.75 : 0.55;
+            <AnimatePresence initial={false}>
+              {recentFiles.map((file) => {
+                const isFirst = file.item_id === recentFiles[0]?.item_id;
                 return (
                   <motion.div
                     key={file.item_id}
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    transition={{ duration: 0.2, delay: i * 0.03 }}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    transition={{ duration: 0.18 }}
                     className={cn(
                       "break-inside-avoid mb-2 rounded-md overflow-hidden relative transition-colors",
-                      i === 0
+                      isFirst
                         ? "bg-primary/10 ring-2 ring-primary"
                         : "bg-muted hover:bg-muted/80",
                     )}
@@ -561,17 +561,17 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   else if (isCancelled) phaseText = "Transfer cancelled";
   else phaseText = transfer.status;
 
-  // Sync progress to Windows taskbar overlay via tray IPC
+  // Sync progress to Windows taskbar overlay via tray IPC (Tauri shell only)
   useEffect(() => {
-    if (!isElectron) return;
+    if (!isDesktop) return;
     if (isTerminal) {
-      window.electronAPI?.setTrayProgress?.(null);
+      setTrayProgress(null);
     } else if (transfer.status === "running" || transfer.status === "paused") {
       const fraction = Math.max(
         0,
         Math.min(1, (transfer.progressPercent ?? 0) / 100),
       );
-      window.electronAPI?.setTrayProgress?.(fraction);
+      setTrayProgress(fraction);
     }
   }, [transfer.progressPercent, transfer.status, isTerminal]);
 
@@ -1110,7 +1110,11 @@ export default function TransferPage() {
             <button
               onClick={handleCancel}
               disabled={cancelSession.isPending}
-              title={confirmCancel ? "Click again to confirm stopping transfer" : "Stop transfer"}
+              title={
+                confirmCancel
+                  ? "Click again to confirm stopping transfer"
+                  : "Stop transfer"
+              }
               className={cn(
                 "no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-normal transition-colors",
                 confirmCancel
@@ -1124,9 +1128,9 @@ export default function TransferPage() {
           )}
           {isFinished && (
             <div className="flex items-center gap-2">
-              {isElectron && transfer.destRoot && (
+              {isDesktop && transfer.destRoot && (
                 <button
-                  onClick={() => window.electronAPI?.openPath(transfer.destRoot)}
+                  onClick={() => openPath(transfer.destRoot)}
                   className="no-drag inline-flex items-center gap-1.5 px-3.5 py-2 bg-secondary text-secondary-foreground rounded-pill text-sm font-normal hover:bg-secondary/80 transition-colors active:scale-[0.95]"
                   title="Open destination folder on this computer"
                 >

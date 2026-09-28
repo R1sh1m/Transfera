@@ -55,12 +55,15 @@ import {
   useRecoverIOSDevice,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
+import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
 import {
-  cn,
-  extractErrorMessage,
-  isElectron,
-  parseBackendDate,
-} from "@/lib/utils";
+  isDesktop,
+  openDirectory,
+  openExternal,
+  onNewRemovableDrive,
+  restartApp,
+  runElevated,
+} from "@/lib/desktop";
 import type {
   TransferMode,
   IOSDeviceInfo,
@@ -212,13 +215,8 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
   const handleAppleElevationConfirm = async () => {
     const cmd = appleElevationCommand;
     setAppleElevationCommand(null);
-    if (
-      cmd &&
-      cmd.length >= 2 &&
-      isElectron &&
-      window.electronAPI?.runElevated
-    ) {
-      await window.electronAPI.runElevated({
+    if (cmd && cmd.length >= 2 && isDesktop) {
+      await runElevated({
         executable: cmd[0]!,
         args: cmd.slice(1),
         description: "Start Apple Mobile Device Service",
@@ -276,10 +274,10 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
 
   // Handle folder selection via native dialog
   const handleBrowseFolder = async () => {
-    if (isElectron && typeof window.electronAPI?.openDirectory === "function") {
+    if (isDesktop) {
       const currentPath =
         sourceRef?.type === "local_folder" ? sourceRef.path : undefined;
-      const selected = await window.electronAPI.openDirectory(currentPath);
+      const selected = await openDirectory(currentPath);
       if (selected) {
         onSourceChange({ type: "local_folder", path: selected });
         setMode("folder");
@@ -1021,7 +1019,7 @@ function DriverInstallerInline() {
   const [error, setError] = useState<string | null>(null);
 
   const handleInstall = async () => {
-    if (!isElectron) {
+    if (!isDesktop) {
       setError("Automatic installation requires the desktop app.");
       return;
     }
@@ -1030,38 +1028,30 @@ function DriverInstallerInline() {
     try {
       const result = await installDriver.mutateAsync();
       if (!result.success) {
-        // Fall back to elevated install via Electron IPC
-        if (window.electronAPI?.installDriverElevated) {
-          const elevated = await window.electronAPI.installDriverElevated({
-            executable: "winget",
-            args: [
-              "install",
-              "-e",
-              "--id",
-              "Apple.AppleMobileDeviceSupport",
-              "--accept-package-agreements",
-              "--accept-source-agreements",
-              "--silent",
-            ],
+        // Fall back to elevated install via the Tauri shell
+        const elevated = await runElevated({
+          executable: "winget",
+          args: [
+            "install",
+            "-e",
+            "--id",
+            "Apple.AppleMobileDeviceSupport",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--silent",
+          ],
+        });
+        if (elevated.success) {
+          queryClient.invalidateQueries({
+            queryKey: ["device-backend-status"],
           });
-          if (elevated.success) {
-            queryClient.invalidateQueries({
-              queryKey: ["device-backend-status"],
-            });
-            queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
-            setInstalling(false);
-            return;
-          }
-          setError(
-            elevated.error ||
-              `Installation failed (exit code: ${elevated.exitCode})`,
-          );
+          queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
           setInstalling(false);
           return;
         }
         setError(
-          result.error ||
-            `Installation failed (exit code: ${result.exit_code})`,
+          elevated.error ||
+            `Installation failed (exit code: ${elevated.exitCode})`,
         );
         setInstalling(false);
         return;
@@ -1323,9 +1313,9 @@ function Tier2SetupPanel() {
 
   const handleRestartConfirm = async () => {
     setRestartNotification(null);
-    // Electron restart
-    if (isElectron && typeof window.electronAPI?.restartApp === "function") {
-      await window.electronAPI.restartApp();
+    // Tauri shell restart (applies Tier-2 WSL changes)
+    if (isDesktop) {
+      await restartApp();
     }
   };
 
@@ -1528,20 +1518,9 @@ function Tier2SetupPanel() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (
-                      isElectron &&
-                      typeof window.electronAPI?.openExternal === "function"
-                    ) {
-                      window.electronAPI.openExternal(
-                        "https://apps.microsoft.com/detail/9PDXGNCFSCZV",
-                      );
-                    } else {
-                      window.open(
-                        "https://apps.microsoft.com/detail/9PDXGNCFSCZV",
-                        "_blank",
-                        "noopener",
-                      );
-                    }
+                    openExternal(
+                      "https://apps.microsoft.com/detail/9PDXGNCFSCZV",
+                    );
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
                 >
@@ -2208,10 +2187,11 @@ export default function DeviceSetupPage() {
   }, [setCurrentPage]);
 
   // Listen for newly connected removable drives (USB flash, SD card, etc.)
+  // No-op in the browser — the Tauri shell emits device:new-removable-drive.
   useEffect(() => {
-    if (!isElectron || !window.electronAPI?.onNewRemovableDrive) return;
+    if (!isDesktop) return;
 
-    const unsub = window.electronAPI.onNewRemovableDrive((data) => {
+    const unsub = onNewRemovableDrive((data) => {
       if (sourceRef) return;
       const currentDest = useTransferStore.getState().ui.setupDestPath;
       if (
@@ -2389,13 +2369,8 @@ export default function DeviceSetupPage() {
             </div>
             <button
               onClick={async () => {
-                if (
-                  isElectron &&
-                  typeof window.electronAPI?.openDirectory === "function"
-                ) {
-                  const selected = await window.electronAPI.openDirectory(
-                    destPath || undefined,
-                  );
+                if (isDesktop) {
+                  const selected = await openDirectory(destPath || undefined);
                   if (selected) setDestPath(selected);
                 } else {
                   showNotification(
