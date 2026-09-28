@@ -27,7 +27,31 @@ TEMP_SUFFIX: str = ".tmp"
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-BACKEND_ROOT: Path = Path(__file__).resolve().parent
+# Frozen-sidecar support (Tauri `transfera-engine` via PyInstaller one-dir):
+# when frozen, `__file__` points inside the bundle temp dir, so backend code
+# and data files resolve through sys._MEIPASS. Tauri ships helper binaries
+# (wpd_helper.exe, single-file exiftool.exe) in its `resources/` dir next to
+# the sidecar — located via TRANSFERA_RESOURCE_DIR (set by the Tauri shell
+# and release packaging) with a sibling-of-executable fallback.
+import sys as _sys
+
+_FROZEN: bool = getattr(_sys, "frozen", False)
+_MEPASS: Path | None = Path(getattr(_sys, "_MEIPASS", "")) if _FROZEN else None
+
+BACKEND_ROOT: Path = _MEPASS / "backend" if _MEPASS is not None else Path(__file__).resolve().parent
+
+_env_resource_dir = os.environ.get("TRANSFERA_RESOURCE_DIR")
+if _env_resource_dir:
+    SIDECAR_RESOURCE_DIR: Path = Path(_env_resource_dir)
+elif _FROZEN:
+    # PyInstaller one-dir: sys.executable is
+    # .../binaries/transfera-engine/transfera-engine.exe; Tauri resources
+    # land in .../resources/.
+    SIDECAR_RESOURCE_DIR = Path(_sys.executable).resolve().parent.parent / "resources"
+else:
+    # Dev: Tauri staging dir doubles as the resource dir so
+    # `python run.py --tauri` resolves helpers without packaging.
+    SIDECAR_RESOURCE_DIR = BACKEND_ROOT.parent / "frontend" / "src-tauri" / "resources"
 
 # Support overriding the runtime data directory via environment variable (useful in production packaged app)
 _env_data_dir = os.environ.get("TRANSFERA_DATA_DIR")
@@ -42,7 +66,34 @@ LOG_DIR: Path = DATA_DIR / "logs"
 EXPORT_DIR: Path = DATA_DIR / "exports"
 EXIFTOOL_DIR: Path = DATA_DIR / "bin" / "exiftool"
 PACKAGED_EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
-WPD_HELPER: Path = BACKEND_ROOT / "bin" / "wpd_helper.exe"
+# Single-file ExifTool (~12 MB) shipped as a Tauri resource — replaces the
+# ~33 MB unpacked Perl tree when present. The bootstrapper in
+# engines/metadata_extractor.py checks this path first.
+PACKAGED_EXIFTOOL_EXE: Path = SIDECAR_RESOURCE_DIR / "exiftool.exe"
+
+
+def _resolve_wpd_helper() -> Path:
+    """Prefer the Tauri resource copy when frozen/staged, else the repo build.
+
+    Dev ordering matters: src-tauri/resources/ holds 0-byte placeholders so
+    `cargo check` passes without packaging — those must never shadow a real
+    repo-built helper. A placeholder is 0 bytes; a real build never is.
+    """
+    staged = SIDECAR_RESOURCE_DIR / "wpd_helper.exe"
+    repo = BACKEND_ROOT / "bin" / "wpd_helper.exe"
+
+    def _real(p: Path) -> bool:
+        try:
+            return p.is_file() and p.stat().st_size > 0
+        except OSError:
+            return False
+
+    if _FROZEN:
+        return staged if _real(staged) else repo
+    return repo if _real(repo) else staged
+
+
+WPD_HELPER: Path = _resolve_wpd_helper()
 
 # Ensure runtime directories exist at import time.
 for _d in (DATA_DIR, DB_DIR, CACHE_DIR, LOG_DIR, EXPORT_DIR, EXIFTOOL_DIR):

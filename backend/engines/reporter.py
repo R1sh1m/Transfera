@@ -32,9 +32,7 @@ async def _load_session_data(session_id: int) -> dict[str, Any]:
             raise ValueError(f"Session {session_id} not found")
 
         result = await session.execute(
-            select(MediaItem)
-            .where(MediaItem.session_id == session_id)
-            .order_by(MediaItem.id)
+            select(MediaItem).where(MediaItem.session_id == session_id).order_by(MediaItem.id)
         )
         items = list(result.scalars().all())
 
@@ -302,11 +300,11 @@ def _format_bytes(size: int) -> str:
     """Convert byte count to human-readable string."""
     if size < 1024:
         return f"{size} B"
-    if size < 1024 ** 2:
+    if size < 1024**2:
         return f"{size / 1024:.1f} KB"
-    if size < 1024 ** 3:
-        return f"{size / (1024 ** 2):.1f} MB"
-    return f"{size / (1024 ** 3):.2f} GB"
+    if size < 1024**3:
+        return f"{size / (1024**2):.1f} MB"
+    return f"{size / (1024**3):.2f} GB"
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -341,9 +339,7 @@ def _build_bar_chart(status_matrix: dict[str, int], total: int) -> tuple[str, st
             label = f"{count}"
         else:
             label = ""
-        segments.append(
-            f'<div class="bar-segment {css_class}" style="width:{pct:.1f}%">{label}</div>'
-        )
+        segments.append(f'<div class="bar-segment {css_class}" style="width:{pct:.1f}%">{label}</div>')
         legend_parts.append(
             f'<span><span class="legend-dot" style="background:{color}"></span>{status}: {count}</span>'
         )
@@ -363,14 +359,14 @@ def _build_file_rows(items: list[MediaItem]) -> str:
         hash_display = item.source_hash if item.source_hash else "—"
 
         rows.append(
-            f'        <tr>\n'
-            f'          <td>{idx}</td>\n'
-            f'          <td>{_html_escape(item.file_name)}</td>\n'
-            f'          <td>{_format_bytes(item.file_size)}</td>\n'
-            f'          <td>{_html_escape(item.extension or "—")}</td>\n'
+            f"        <tr>\n"
+            f"          <td>{idx}</td>\n"
+            f"          <td>{_html_escape(item.file_name)}</td>\n"
+            f"          <td>{_format_bytes(item.file_size)}</td>\n"
+            f"          <td>{_html_escape(item.extension or '—')}</td>\n"
             f'          <td><span class="status-badge {status_cls}">{item.final_status}</span></td>\n'
             f'          <td style="font-family:monospace;font-size:0.75rem;color:var(--text-muted)">{_html_escape(hash_display[:16])}{"…" if hash_display != "—" else ""}</td>\n'
-            f'        </tr>'
+            f"        </tr>"
         )
     return "\n".join(rows)
 
@@ -420,7 +416,7 @@ def _build_html(payload: dict[str, Any]) -> str:
     # Throughput
     bps = throughput["bytes_per_second"]
     if bps > 0:
-        throughput_str = f"{bps / (1024*1024):.2f} MB/s"
+        throughput_str = f"{bps / (1024 * 1024):.2f} MB/s"
     else:
         throughput_str = "—"
 
@@ -458,14 +454,14 @@ def _build_file_rows_html(items: list[dict[str, Any]]) -> str:
         ellipsis = "…" if hash_val else ""
 
         rows.append(
-            f'        <tr>\n'
-            f'          <td>{idx}</td>\n'
-            f'          <td>{_html_escape(item["file_name"])}</td>\n'
-            f'          <td>{_format_bytes(item["file_size"])}</td>\n'
-            f'          <td>{_html_escape(item.get("extension") or "—")}</td>\n'
+            f"        <tr>\n"
+            f"          <td>{idx}</td>\n"
+            f"          <td>{_html_escape(item['file_name'])}</td>\n"
+            f"          <td>{_format_bytes(item['file_size'])}</td>\n"
+            f"          <td>{_html_escape(item.get('extension') or '—')}</td>\n"
             f'          <td><span class="status-badge {status_cls}">{item["final_status"]}</span></td>\n'
             f'          <td style="font-family:monospace;font-size:0.75rem;color:var(--text-muted)">{_html_escape(hash_display)}{ellipsis}</td>\n'
-            f'        </tr>'
+            f"        </tr>"
         )
     return "\n".join(rows)
 
@@ -516,6 +512,8 @@ async def generate_session_report(session_id: int) -> Path:
 
     logger.info(
         "Session %d report generated: %d items, status=%s",
-        session_id, len(items), session.status,
+        session_id,
+        len(items),
+        session.status,
     )
     return json_path

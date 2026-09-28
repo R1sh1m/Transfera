@@ -43,6 +43,7 @@ logging.basicConfig(
     format="%(levelname)-8s | %(name)s | %(message)s",
 )
 
+
 # ---------------------------------------------------------------------------
 # ANSI colour helpers (safe ASCII symbols + fallback for narrow consoles)
 # ---------------------------------------------------------------------------
@@ -84,8 +85,13 @@ async def _pip_install_pymobiledevice3() -> bool:
     print(_info("Attempting pip install pymobiledevice3 ..."))
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "pip", "install", "pymobiledevice3",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "pymobiledevice3",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         _, stderr = await proc.communicate()
         if proc.returncode == 0:
@@ -110,8 +116,11 @@ async def _ensure_apple_service_running() -> dict:
 
     # Check current state
     proc = await asyncio.create_subprocess_exec(
-        "sc", "query", "Apple Mobile Device Service",
-        stdout=asp.PIPE, stderr=asp.PIPE,
+        "sc",
+        "query",
+        "Apple Mobile Device Service",
+        stdout=asp.PIPE,
+        stderr=asp.PIPE,
     )
     stdout, _ = await proc.communicate()
     out = stdout.decode("utf-8", errors="replace")
@@ -127,8 +136,11 @@ async def _ensure_apple_service_running() -> dict:
     # Service exists but not running — try to start
     print(_info("Apple Mobile Device Service is STOPPED — attempting start ..."))
     proc2 = await asyncio.create_subprocess_exec(
-        "sc", "start", "Apple Mobile Device Service",
-        stdout=asp.PIPE, stderr=asp.PIPE,
+        "sc",
+        "start",
+        "Apple Mobile Device Service",
+        stdout=asp.PIPE,
+        stderr=asp.PIPE,
     )
     _, stderr2 = await proc2.communicate()
 
@@ -152,16 +164,23 @@ async def _elevate_and_start_service() -> bool:
     print(_info("Requesting admin elevation to start Apple Mobile Device Service ..."))
     try:
         ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", "sc", "start Apple Mobile Device Service",
-            None, 0,
+            None,
+            "runas",
+            "sc",
+            "start Apple Mobile Device Service",
+            None,
+            0,
         )
         # ShellExecuteW returns > 32 on success
         if ret > 32:
             # Wait for service to come up
             await asyncio.sleep(2)
             proc = await asyncio.create_subprocess_exec(
-                "sc", "query", "Apple Mobile Device Service",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                "sc",
+                "query",
+                "Apple Mobile Device Service",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             stdout, _ = await proc.communicate()
             if "RUNNING" in stdout.decode("utf-8", errors="replace"):
@@ -183,8 +202,10 @@ async def _auto_recover_usb_passthrough() -> dict:
     """Try to attach Apple devices via usbipd for WSL bridge (Tier 2)."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "usbipd", "list",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            "usbipd",
+            "list",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         stdout, _ = await proc.communicate()
     except FileNotFoundError:
@@ -211,8 +232,13 @@ async def _auto_recover_usb_passthrough() -> dict:
         if "Not attached" in state or "Attached" not in state:
             print(_info(f"Attaching busid {busid} to WSL ..."))
             attach_proc = await asyncio.create_subprocess_exec(
-                "usbipd", "attach", "--wsl", "--busid", busid,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                "usbipd",
+                "attach",
+                "--wsl",
+                "--busid",
+                busid,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             _, err = await attach_proc.communicate()
             if attach_proc.returncode == 0:
@@ -233,6 +259,7 @@ async def check_pymobiledevice3(skip_recover: bool = False) -> bool:
     """Check that pymobiledevice3 is importable; auto-install if missing."""
     try:
         import pymobiledevice3  # noqa: F401
+
         print(_ok("pymobiledevice3 is installed"))
         return True
     except ImportError:
@@ -246,6 +273,7 @@ async def check_pymobiledevice3(skip_recover: bool = False) -> bool:
             # Re-import to verify
             try:
                 import pymobiledevice3  # noqa: F401
+
                 return True
             except ImportError:
                 pass
@@ -454,10 +482,14 @@ async def check_wsl_bridge() -> dict | None:
     """Probe the WSL2 bridge health endpoint if available."""
     try:
         import aiohttp
-        async with aiohttp.ClientSession() as session, session.get(
-            "http://127.0.0.1:18920/health",
-            timeout=aiohttp.ClientTimeout(total=3),
-        ) as resp:
+
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
+                "http://127.0.0.1:18920/health",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp,
+        ):
             if resp.status == 200:
                 body = await resp.json()
                 print(_ok(f"WSL bridge reachable at 127.0.0.1:18920 (tier={body.get('tier', '?')})"))
@@ -487,6 +519,7 @@ async def _auto_recover(skip_recover: bool) -> bool:
     service = await _ensure_apple_service_running()
     if service["state"] in ("running", "started"):
         import socket
+
         for attempt in range(5):
             await asyncio.sleep(1)
             try:
@@ -506,6 +539,7 @@ async def _auto_recover(skip_recover: bool) -> bool:
         elevated = await _elevate_and_start_service()
         if elevated:
             import socket
+
             for attempt in range(5):
                 await asyncio.sleep(1)
                 try:
@@ -645,13 +679,15 @@ def main() -> int:
         """),
     )
     parser.add_argument(
-        "--serial", "-s",
+        "--serial",
+        "-s",
         type=str,
         default=None,
         help="Filter diagnostics to a specific device serial/UDID",
     )
     parser.add_argument(
-        "--check-bridge", "-b",
+        "--check-bridge",
+        "-b",
         action="store_true",
         help="Also probe the WSL2 bridge health endpoint (if running)",
     )
@@ -661,7 +697,8 @@ def main() -> int:
         help="Skip automatic self-healing (just diagnose)",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable debug logging from pymobiledevice3",
     )
@@ -673,11 +710,13 @@ def main() -> int:
         logging.getLogger("pymobiledevice3").setLevel(logging.INFO)
 
     try:
-        return asyncio.run(diagnose(
-            serial_filter=args.serial,
-            check_bridge=args.check_bridge,
-            skip_auto_recover=args.skip_auto_recover,
-        ))
+        return asyncio.run(
+            diagnose(
+                serial_filter=args.serial,
+                check_bridge=args.check_bridge,
+                skip_auto_recover=args.skip_auto_recover,
+            )
+        )
     except KeyboardInterrupt:
         print("\nDiagnostic interrupted by user")
         return 130

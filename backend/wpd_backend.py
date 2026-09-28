@@ -81,8 +81,10 @@ class _WpdFileReader:
         self._proc = await asyncio.create_subprocess_exec(
             str(self._wpd_helper),
             "read-file",
-            "--device", self._device_id,
-            "--path", self._path,
+            "--device",
+            self._device_id,
+            "--path",
+            self._path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             creationflags=creationflags,
@@ -207,11 +209,13 @@ class WpdBackend:
         else:
             # Lazy import to avoid circular imports at module load time.
             from backend.config import WPD_HELPER
+
             self._wpd_helper = WPD_HELPER
 
     @property
     def tier(self):  # type: ignore[override]
         from backend.device_backend import DeviceAccessTier
+
         return DeviceAccessTier.WPD
 
     @property
@@ -220,6 +224,7 @@ class WpdBackend:
 
     async def is_available(self):  # type: ignore[override]
         from backend.device_backend import DeviceAccessTier, TierProbeResult
+
         if not self._wpd_helper.exists():
             return TierProbeResult(
                 tier=DeviceAccessTier.WPD,
@@ -252,14 +257,16 @@ class WpdBackend:
             # WPD doesn't provide iOS-specific metadata.  Map what we have
             # into the IOSDevice shape so callers can't tell which backend
             # produced it without checking explicitly.
-            devices.append(IOSDevice(
-                serial=device_id,
-                name=friendly_name,
-                model=manufacturer or "Unknown",
-                ios_version="unknown",
-                connection_type="USB",
-                status=DeviceStatus.READY,
-            ))
+            devices.append(
+                IOSDevice(
+                    serial=device_id,
+                    name=friendly_name,
+                    model=manufacturer or "Unknown",
+                    ios_version="unknown",
+                    connection_type="USB",
+                    status=DeviceStatus.READY,
+                )
+            )
         return devices
 
     async def browse(self, serial: str, path: str) -> list[DeviceFileInfo]:  # type: ignore[override]
@@ -320,13 +327,15 @@ class WpdBackend:
 
             full_path = f"/{clean_path}/{name}" if clean_path != "." else f"/{name}"
 
-            entries.append(DeviceFileInfo(
-                name=name,
-                path=full_path,
-                is_dir=is_dir,
-                size=int(size) if size is not None else 0,
-                mtime=mtime,
-            ))
+            entries.append(
+                DeviceFileInfo(
+                    name=name,
+                    path=full_path,
+                    is_dir=is_dir,
+                    size=int(size) if size is not None else 0,
+                    mtime=mtime,
+                )
+            )
         return entries
 
     async def file_info(self, serial: str, path: str) -> DeviceFileInfo:  # type: ignore[override]

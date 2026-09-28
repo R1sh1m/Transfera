@@ -4,6 +4,7 @@ Smoke tests for critical API endpoints.
 Tests the HTTP interface layer using FastAPI TestClient with an in-memory
 database, so no real filesystem or device dependencies are needed.
 """
+
 from __future__ import annotations
 
 import pytest

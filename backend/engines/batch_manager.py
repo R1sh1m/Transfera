@@ -59,16 +59,15 @@ async def create_batches(
             await session.flush()
 
             # Assign batch_id to every MediaItem in this chunk
-            await session.execute(
-                update(MediaItem)
-                .where(MediaItem.id.in_(chunk))
-                .values(batch_id=batch.id)
-            )
+            await session.execute(update(MediaItem).where(MediaItem.id.in_(chunk)).values(batch_id=batch.id))
 
             created_ids.append(batch.id)
             logger.info(
                 "Batch %d created: %d items (ids %d-%d)",
-                batch_num, len(chunk), chunk[0], chunk[-1],
+                batch_num,
+                len(chunk),
+                chunk[0],
+                chunk[-1],
             )
 
     logger.info("Created %d batches for session %d", len(created_ids), session_id)
@@ -85,10 +84,12 @@ async def get_pending_batches(session_id: int) -> list[TransferBatch]:
             select(TransferBatch)
             .where(
                 TransferBatch.session_id == session_id,
-                TransferBatch.status.in_([
-                    BatchStatus.PENDING.value,
-                    BatchStatus.FAILED.value,
-                ]),
+                TransferBatch.status.in_(
+                    [
+                        BatchStatus.PENDING.value,
+                        BatchStatus.FAILED.value,
+                    ]
+                ),
             )
             .order_by(TransferBatch.batch_number)
         )
@@ -98,11 +99,7 @@ async def get_pending_batches(session_id: int) -> list[TransferBatch]:
 async def get_batch_items(batch_id: int) -> list[MediaItem]:
     """Return all MediaItems assigned to a batch, ordered by id (chronological)."""
     async with session_scope() as session:
-        result = await session.execute(
-            select(MediaItem)
-            .where(MediaItem.batch_id == batch_id)
-            .order_by(MediaItem.id)
-        )
+        result = await session.execute(select(MediaItem).where(MediaItem.batch_id == batch_id).order_by(MediaItem.id))
         return list(result.scalars().all())
 
 

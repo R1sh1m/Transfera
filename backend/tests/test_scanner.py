@@ -66,6 +66,7 @@ def _touch(path: Path, content: bytes = b"x", mtime: float | None = None) -> Pat
 def _ts(year: int, month: int, day: int) -> float:
     """Shorthand: (year, month, day) → POSIX timestamp (UTC)."""
     import calendar
+
     return calendar.timegm((year, month, day, 12, 0, 0, 0, 0, 0))
 
 
@@ -135,24 +136,53 @@ def test_sort_key() -> None:
 
     EPOCH = __import__("datetime").datetime(1970, 1, 1, tzinfo=__import__("datetime").timezone.utc)
 
-    m1 = FileMetadata(file_path="/a", file_name="a", file_size=1, extension=".jpg",
-                       date_taken=None, date_created=None, date_modified=None)
+    m1 = FileMetadata(
+        file_path="/a",
+        file_name="a",
+        file_size=1,
+        extension=".jpg",
+        date_taken=None,
+        date_created=None,
+        date_modified=None,
+    )
     _check("No dates -> epoch", _sort_key(m1) == EPOCH)
 
     from datetime import datetime
+
     dt_mod = datetime(2025, 6, 15, 10, 0, tzinfo=UTC)
-    m2 = FileMetadata(file_path="/b", file_name="b", file_size=1, extension=".jpg",
-                       date_taken=None, date_created=None, date_modified=dt_mod)
+    m2 = FileMetadata(
+        file_path="/b",
+        file_name="b",
+        file_size=1,
+        extension=".jpg",
+        date_taken=None,
+        date_created=None,
+        date_modified=dt_mod,
+    )
     _check("Only date_modified used", _sort_key(m2) == dt_mod)
 
     dt_create = datetime(2024, 1, 1, tzinfo=UTC)
-    m3 = FileMetadata(file_path="/c", file_name="c", file_size=1, extension=".jpg",
-                       date_taken=None, date_created=dt_create, date_modified=dt_mod)
+    m3 = FileMetadata(
+        file_path="/c",
+        file_name="c",
+        file_size=1,
+        extension=".jpg",
+        date_taken=None,
+        date_created=dt_create,
+        date_modified=dt_mod,
+    )
     _check("date_created preferred over date_modified", _sort_key(m3) == dt_create)
 
     dt_taken = datetime(2023, 3, 10, tzinfo=UTC)
-    m4 = FileMetadata(file_path="/d", file_name="d", file_size=1, extension=".jpg",
-                       date_taken=dt_taken, date_created=dt_create, date_modified=dt_mod)
+    m4 = FileMetadata(
+        file_path="/d",
+        file_name="d",
+        file_size=1,
+        extension=".jpg",
+        date_taken=dt_taken,
+        date_created=dt_create,
+        date_modified=dt_mod,
+    )
     _check("date_taken preferred over all", _sort_key(m4) == dt_taken)
 
 
@@ -201,10 +231,9 @@ async def test_full_scan() -> None:
         from sqlalchemy import select
 
         from backend.database.manager import session_scope
+
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem).order_by(MediaItem.id)
-            )
+            result = await session.execute(select(MediaItem).order_by(MediaItem.id))
             items = result.scalars().all()
 
         file_names = [i.file_name for i in items]
@@ -255,6 +284,7 @@ async def test_dedup() -> None:
         from sqlalchemy import select
 
         from backend.database.manager import session_scope
+
         async with session_scope() as session:
             result = await session.execute(select(sql_func.count(MediaItem.id)))
             count = result.scalar()

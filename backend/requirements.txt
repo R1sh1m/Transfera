@@ -13,6 +13,11 @@ aiohttp>=3.9,<4.0
 pydantic>=2.7,<3.0
 pymobiledevice3>=5.0,<6.0
 exifread>=3.0,<4.0
+# On-board AI search runtime — shipped in the base install from day one
+# (no opt-in pip step). Model *weights* (~207 MB) still download once via
+# "Get AI models"; requirements-ai.txt remains as the fallback manifest
+# for ensure_ai_packages() when the runtime is somehow missing.
 onnxruntime>=1.20,<2.0
 tokenizers>=0.21,<1.0
+numpy>=1.26,<3.0
 

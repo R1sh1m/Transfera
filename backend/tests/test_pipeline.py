@@ -129,6 +129,7 @@ async def test_batch_creation() -> None:
 
         # Scan files into DB
         from backend.engines.scanner import scan
+
         item_ids = await scan(src, session_id=session_id)
         _check("Scanned 250 items", len(item_ids) == 250)
 
@@ -175,6 +176,7 @@ async def test_hop1_full_cache() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -192,9 +194,7 @@ async def test_hop1_full_cache() -> None:
 
         # Verify source hashes stored
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem.id, MediaItem.source_hash)
-            )
+            result = await session.execute(select(MediaItem.id, MediaItem.source_hash))
             rows = result.all()
             all_hashed = all(r[1] is not None for r in rows)
             _check("All items have source_hash", all_hashed)
@@ -216,11 +216,14 @@ async def test_hop1_skip_existing() -> None:
 
         # Compute hash using the same algorithm as cache_manager
         from backend.engines.cache_manager import _BLAKE3_AVAILABLE
+
         if _BLAKE3_AVAILABLE:
             import blake3
+
             h = blake3.blake3()
         else:
             import hashlib as hl
+
             h = hl.sha256()
         with open(f, "rb") as fh:
             for chunk in iter(lambda: fh.read(8192), b""):
@@ -238,6 +241,7 @@ async def test_hop1_skip_existing() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
 
         # Set source_hash to match what cache_manager would compute
@@ -282,6 +286,7 @@ async def test_hop2_import() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -327,6 +332,7 @@ async def test_recovery_loading() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -363,9 +369,7 @@ async def test_recovery_loading() -> None:
 
         # Verify items reset to PENDING
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem.hop1_status).where(MediaItem.batch_id == batch_ids[0])
-            )
+            result = await session.execute(select(MediaItem.hop1_status).where(MediaItem.batch_id == batch_ids[0]))
             statuses = [r[0] for r in result.all()]
             all_pending = all(s == HopStatus.PENDING.value for s in statuses)
             _check("All items reset to PENDING", all_pending)
@@ -400,6 +404,7 @@ async def test_recovery_archived() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -439,8 +444,9 @@ async def test_recovery_archived() -> None:
         # Verify item states
         async with session_scope() as session:
             result = await session.execute(
-                select(MediaItem.file_name, MediaItem.hop2_status, MediaItem.final_status)
-                .where(MediaItem.batch_id == batch_ids[0])
+                select(MediaItem.file_name, MediaItem.hop2_status, MediaItem.final_status).where(
+                    MediaItem.batch_id == batch_ids[0]
+                )
             )
             rows = {r[0]: (r[1], r[2]) for r in result.all()}
 
@@ -482,6 +488,7 @@ async def test_pipeline_integrity() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -494,6 +501,7 @@ async def test_pipeline_integrity() -> None:
         async with session_scope() as session:
             from sqlalchemy import func
             from sqlalchemy import select as sel
+
             result = await session.execute(sel(func.count(MediaItem.id)))
             db_count = result.scalar()
 
@@ -506,9 +514,7 @@ async def test_pipeline_integrity() -> None:
 
         # Verify all items completed
         async with session_scope() as session:
-            result = await session.execute(
-                sel(MediaItem.final_status).where(MediaItem.session_id == session_id)
-            )
+            result = await session.execute(sel(MediaItem.final_status).where(MediaItem.session_id == session_id))
             statuses = [r[0] for r in result.all()]
             all_done = all(s == HopStatus.COMPLETED.value for s in statuses)
             _check("All items COMPLETED", all_done)
@@ -560,6 +566,7 @@ async def test_import_retry_succeeds_on_second_attempt() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -575,9 +582,7 @@ async def test_import_retry_succeeds_on_second_attempt() -> None:
         _check("Item imported after retry", imported == 1)
 
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem.final_status).where(MediaItem.batch_id == batch_ids[0])
-            )
+            result = await session.execute(select(MediaItem.final_status).where(MediaItem.batch_id == batch_ids[0]))
             statuses = [r[0] for r in result.all()]
             _check("Item marked COMPLETED", statuses == [HopStatus.COMPLETED.value])
 
@@ -616,6 +621,7 @@ async def test_import_retry_exhausted_fails() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -631,9 +637,7 @@ async def test_import_retry_exhausted_fails() -> None:
         _check("Item not imported (retries exhausted)", imported == 0)
 
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem.final_status).where(MediaItem.batch_id == batch_ids[0])
-            )
+            result = await session.execute(select(MediaItem.final_status).where(MediaItem.batch_id == batch_ids[0]))
             statuses = [r[0] for r in result.all()]
             _check("Item marked FAILED", statuses == [HopStatus.FAILED.value])
 

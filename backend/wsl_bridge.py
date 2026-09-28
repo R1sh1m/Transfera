@@ -75,16 +75,14 @@ def _classify_lockdown_error(exc: Exception) -> tuple[str, str]:
     if "not paired" in exc_str or "trust" in exc_str or "pair" in exc_str:
         return (
             "not_trusted",
-            "Device is not trusted. Please unlock your device and tap "
-            "'Trust This Computer' when prompted.",
+            "Device is not trusted. Please unlock your device and tap 'Trust This Computer' when prompted.",
         )
 
     # Connection refused / usbmuxd not running
     if "connection refused" in exc_str or "usbmux" in exc_str:
         return (
             "error",
-            f"Cannot connect to usbmuxd: {exc}. Ensure the device is "
-            "connected via USB and usbmuxd is running.",
+            f"Cannot connect to usbmuxd: {exc}. Ensure the device is connected via USB and usbmuxd is running.",
         )
 
     # Generic fallback
@@ -128,7 +126,8 @@ async def list_devices():
         serial = mux_dev.serial
         try:
             lockdown = await asyncio.wait_for(
-                asyncio.to_thread(create_using_usbmux, serial=serial, autopair=False), timeout=5.0,
+                asyncio.to_thread(create_using_usbmux, serial=serial, autopair=False),
+                timeout=5.0,
             )
             try:
                 info = lockdown.short_info
@@ -139,35 +138,55 @@ async def list_devices():
                 except Exception:
                     status = "not_trusted"
 
-                devices.append({
-                    "serial": serial,
-                    "name": info.get("DeviceName", "Unknown Device"),
-                    "model": info.get("ProductType", "iPhone"),
-                    "ios_version": info.get("ProductVersion", "unknown"),
-                    "connection_type": getattr(mux_dev, "connection_type", "USB"),
-                    "status": status,
-                })
+                devices.append(
+                    {
+                        "serial": serial,
+                        "name": info.get("DeviceName", "Unknown Device"),
+                        "model": info.get("ProductType", "iPhone"),
+                        "ios_version": info.get("ProductVersion", "unknown"),
+                        "connection_type": getattr(mux_dev, "connection_type", "USB"),
+                        "status": status,
+                    }
+                )
             finally:
                 lockdown.close()
         except TimeoutError:
             # Locked device — lockdown connection times out.
-            devices.append({
-                "serial": serial, "name": "Unknown Device", "model": "iPhone",
-                "ios_version": "unknown", "connection_type": "USB", "status": "locked",
-            })
+            devices.append(
+                {
+                    "serial": serial,
+                    "name": "Unknown Device",
+                    "model": "iPhone",
+                    "ios_version": "unknown",
+                    "connection_type": "USB",
+                    "status": "locked",
+                }
+            )
         except Exception as exc:
             exc_str = str(exc).lower()
             if "not paired" in exc_str or "trust" in exc_str or "pair" in exc_str:
-                devices.append({
-                    "serial": serial, "name": "Unknown Device", "model": "iPhone",
-                    "ios_version": "unknown", "connection_type": "USB", "status": "not_trusted",
-                })
+                devices.append(
+                    {
+                        "serial": serial,
+                        "name": "Unknown Device",
+                        "model": "iPhone",
+                        "ios_version": "unknown",
+                        "connection_type": "USB",
+                        "status": "not_trusted",
+                    }
+                )
             else:
-                devices.append({
-                    "serial": serial, "name": "Unknown Device", "model": "iPhone",
-                    "ios_version": "unknown", "connection_type": "USB", "status": "error",
-                    "error_detail": str(exc)[:200],
-                })
+                devices.append(
+                    {
+                        "serial": serial,
+                        "name": "Unknown Device",
+                        "model": "iPhone",
+                        "ios_version": "unknown",
+                        "connection_type": "USB",
+                        "status": "error",
+                        "error_detail": str(exc)[:200],
+                    }
+                )
 
     return {"available": True, "driver_status": "ready", "devices": devices}
 
@@ -199,15 +218,15 @@ async def browse_device(serial: str, path: str = "/"):
     lockdown = None
     try:
         lockdown = await asyncio.wait_for(
-            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True), timeout=10.0,
+            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True),
+            timeout=10.0,
         )
     except TimeoutError:
         raise HTTPException(
             status_code=423,
             detail=_build_error(
                 "locked",
-                "Device connection timed out via WSL bridge. "
-                "The device may be locked. Please unlock it and try again.",
+                "Device connection timed out via WSL bridge. The device may be locked. Please unlock it and try again.",
             ),
         )
     except Exception as exc:
@@ -287,7 +306,8 @@ async def get_file_info(serial: str, path: str = "/"):
     lockdown = None
     try:
         lockdown = await asyncio.wait_for(
-            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True), timeout=10.0,
+            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True),
+            timeout=10.0,
         )
     except TimeoutError:
         raise HTTPException(
@@ -309,8 +329,11 @@ async def get_file_info(serial: str, path: str = "/"):
         mtime = info.get("st_mtime")
         mtime_val = mtime.timestamp() if hasattr(mtime, "timestamp") else float(mtime or 0)
         return {
-            "name": posixpath.basename(path), "path": path,
-            "is_dir": is_dir, "size": size, "mtime": mtime_val,
+            "name": posixpath.basename(path),
+            "path": path,
+            "is_dir": is_dir,
+            "size": size,
+            "mtime": mtime_val,
         }
     except FileNotFoundError:
         raise HTTPException(
@@ -352,7 +375,8 @@ async def read_file(serial: str, path: str):
     lockdown = None
     try:
         lockdown = await asyncio.wait_for(
-            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True), timeout=10.0,
+            asyncio.to_thread(create_using_usbmux, serial=serial, autopair=True),
+            timeout=10.0,
         )
     except TimeoutError:
         raise HTTPException(
@@ -401,9 +425,11 @@ def _ensure_usbmuxd():
         return
     try:
         import subprocess
+
         subprocess.Popen(
             ["usbmuxd", "-f"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         for _ in range(10):
             if os.path.exists("/var/run/usbmuxd"):

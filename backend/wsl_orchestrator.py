@@ -48,14 +48,14 @@ DISTRO_SAVE_PATH = DATA_DIR / "wsl_distro.txt"
 # repair card instead.
 # ---------------------------------------------------------------------------
 WSL_SERVICE_BROKEN_SIGNATURES: list[str] = [
-    "e_unexpected",          # COM HRESULT 0x8000FFFF
+    "e_unexpected",  # COM HRESULT 0x8000FFFF
     "catastrophic failure",  # human-readable form of E_UNEXPECTED
-    "4294967295",            # rc == 0xFFFFFFFF returned as signed -1
-    "wsl/service",           # wsl --status "WSL/Service" subsystem error
-    "lxss",                  # LxssManager service errors
-    "0x8000ffff",            # hex form of E_UNEXPECTED
-    "failed to attach disk", # kernel module not loaded
-    "element not found",     # registry/service entry missing after corrupt update
+    "4294967295",  # rc == 0xFFFFFFFF returned as signed -1
+    "wsl/service",  # wsl --status "WSL/Service" subsystem error
+    "lxss",  # LxssManager service errors
+    "0x8000ffff",  # hex form of E_UNEXPECTED
+    "failed to attach disk",  # kernel module not loaded
+    "element not found",  # registry/service entry missing after corrupt update
 ]
 
 
@@ -111,6 +111,7 @@ def classify_wsl_failure(
 
     return "transient"
 
+
 # ---------------------------------------------------------------------------
 # Distro name resolution
 # ---------------------------------------------------------------------------
@@ -147,11 +148,7 @@ def get_transfera_wsl_distro() -> str | None:
         )
         # wsl --list --quiet outputs plain distro names in UTF-16LE
         output = result.stdout.decode("utf-16-le", errors="replace")
-        distros = [
-            d.strip().strip("\x00")
-            for d in output.splitlines()
-            if d.strip().strip("\x00")
-        ]
+        distros = [d.strip().strip("\x00") for d in output.splitlines() if d.strip().strip("\x00")]
     except Exception:
         distros = []
 
@@ -385,10 +382,7 @@ def _looks_like_utf16le(data: bytes) -> bool:
         return False
     null_odds = sum(1 for b in odd if b == 0)
     printable_evens = sum(1 for b in even if 0x09 <= b <= 0x7E)
-    return (
-        null_odds / len(odd) > 0.8
-        and printable_evens / len(even) > 0.7
-    )
+    return null_odds / len(odd) > 0.8 and printable_evens / len(even) > 0.7
 
 
 def _decode_wsl_output(data: bytes) -> str:
@@ -413,8 +407,7 @@ def _decode_wsl_output(data: bytes) -> str:
         # Definitive signal: UTF-16LE BOM
         if data[:2] == b"\xff\xfe":
             logger.debug(
-                "wsl output: detected UTF-16LE BOM, decoding as utf-16-le "
-                "(first 64 raw bytes: %s)",
+                "wsl output: detected UTF-16LE BOM, decoding as utf-16-le (first 64 raw bytes: %s)",
                 data[:64].hex(),
             )
             return data.decode("utf-16-le", errors="replace")
@@ -428,8 +421,7 @@ def _decode_wsl_output(data: bytes) -> str:
             return data.decode("utf-16-le", errors="replace")
     except Exception:
         logger.warning(
-            "wsl output: UTF-16LE decode failed, falling back to UTF-8 "
-            "(first 64 raw bytes: %s)",
+            "wsl output: UTF-16LE decode failed, falling back to UTF-8 (first 64 raw bytes: %s)",
             data[:64].hex(),
         )
     # Default: UTF-8 (Python's default encoding)
@@ -442,11 +434,7 @@ def _decode_wsl_output(data: bytes) -> str:
 
 def _apt_lock_contended(err: str) -> bool:
     err_lower = err.lower()
-    return (
-        "could not get lock" in err_lower
-        or "apt_lock_timeout" in err_lower
-        or "dpkg_lock_timeout" in err_lower
-    )
+    return "could not get lock" in err_lower or "apt_lock_timeout" in err_lower or "dpkg_lock_timeout" in err_lower
 
 
 async def _run_cmd(
@@ -507,7 +495,6 @@ def _is_valid_distro_line(line: str) -> str | None:
 # WSLOrchestrator
 # ---------------------------------------------------------------------------
 class WSLOrchestrator:
-
     def __init__(self) -> None:
         self._cached_distro_name: str | None = None
         self._distro_cache_time: float = 0.0
@@ -554,9 +541,10 @@ class WSLOrchestrator:
                     "or corrupted."
                 )
                 logger.error(
-                    "WSL service-level failure detected (rc=%s, class=service_broken). "
-                    "stdout=%r stderr=%r",
-                    rc, out[:200], err[:200],
+                    "WSL service-level failure detected (rc=%s, class=service_broken). stdout=%r stderr=%r",
+                    rc,
+                    out[:200],
+                    err[:200],
                 )
                 return status
             elif rc == 0 and out.strip():
@@ -592,8 +580,13 @@ class WSLOrchestrator:
             distro_for_uname = status.distro_name or get_transfera_wsl_distro() or DISTRO_NAME
             try:
                 rc, out, _ = await _run_cmd(
-                    "wsl", "-d", distro_for_uname,
-                    "--", "uname", "-r", timeout=10,
+                    "wsl",
+                    "-d",
+                    distro_for_uname,
+                    "--",
+                    "uname",
+                    "-r",
+                    timeout=10,
                 )
                 if rc == 0:
                     status.kernel_version = out.strip()
@@ -605,7 +598,11 @@ class WSLOrchestrator:
     async def _check_virtualization(self) -> bool:
         try:
             rc, out, _ = await _run_cmd(
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
                 "(Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent -or (Get-CimInstance -ClassName Win32_Processor).VirtualizationFirmwareEnabled",
                 timeout=10,
             )
@@ -616,27 +613,36 @@ class WSLOrchestrator:
     async def install_wsl(self) -> Tier2StepResult:
         try:
             rc, out, err = await _run_cmd(
-                "wsl", "--install", "-d", DISTRO_NAME, timeout=300,
+                "wsl",
+                "--install",
+                "-d",
+                DISTRO_NAME,
+                timeout=300,
             )
             combined = out + err
             if "restart" in combined.lower() or "Changes will not be effective" in combined.lower():
                 return Tier2StepResult(
-                    step_id=StepID.ENABLE_WSL, completed=False,
-                    restart_required=True, details={"output": combined},
+                    step_id=StepID.ENABLE_WSL,
+                    completed=False,
+                    restart_required=True,
+                    details={"output": combined},
                 )
             if rc == 0 or "installed" in combined.lower() or "ubuntu" in combined.lower():
                 return Tier2StepResult(
-                    step_id=StepID.ENABLE_WSL, completed=True,
+                    step_id=StepID.ENABLE_WSL,
+                    completed=True,
                     details={"output": combined},
                 )
             return Tier2StepResult(
-                step_id=StepID.ENABLE_WSL, completed=False,
+                step_id=StepID.ENABLE_WSL,
+                completed=False,
                 error=f"WSL install returned: {combined.strip()}",
                 details={"output": combined},
             )
         except TimeoutError:
             return Tier2StepResult(
-                step_id=StepID.ENABLE_WSL, completed=False,
+                step_id=StepID.ENABLE_WSL,
+                completed=False,
                 error="WSL installation timed out after 5 minutes",
             )
         except Exception as exc:
@@ -647,26 +653,42 @@ class WSLOrchestrator:
         if status.wsl_installed and status.distro_ready:
             return Tier2StepResult(step_id=StepID.ENABLE_WSL, completed=True, details={"distro": status.distro_name})
         if status.restart_required:
-            return Tier2StepResult(step_id=StepID.ENABLE_WSL, completed=False, restart_required=True, error="Restart has not completed yet")
-        return Tier2StepResult(step_id=StepID.ENABLE_WSL, completed=False, error=status.error or "WSL is not ready after restart")
+            return Tier2StepResult(
+                step_id=StepID.ENABLE_WSL, completed=False, restart_required=True, error="Restart has not completed yet"
+            )
+        return Tier2StepResult(
+            step_id=StepID.ENABLE_WSL, completed=False, error=status.error or "WSL is not ready after restart"
+        )
 
     async def install_distro(self) -> Tier2StepResult:
         status = await self.check_feasibility()
         if status.distro_ready:
-            return Tier2StepResult(step_id=StepID.INSTALL_DISTRO, completed=True, details={"distro": status.distro_name})
+            return Tier2StepResult(
+                step_id=StepID.INSTALL_DISTRO, completed=True, details={"distro": status.distro_name}
+            )
         try:
             rc, out, err = await _run_cmd("wsl", "--install", "-d", DISTRO_NAME, "--no-launch", timeout=300)
             combined = out + err
             if rc == 0 or "installed" in combined.lower():
                 return Tier2StepResult(step_id=StepID.INSTALL_DISTRO, completed=True, details={"output": combined})
-            return Tier2StepResult(step_id=StepID.INSTALL_DISTRO, completed=False, error=combined.strip() or "Distro installation failed")
+            return Tier2StepResult(
+                step_id=StepID.INSTALL_DISTRO, completed=False, error=combined.strip() or "Distro installation failed"
+            )
         except Exception as exc:
             return Tier2StepResult(step_id=StepID.INSTALL_DISTRO, completed=False, error=str(exc))
 
     async def get_usbipd_install_command(self) -> dict:
         return {
             "executable": "powershell",
-            "args": ["winget", "install", "--id", "dorssel.usbipd-win", "-e", "--accept-package-agreements", "--accept-source-agreements"],
+            "args": [
+                "winget",
+                "install",
+                "--id",
+                "dorssel.usbipd-win",
+                "-e",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ],
             "description": "Install usbipd-win -- an open-source USB device sharing tool referenced in Microsoft's official WSL documentation. Windows will ask for admin permission (UAC).",
         }
 
@@ -701,10 +723,7 @@ class WSLOrchestrator:
             return Tier2StepResult(
                 step_id=StepID.PROVISION_LINUX,
                 completed=False,
-                error=(
-                    "No WSL distribution found. "
-                    "Please install Ubuntu from the Microsoft Store."
-                ),
+                error=("No WSL distribution found. Please install Ubuntu from the Microsoft Store."),
                 error_code="NO_WSL_DISTRO",
                 details={"steps_completed": []},
             )
@@ -746,9 +765,16 @@ class WSLOrchestrator:
         # Portable lock-polling loop (no --lock-timeout, works on apt 1.x/2.x)
         try:
             rc, out, err = await _run_cmd(
-                "wsl", "-d", d, "-u", "root", "--",
-                "bash", "-c",
-                APT_LOCK_POLL_SCRIPT + "DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 update -y",
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "bash",
+                "-c",
+                APT_LOCK_POLL_SCRIPT
+                + "DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 update -y",
                 timeout=200,
             )
             if rc == 0:
@@ -779,7 +805,12 @@ class WSLOrchestrator:
                     f"  wsl --install -d Ubuntu\n"
                     f"then retry this setup step."
                 )
-                return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=False, error=hint, details={"steps_completed": steps_completed})
+                return Tier2StepResult(
+                    step_id=StepID.PROVISION_LINUX,
+                    completed=False,
+                    error=hint,
+                    details={"steps_completed": steps_completed},
+                )
             return Tier2StepResult(
                 step_id=StepID.PROVISION_LINUX,
                 completed=False,
@@ -794,16 +825,28 @@ class WSLOrchestrator:
         # -------------------------------------------------------------------
         install_desc = "Install USB/IP tools, Python, usbmuxd"
         install_pkgs = [
-            "linux-tools-common", "hwdata", "usbutils",
-            "python3", "python3-pip", "python3-venv",
-            "usbmuxd", "curl",
+            "linux-tools-common",
+            "hwdata",
+            "usbutils",
+            "python3",
+            "python3-pip",
+            "python3-venv",
+            "usbmuxd",
+            "curl",
         ]
         try:
             pkgs_str = " ".join(install_pkgs)
             rc, out, err = await _run_cmd(
-                "wsl", "-d", d, "-u", "root", "--",
-                "bash", "-c",
-                APT_LOCK_POLL_SCRIPT + f"DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 install -y {pkgs_str}",
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "bash",
+                "-c",
+                APT_LOCK_POLL_SCRIPT
+                + f"DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 install -y {pkgs_str}",
                 timeout=180,
             )
             if rc != 0 and "already" not in out.lower():
@@ -826,15 +869,43 @@ class WSLOrchestrator:
             )
 
         try:
-            rc, out, _ = await _run_cmd("wsl", "-d", d, "-u", "root", "--", "pip3", "install", "--break-system-packages", "pymobiledevice3", timeout=120)
+            rc, out, _ = await _run_cmd(
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "pip3",
+                "install",
+                "--break-system-packages",
+                "pymobiledevice3",
+                timeout=120,
+            )
             if rc != 0:
                 await _run_cmd("wsl", "-d", d, "-u", "root", "--", "pip3", "install", "pymobiledevice3", timeout=120)
             steps_completed.append("pymobiledevice3")
         except Exception as exc:
-            return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=False, error=f"Failed to install pymobiledevice3: {exc}", details={"steps_completed": steps_completed})
+            return Tier2StepResult(
+                step_id=StepID.PROVISION_LINUX,
+                completed=False,
+                error=f"Failed to install pymobiledevice3: {exc}",
+                details={"steps_completed": steps_completed},
+            )
 
         try:
-            await _run_cmd("wsl", "-d", d, "-u", "root", "--", "bash", "-c", "update-alternatives --install /usr/bin/usbip usbip $(ls /usr/lib/linux-tools/*-generic/usbip 2>/dev/null | head -1) 20 || true", timeout=30)
+            await _run_cmd(
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "bash",
+                "-c",
+                "update-alternatives --install /usr/bin/usbip usbip $(ls /usr/lib/linux-tools/*-generic/usbip 2>/dev/null | head -1) 20 || true",
+                timeout=30,
+            )
             steps_completed.append("usbip alternatives")
         except Exception:
             pass
@@ -846,15 +917,39 @@ class WSLOrchestrator:
             if bridge_src.exists():
                 wsl_backend = await _run_cmd_ok("wsl", "-d", d, "--", "wslpath", "-u", str(backend_dir), timeout=10)
                 wsl_src = f"{wsl_backend.strip()}/{BRIDGE_SCRIPT_NAME}"
-                await _run_cmd("wsl", "-d", d, "-u", "root", "--", "cp", wsl_src, f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}", timeout=10)
-                await _run_cmd("wsl", "-d", d, "-u", "root", "--", "chmod", "+x", f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}", timeout=10)
+                await _run_cmd(
+                    "wsl",
+                    "-d",
+                    d,
+                    "-u",
+                    "root",
+                    "--",
+                    "cp",
+                    wsl_src,
+                    f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}",
+                    timeout=10,
+                )
+                await _run_cmd(
+                    "wsl",
+                    "-d",
+                    d,
+                    "-u",
+                    "root",
+                    "--",
+                    "chmod",
+                    "+x",
+                    f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}",
+                    timeout=10,
+                )
             steps_completed.append("bridge script deployed")
         except Exception as exc:
             logger.warning("Bridge script deployment failed: %s", exc)
 
         # Persist the distro name so future lookups find it immediately
         save_transfera_wsl_distro(d)
-        return Tier2StepResult(step_id=StepID.PROVISION_LINUX, completed=True, details={"steps_completed": steps_completed})
+        return Tier2StepResult(
+            step_id=StepID.PROVISION_LINUX, completed=True, details={"steps_completed": steps_completed}
+        )
 
     async def start_bridge(self, distro: str | None = None) -> BridgeStatus:
         status = BridgeStatus()
@@ -863,18 +958,12 @@ class WSLOrchestrator:
         # Resolve distro before doing anything else
         d = get_transfera_wsl_distro() if distro is None else distro
         if d is None:
-            status.error = (
-                "No WSL distribution found. "
-                "Please install Ubuntu from the Microsoft Store."
-            )
+            status.error = "No WSL distribution found. Please install Ubuntu from the Microsoft Store."
             status.error_code = "NO_WSL_DISTRO"
             return status
 
         if self._bridge_restart_count >= 3:
-            status.error = (
-                "Bridge failed to start after 3 attempts. "
-                "Check the bridge error log in Advanced settings."
-            )
+            status.error = "Bridge failed to start after 3 attempts. Check the bridge error log in Advanced settings."
             status.last_error = self._bridge_last_stderr
             return status
 
@@ -892,8 +981,7 @@ class WSLOrchestrator:
             self._bridge_last_stderr = None
             self._bridge_intentional_stop = False
             # Start watchdog if not already running
-            if (self._bridge_watchdog_task is None
-                    or self._bridge_watchdog_task.done()):
+            if self._bridge_watchdog_task is None or self._bridge_watchdog_task.done():
                 self._bridge_watchdog_task = asyncio.create_task(
                     self._bridge_watchdog_loop(d),
                     name="bridge-watchdog",
@@ -910,10 +998,7 @@ class WSLOrchestrator:
         # wsl.exe in that state would just loop for 20 s and still fail.
         _feasibility = await self.check_feasibility()
         if _feasibility.wsl_service_broken:
-            logger.error(
-                "start_bridge: WSL service is broken — aborting bridge start, "
-                "skipping 20s network wait"
-            )
+            logger.error("start_bridge: WSL service is broken — aborting bridge start, skipping 20s network wait")
             status.error = (
                 "Windows Subsystem for Linux itself isn't working. "
                 "Please run 'wsl --update', then 'wsl --shutdown', restart Windows, "
@@ -926,9 +1011,16 @@ class WSLOrchestrator:
         network_ok = False
         for _ in range(20):
             try:
-                rc, out, _ = await _run_cmd("wsl", "-d", d, "--", "bash", "-c",
+                rc, out, _ = await _run_cmd(
+                    "wsl",
+                    "-d",
+                    d,
+                    "--",
+                    "bash",
+                    "-c",
                     "hostname -I 2>/dev/null | grep -q . && echo OK || echo WAIT",
-                    timeout=10)
+                    timeout=10,
+                )
                 if rc == 0 and "OK" in out:
                     network_ok = True
                     break
@@ -941,8 +1033,14 @@ class WSLOrchestrator:
         bridge_path = f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "wsl", "-d", d, "-u", "root", "--",
-                "python3", bridge_path,
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "python3",
+                bridge_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=creationflags,
@@ -955,21 +1053,22 @@ class WSLOrchestrator:
                     # Process exited — capture output before continuing
                     captured_stdout, captured_stderr = await proc.communicate()
                     raw_stderr = captured_stderr if captured_stderr else b""
-                    for enc in ('utf-16-le', 'utf-8', 'cp1252'):
+                    for enc in ("utf-16-le", "utf-8", "cp1252"):
                         try:
-                            stderr_text = raw_stderr.decode(enc).replace('\x00', '').strip()
+                            stderr_text = raw_stderr.decode(enc).replace("\x00", "").strip()
                             break
                         except (UnicodeDecodeError, ValueError):
                             continue
                     else:
-                        stderr_text = raw_stderr.decode('utf-8', errors='replace').strip()
-                    stderr_text = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', stderr_text)
+                        stderr_text = raw_stderr.decode("utf-8", errors="replace").strip()
+                    stderr_text = re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", stderr_text)
                     stdout_text = captured_stdout.decode("utf-8", errors="replace").strip() if captured_stdout else ""
                     body = stderr_text or stdout_text
                     msg = body or f"Bridge exited with code {proc.returncode}"
                     logger.error(
                         "Bridge process exited unexpectedly (rc=%s):\n%s",
-                        proc.returncode, msg[:500],
+                        proc.returncode,
+                        msg[:500],
                     )
                     self._bridge_restart_count += 1
                     status.restart_count = self._bridge_restart_count
@@ -986,8 +1085,7 @@ class WSLOrchestrator:
                     self._bridge_last_stderr = None
                     self._bridge_intentional_stop = False
                     # Start watchdog if not already running
-                    if (self._bridge_watchdog_task is None
-                            or self._bridge_watchdog_task.done()):
+                    if self._bridge_watchdog_task is None or self._bridge_watchdog_task.done():
                         self._bridge_watchdog_task = asyncio.create_task(
                             self._bridge_watchdog_loop(d),
                             name="bridge-watchdog",
@@ -1021,11 +1119,20 @@ class WSLOrchestrator:
         if d is None:
             return
         try:
-            await _run_cmd("wsl", "-d", d, "-u", "root", "--", "bash", "-c",
+            await _run_cmd(
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "bash",
+                "-c",
                 "PID=$(cat /tmp/transfera-bridge.pid 2>/dev/null) && kill $PID 2>/dev/null; "
                 "rm -f /tmp/transfera-bridge.pid; "
                 "pkill -f wsl_bridge.py 2>/dev/null; true",
-                timeout=10)
+                timeout=10,
+            )
         except Exception:
             pass
         # Small cooldown so the old process actually exits before we proceed
@@ -1039,8 +1146,8 @@ class WSLOrchestrator:
         the existing start_bridge() which has its own 3-attempt retry logic.
         This restores mid-transfer resilience without duplicating restart logic.
         """
-        PROBE_INTERVAL = 8.0      # seconds between health checks
-        FAIL_THRESHOLD = 2         # consecutive failures before restart attempt
+        PROBE_INTERVAL = 8.0  # seconds between health checks
+        FAIL_THRESHOLD = 2  # consecutive failures before restart attempt
 
         logger.info("Bridge watchdog started for distro=%s", distro)
         consecutive_failures = 0
@@ -1062,13 +1169,16 @@ class WSLOrchestrator:
                         consecutive_failures += 1
                         logger.warning(
                             "Bridge watchdog: probe failed (%d/%d consecutive)",
-                            consecutive_failures, FAIL_THRESHOLD,
+                            consecutive_failures,
+                            FAIL_THRESHOLD,
                         )
                 except Exception as exc:
                     consecutive_failures += 1
                     logger.warning(
                         "Bridge watchdog: probe raised exception (%d/%d): %s",
-                        consecutive_failures, FAIL_THRESHOLD, exc,
+                        consecutive_failures,
+                        FAIL_THRESHOLD,
+                        exc,
                     )
 
                 if consecutive_failures < FAIL_THRESHOLD:
@@ -1153,6 +1263,7 @@ class WSLOrchestrator:
     async def _probe_bridge(self, base_url: str) -> tuple[bool, list[dict]]:
         try:
             import aiohttp  # type: ignore[import-untyped]
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{base_url}/health", timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status != 200:
@@ -1167,9 +1278,7 @@ class WSLOrchestrator:
 
             def _sync_probe() -> tuple[bool, list[dict]]:
                 try:
-                    with urllib.request.urlopen(
-                        urllib.request.Request(f"{base_url}/health"), timeout=3
-                    ) as resp:
+                    with urllib.request.urlopen(urllib.request.Request(f"{base_url}/health"), timeout=3) as resp:
                         if resp.status != 200:
                             return False, []
                     with urllib.request.urlopen(
@@ -1214,7 +1323,7 @@ class WSLOrchestrator:
                         if stripped.endswith(known_state):
                             state = known_state
                             name_end = stripped.rfind(known_state)
-                            device_name = stripped[len(busid) + len(vid_pid) + 2:name_end].strip()
+                            device_name = stripped[len(busid) + len(vid_pid) + 2 : name_end].strip()
                             break
                     devices.append(USBDeviceInfo(busid=busid, vid_pid=vid_pid, device_name=device_name, state=state))
         except FileNotFoundError:
@@ -1235,8 +1344,7 @@ class WSLOrchestrator:
         if d is None:
             return Tier2DeviceStatus(
                 busid=busid,
-                error="No WSL distribution found. Cannot attach device. "
-                      "Please install a WSL distribution first.",
+                error="No WSL distribution found. Cannot attach device. Please install a WSL distribution first.",
             )
         status = Tier2DeviceStatus(busid=busid)
         try:
@@ -1249,7 +1357,9 @@ class WSLOrchestrator:
             status.error = str(exc)
         return status
 
-    async def confirm_device_in_wsl(self, serial: str | None = None, distro: str | None = None, timeout: float = 15.0) -> bool:
+    async def confirm_device_in_wsl(
+        self, serial: str | None = None, distro: str | None = None, timeout: float = 15.0
+    ) -> bool:
         d = get_transfera_wsl_distro() if distro is None else distro
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
@@ -1380,10 +1490,12 @@ class WSLOrchestrator:
                     dev_result["attach_result"] = "failed"
                     error_text = attach_status.error or "unknown"
                     dev_result["error"] = error_text
-                    result["attach_errors"].append({
-                        "busid": dev.busid,
-                        "error": error_text,
-                    })
+                    result["attach_errors"].append(
+                        {
+                            "busid": dev.busid,
+                            "error": error_text,
+                        }
+                    )
                     # Access-denied during attach means elevation needed
                     if "access denied" in error_text.lower() or "5" in error_text:
                         result["needs_elevation"] = True
@@ -1391,10 +1503,12 @@ class WSLOrchestrator:
                 dev_result["attach_result"] = "failed"
                 error_text = str(exc)
                 dev_result["error"] = error_text
-                result["attach_errors"].append({
-                    "busid": dev.busid,
-                    "error": error_text,
-                })
+                result["attach_errors"].append(
+                    {
+                        "busid": dev.busid,
+                        "error": error_text,
+                    }
+                )
 
             result["devices"].append(dev_result)
 

@@ -57,12 +57,8 @@ def resolve_item_date(
 
     # 3. No sane date — unsorted
     if date_taken is not None and not is_date_sane(date_taken):
-        logger.debug(
-            "Rejecting unsane EXIF date: %s (before min or future)", date_taken
-        )
+        logger.debug("Rejecting unsane EXIF date: %s (before min or future)", date_taken)
     if date_modified is not None and not is_date_sane(date_modified):
-        logger.debug(
-            "Rejecting unsane mtime: %s (before min or future)", date_modified
-        )
+        logger.debug("Rejecting unsane mtime: %s (before min or future)", date_modified)
 
     return None, None

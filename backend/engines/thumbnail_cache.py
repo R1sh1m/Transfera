@@ -3,19 +3,22 @@ Transfera v2 — In-memory thumbnail cache.
 Bounded LRU, no disk writes. Thumbnails exist only for the lifetime
 of the backend process. Cleared per-session on completion.
 """
+
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict
 
-_MAX_ENTRIES = 500          # hard cap on total thumbnails in memory
-_MAX_BYTES   = 50 * 1024 * 1024  # 50 MB total ceiling
+_MAX_ENTRIES = 500  # hard cap on total thumbnails in memory
+_MAX_BYTES = 50 * 1024 * 1024  # 50 MB total ceiling
+
 
 class _ThumbnailCache:
     """
     Thread-safe LRU cache mapping item_id -> JPEG bytes.
     Evicts oldest entries when either limit is exceeded.
     """
+
     def __init__(self, max_entries: int = _MAX_ENTRIES, max_bytes: int = _MAX_BYTES):
         self._lock = threading.Lock()
         self._store: OrderedDict[int, bytes] = OrderedDict()
@@ -68,8 +71,7 @@ class _ThumbnailCache:
             }
 
     def _evict(self) -> None:
-        while (len(self._store) > self._max_entries
-               or self._total_bytes > self._max_bytes):
+        while len(self._store) > self._max_entries or self._total_bytes > self._max_bytes:
             oldest_id, _ = self._store.popitem(last=False)
             self._total_bytes -= self._sizes.pop(oldest_id)
 

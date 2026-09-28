@@ -19,6 +19,7 @@ async def mark_thumbnail_ready(item_id: int) -> None:
     """Set thumbnail_path sentinel so frontend knows the thumbnail is in cache."""
     from backend.database.manager import session_scope
     from backend.database.models import MediaItem
+
     async with session_scope() as session:
         db_item = await session.get(MediaItem, item_id)
         if db_item is not None:
@@ -31,6 +32,7 @@ async def mark_thumbnail_failed(item_id: int) -> None:
     """Mark a media item's thumbnail as failed so the frontend stops retrying."""
     from backend.database.manager import session_scope
     from backend.database.models import MediaItem
+
     async with session_scope() as session:
         db_item = await session.get(MediaItem, item_id)
         if db_item is not None:
@@ -42,6 +44,7 @@ async def set_item_thumbnail(item_id: int, thumbnail_path: str) -> None:
     """Update a single item's thumbnail_path in the database."""
     from backend.database.manager import session_scope
     from backend.database.models import MediaItem
+
     async with session_scope() as session:
         db_item = await session.get(MediaItem, item_id)
         if db_item is not None:

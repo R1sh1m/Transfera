@@ -14,12 +14,14 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 class SourceRefLocal(BaseModel):
     """Source is a local folder on this PC."""
+
     type: Literal["local_folder"] = "local_folder"
     path: str = Field(..., min_length=1, description="Absolute path to local directory")
 
 
 class SourceRefDevice(BaseModel):
     """Source is a connected device (e.g. iPhone via AFC)."""
+
     type: Literal["device"] = "device"
     device_id: str = Field(..., min_length=1, description="Stable device identifier (serial/UDID)")
     device_path: str = Field("/", description="Filesystem path on the device (e.g. /DCIM/100APPLE)")
@@ -63,7 +65,7 @@ def legacy_string_to_source_ref(source_string: str) -> SourceRef:
     """
     if source_string.startswith("ios://"):
         # ios://<serial>/path/on/device
-        without_prefix = source_string[len("ios://"):]
+        without_prefix = source_string[len("ios://") :]
         slash_idx = without_prefix.find("/")
         if slash_idx == -1:
             return SourceRefDevice(
@@ -74,6 +76,6 @@ def legacy_string_to_source_ref(source_string: str) -> SourceRef:
         return SourceRefDevice(
             type="device",
             device_id=without_prefix[:slash_idx],
-            device_path="/" + without_prefix[slash_idx + 1:],
+            device_path="/" + without_prefix[slash_idx + 1 :],
         )
     return SourceRefLocal(type="local_folder", path=source_string)

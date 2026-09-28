@@ -20,15 +20,12 @@ local_secret.json
 # --- Node.js ---
 node_modules/
 frontend/dist/
-frontend/dist-electron/
-frontend/electron/dist-electron/
-frontend/release/
-frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js
 frontend/python-bin/
 frontend/python-embed.zip
 *.pfx
+*.tsbuildinfo
 
 
 # --- Environment ---
@@ -66,7 +63,15 @@ backend/data/cache/
 *.partial
 *.tmp
 
-# --- Electron build artifacts ---
+# --- Tauri shell (Rust + sidecar staging) ---
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+frontend/src-tauri/binaries/*.exe
+frontend/src-tauri/resources/*.exe
+# PyInstaller one-dir output (staged into src-tauri/binaries/ by scripts/build-sidecar.ps1)
+dist/transfera-engine/
+
+# --- Packaged installer output (Tauri NSIS bundle + checksums) ---
 frontend/release/
 *.blockmap
 SHA256SUMS.txt

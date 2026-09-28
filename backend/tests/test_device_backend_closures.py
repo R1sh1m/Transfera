@@ -11,6 +11,7 @@ call.
 Run: python -m pytest backend/tests/test_device_backend_closures.py -v
   or: python -m backend.tests.test_device_backend_closures
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,19 +37,27 @@ class _StubBackend:
     """Minimal mock backend that records calls and returns canned results."""
 
     def __init__(self):
-        self.browse = AsyncMock(return_value=[
-            DeviceFileInfo(name="test.txt", path="/DCIM/test.txt", is_dir=False, size=100, mtime=0),
-        ])
-        self.file_info = AsyncMock(return_value=
-            DeviceFileInfo(name="test.txt", path="/DCIM/test.txt", is_dir=False, size=100, mtime=0),
+        self.browse = AsyncMock(
+            return_value=[
+                DeviceFileInfo(name="test.txt", path="/DCIM/test.txt", is_dir=False, size=100, mtime=0),
+            ]
+        )
+        self.file_info = AsyncMock(
+            return_value=DeviceFileInfo(name="test.txt", path="/DCIM/test.txt", is_dir=False, size=100, mtime=0),
         )
         self.read_file = AsyncMock(return_value=b"file contents")
-        self.list_devices = AsyncMock(return_value=[
-            IOSDevice(
-                serial="TEST123", name="Test iPhone", model="iPhone 15",
-                ios_version="17.0", connection_type="USB", status=DeviceStatus.READY,
-            ),
-        ])
+        self.list_devices = AsyncMock(
+            return_value=[
+                IOSDevice(
+                    serial="TEST123",
+                    name="Test iPhone",
+                    model="iPhone 15",
+                    ios_version="17.0",
+                    connection_type="USB",
+                    status=DeviceStatus.READY,
+                ),
+            ]
+        )
 
     @property
     def tier(self):
@@ -121,9 +130,7 @@ async def test_file_info_device_forwards_serial_and_path():
 
     stub.file_info.assert_awaited_once()
     args = stub.file_info.call_args
-    assert args.args == ("DEV_ABC", "/DCIM/photo.jpg"), (
-        f"Expected file_info('DEV_ABC', '/DCIM/photo.jpg'), got {args}"
-    )
+    assert args.args == ("DEV_ABC", "/DCIM/photo.jpg"), f"Expected file_info('DEV_ABC', '/DCIM/photo.jpg'), got {args}"
     assert result.name == "test.txt"
 
 
@@ -154,9 +161,7 @@ async def test_browse_device_with_special_characters_in_serial():
 
     stub.browse.assert_awaited_once()
     args = stub.browse.call_args
-    assert args.args[0] == real_id, (
-        f"Serial with special chars was not forwarded correctly: {args.args[0]!r}"
-    )
+    assert args.args[0] == real_id, f"Serial with special chars was not forwarded correctly: {args.args[0]!r}"
 
 
 async def main():

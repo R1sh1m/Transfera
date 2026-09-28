@@ -27,9 +27,11 @@ _PYMOBILEDEVICE3_IMPORT_ERROR: str | None = None
 _PYMOBILEDEVICE3_ENV_INFO: str | None = None
 try:
     import pymobiledevice3  # noqa: F401
+
     _PYMOBILEDEVICE3_AVAILABLE = True
 except ImportError as exc:
     import sys as _sys
+
     _PYMOBILEDEVICE3_IMPORT_ERROR = str(exc)
     _PYMOBILEDEVICE3_ENV_INFO = (
         f"python={_sys.executable}  "
@@ -124,8 +126,8 @@ async def list_ios_devices() -> list[IOSDevice]:
     """
     if not _PYMOBILEDEVICE3_AVAILABLE:
         logger.debug(
-            "pymobiledevice3 not installed — iOS device support unavailable "
-            "(import error: %s)", _PYMOBILEDEVICE3_IMPORT_ERROR,
+            "pymobiledevice3 not installed — iOS device support unavailable (import error: %s)",
+            _PYMOBILEDEVICE3_IMPORT_ERROR,
         )
         return []
 
@@ -182,7 +184,11 @@ async def list_ios_devices() -> list[IOSDevice]:
 
                 logger.info(
                     "Device detected: %s (%s) serial=%s status=%s ios=%s",
-                    device_name, model, serial, status.value, ios_version,
+                    device_name,
+                    model,
+                    serial,
+                    status.value,
+                    ios_version,
                 )
                 return IOSDevice(
                     serial=serial,
@@ -250,6 +256,7 @@ def check_driver_status() -> str:
 
     # Quick non-blocking check: try to connect to usbmuxd socket
     import socket
+
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(0.5)
@@ -296,8 +303,7 @@ async def _get_afc_service(serial: str):
     except Exception as exc:
         if "not paired" in str(exc).lower() or "trust" in str(exc).lower():
             raise RuntimeError(
-                "Device not trusted. Please unlock the device and tap "
-                "'Trust This Computer' when prompted."
+                "Device not trusted. Please unlock the device and tap 'Trust This Computer' when prompted."
             )
         raise RuntimeError(f"Failed to connect to device: {exc}")
 
@@ -337,22 +343,26 @@ async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFi
                 size = int(info.get("st_size", 0))
                 mtime = info.get("st_mtime")
                 mtime_val = mtime.timestamp() if hasattr(mtime, "timestamp") else float(mtime or 0)
-                result.append(DeviceFileInfo(
-                    name=name,
-                    path=full_path,
-                    is_dir=is_dir,
-                    size=size,
-                    mtime=mtime_val,
-                ))
+                result.append(
+                    DeviceFileInfo(
+                        name=name,
+                        path=full_path,
+                        is_dir=is_dir,
+                        size=size,
+                        mtime=mtime_val,
+                    )
+                )
             except Exception:
                 # Can't stat — still list it
-                result.append(DeviceFileInfo(
-                    name=name,
-                    path=full_path,
-                    is_dir=False,
-                    size=0,
-                    mtime=0,
-                ))
+                result.append(
+                    DeviceFileInfo(
+                        name=name,
+                        path=full_path,
+                        is_dir=False,
+                        size=0,
+                        mtime=0,
+                    )
+                )
         return result
     finally:
         afc.close()
@@ -498,7 +508,7 @@ def parse_ios_source(source_path: str) -> tuple[str, str]:
     Format: ios://<serial>/path/on/device
     Example: ios://ABCDEFGH/DCIM → ("ABCDEFGH", "/DCIM")
     """
-    without_prefix = source_path[len(IOS_SOURCE_PREFIX):]
+    without_prefix = source_path[len(IOS_SOURCE_PREFIX) :]
     parts = without_prefix.split("/", 1)
     serial = parts[0]
     path = f"/{parts[1]}" if len(parts) > 1 else "/"

@@ -95,6 +95,13 @@ def start_background_download() -> dict:
 
     def _run() -> None:
         try:
+            # Runtime first (~120 MB pip install), weights second (~207 MB).
+            # Either may already be present; both steps are idempotent.
+            if not ensure_ai_packages():
+                with _download_lock:
+                    _download_state["status"] = "error"
+                    _download_state["error"] = "AI library install failed"
+                return
             ok = ensure_models()
             with _download_lock:
                 _download_state["status"] = "ready" if ok else "error"
@@ -119,6 +126,65 @@ def missing_models() -> list[str]:
     """Canonical model filenames not yet present on disk."""
     root = _models_root()
     return [name for name, _, _ in MODEL_SPECS if not (root / name).is_file()]
+
+
+def ai_packages_missing() -> bool:
+    """True when the optional AI runtime (onnxruntime/tokenizers/numpy)
+    is not importable. Import-light: no installs, no downloads."""
+    try:
+        import onnxruntime  # noqa: F401
+        import tokenizers  # noqa: F401
+    except ImportError:
+        return True
+    return False
+
+
+def _ai_requirements_file() -> Path:
+    from backend.config import BACKEND_ROOT
+
+    return Path(BACKEND_ROOT) / "requirements-ai.txt"
+
+
+def ensure_ai_packages(timeout: int = 600) -> bool:
+    """pip-install the optional AI stack (onnxruntime/tokenizers/numpy).
+
+    Runs synchronously in the caller (the download endpoint invokes it from
+    its background thread). Returns True when all three import afterwards.
+    Best-effort: failure just leaves AI search unavailable with keyword
+    fallback intact.
+    """
+    if not ai_packages_missing():
+        return True
+    req = _ai_requirements_file()
+    if not req.is_file():
+        logger.warning("AI requirements file missing: %s", req)
+        return False
+    import subprocess
+    import sys
+
+    logger.info("Installing on-board AI packages from %s", req)
+    try:
+        with _download_lock:
+            _download_state["status"] = "installing-packages"
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", str(req)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "AI package install failed (rc=%d): %s",
+                proc.returncode,
+                (proc.stderr or "")[-500:],
+            )
+            return False
+        ok = not ai_packages_missing()
+        logger.info("AI package install %s", "succeeded" if ok else "incomplete")
+        return ok
+    except Exception as exc:
+        logger.warning("AI package install failed: %s", exc)
+        return False
 
 
 def ensure_models() -> bool:

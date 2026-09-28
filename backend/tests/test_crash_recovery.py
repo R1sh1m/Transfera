@@ -96,6 +96,7 @@ async def test_hop1_heic_crash_recovery() -> None:
     print("\n=== Hop 1 Crash Recovery: 1000 HEIC Photos ===")
     from backend.config import DATABASE_URL as cfg_url
     from backend.database.manager import DATABASE_URL as mgr_url
+
     print("CFG DATABASE URL:", cfg_url)
     print("MGR DATABASE URL:", mgr_url)
 
@@ -133,6 +134,7 @@ async def test_hop1_heic_crash_recovery() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         _check(f"Scanned {N} items", len(item_ids) == N)
 
@@ -185,9 +187,7 @@ async def test_hop1_heic_crash_recovery() -> None:
 
         # Verify ALL items reset to PENDING
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem.hop1_status).where(MediaItem.batch_id == batch_ids[0])
-            )
+            result = await session.execute(select(MediaItem.hop1_status).where(MediaItem.batch_id == batch_ids[0]))
             statuses = [r[0] for r in result.all()]
             all_pending = all(s == HopStatus.PENDING.value for s in statuses)
             _check(f"All {len(statuses)} items reset to PENDING", all_pending)
@@ -238,6 +238,7 @@ async def test_hop2_archive_crash_recovery() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         batch_ids = await create_batches(session_id, item_ids)
 
@@ -287,8 +288,9 @@ async def test_hop2_archive_crash_recovery() -> None:
         # Verify correct items marked COMPLETED
         async with session_scope() as session:
             result = await session.execute(
-                select(MediaItem.file_name, MediaItem.hop2_status, MediaItem.final_status)
-                .where(MediaItem.batch_id == batch_ids[0])
+                select(MediaItem.file_name, MediaItem.hop2_status, MediaItem.final_status).where(
+                    MediaItem.batch_id == batch_ids[0]
+                )
             )
             rows = {r[0]: (r[1], r[2]) for r in result.all()}
 
@@ -381,7 +383,10 @@ async def test_live_photo_bundle_archive() -> None:
             created_files.append(fpath)
 
         total_files = len(bundles) * 2 + len(standalone)
-        _check(f"Created {total_files} files ({len(bundles)} bundles + {len(standalone)} standalone)", len(created_files) == total_files)
+        _check(
+            f"Created {total_files} files ({len(bundles)} bundles + {len(standalone)} standalone)",
+            len(created_files) == total_files,
+        )
 
         async with session_scope() as session:
             ts = TransferSession(
@@ -394,14 +399,14 @@ async def test_live_photo_bundle_archive() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         _check(f"Scanned {total_files} items", len(item_ids) == total_files)
 
         # Verify Live Photo groups were detected
         async with session_scope() as session:
             result = await session.execute(
-                select(MediaItem.file_name, MediaItem.live_photo_group)
-                .where(MediaItem.session_id == session_id)
+                select(MediaItem.file_name, MediaItem.live_photo_group).where(MediaItem.session_id == session_id)
             )
             rows = {r[0]: r[1] for r in result.all()}
 
@@ -456,9 +461,7 @@ async def test_live_photo_bundle_archive() -> None:
 
         # Verify all items COMPLETED
         async with session_scope() as session:
-            result = await session.execute(
-                select(MediaItem.final_status).where(MediaItem.session_id == session_id)
-            )
+            result = await session.execute(select(MediaItem.final_status).where(MediaItem.session_id == session_id))
             statuses = [r[0] for r in result.all()]
             all_done = all(s == HopStatus.COMPLETED.value for s in statuses)
             _check("All items marked COMPLETED", all_done)
@@ -467,8 +470,7 @@ async def test_live_photo_bundle_archive() -> None:
         # (organizer should group them by date)
         async with session_scope() as session:
             result = await session.execute(
-                select(MediaItem.file_name, MediaItem.source_path)
-                .where(MediaItem.session_id == session_id)
+                select(MediaItem.file_name, MediaItem.source_path).where(MediaItem.session_id == session_id)
             )
             all_rows = {r[0]: r[1] for r in result.all()}
 
@@ -522,6 +524,7 @@ async def test_mixed_bundle_crash() -> None:
             session_id = ts.id
 
         from backend.engines.scanner import scan
+
         item_ids = await scan(src_dir, session_id=session_id)
         _check(f"Scanned {total} items", len(item_ids) == total)
 
@@ -563,8 +566,7 @@ async def test_mixed_bundle_crash() -> None:
         # Verify Live Photo groups survived recovery
         async with session_scope() as session:
             result = await session.execute(
-                select(MediaItem.file_name, MediaItem.live_photo_group)
-                .where(MediaItem.session_id == session_id)
+                select(MediaItem.file_name, MediaItem.live_photo_group).where(MediaItem.session_id == session_id)
             )
             rows = {r[0]: r[1] for r in result.all()}
 

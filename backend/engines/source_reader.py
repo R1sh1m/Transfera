@@ -220,24 +220,28 @@ class LocalSourceReader(SourceReader):
                     fp = Path(dirpath) / name
                     try:
                         stat = fp.stat()
-                        entries.append({
-                            "name": name,
-                            "path": str(fp),
-                            "is_dir": False,
-                            "size": stat.st_size,
-                            "mtime": stat.st_mtime,
-                        })
+                        entries.append(
+                            {
+                                "name": name,
+                                "path": str(fp),
+                                "is_dir": False,
+                                "size": stat.st_size,
+                                "mtime": stat.st_mtime,
+                            }
+                        )
                     except OSError:
                         pass
                 for name in sorted(dirnames):
                     dp = Path(dirpath) / name
-                    entries.append({
-                        "name": name,
-                        "path": str(dp),
-                        "is_dir": True,
-                        "size": 0,
-                        "mtime": 0,
-                    })
+                    entries.append(
+                        {
+                            "name": name,
+                            "path": str(dp),
+                            "is_dir": True,
+                            "size": 0,
+                            "mtime": 0,
+                        }
+                    )
             return entries
 
         entries = await asyncio.to_thread(_walk_sync)
@@ -250,13 +254,15 @@ class LocalSourceReader(SourceReader):
         for child in sorted(p.iterdir()):
             try:
                 stat = child.stat()
-                entries.append({
-                    "name": child.name,
-                    "path": str(child),
-                    "is_dir": child.is_dir(),
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime,
-                })
+                entries.append(
+                    {
+                        "name": child.name,
+                        "path": str(child),
+                        "is_dir": child.is_dir(),
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    }
+                )
             except OSError:
                 pass
         return entries
@@ -323,6 +329,7 @@ class DeviceSourceReader(SourceReader):
                 # WPD backend -- streaming subprocess reader.
                 from backend.config import WPD_HELPER
                 from backend.wpd_backend import _WpdFileReader
+
                 # Get file size from file_info if available.
                 size = 0
                 try:
@@ -337,6 +344,7 @@ class DeviceSourceReader(SourceReader):
                 await reader.open()
             else:
                 from backend.ios_device import AFCFileReader
+
                 reader = AFCFileReader(self._device_id, path)
                 await reader.open()
         except Exception:
