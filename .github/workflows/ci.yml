@@ -1,7 +1,8 @@
 # Transfera v2 — CI Pipeline
 #
-# Four parallel jobs: backend tests, frontend type-check, lint, and Rust
-# (Tauri shell fmt + clippy + check on the Windows target).
+# Six parallel jobs: backend tests, frontend type-check, lint, Rust
+# (Tauri shell fmt + clippy + check on the Windows target), and
+# script-checks (PS1 UTF-8 BOM + parse, bash shellcheck + CRLF).
 # Target: under 5 minutes total (no Playwright / E2E yet).
 
 name: CI
@@ -181,6 +182,121 @@ jobs:
 
       - name: Check
         run: cargo check
+
+  # ---------------------------------------------------------------------------
+  # Script checks — PS1 encoding/parse (Windows) + bash shellcheck (Linux)
+  # ---------------------------------------------------------------------------
+  script-checks:
+    name: Script checks (PS1 + bash)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            shard: powershell
+          - os: ubuntu-latest
+            shard: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── PowerShell shard: UTF-8 BOM + parse ──────────────────────────────
+      - name: Check PS1 files — UTF-8 BOM present
+        if: matrix.shard == 'powershell'
+        shell: pwsh
+        run: |
+          $failures = @()
+          Get-ChildItem -Recurse -Filter "*.ps1" -File | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            # UTF-8 BOM = 0xEF 0xBB 0xBF
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+              $failures += $_.FullName
+              Write-Host "::error file=$($_.FullName)::Missing UTF-8 BOM — PS5.1 will corrupt Unicode characters (em-dash, emoji, box-drawing). Re-save as UTF-8 with BOM."
+            } else {
+              Write-Host "OK (BOM present): $($_.FullName)"
+            }
+          }
+          if ($failures.Count -gt 0) { exit 1 }
+
+      - name: Check PS1 files — syntax parse
+        if: matrix.shard == 'powershell'
+        shell: pwsh
+        run: |
+          $anyFail = $false
+          Get-ChildItem -Recurse -Filter "*.ps1" -File | ForEach-Object {
+            $errors = $null; $tokens = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $anyFail = $true
+              foreach ($e in $errors) {
+                Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              }
+            } else {
+              Write-Host "OK (parse): $($_.FullName)"
+            }
+          }
+          if ($anyFail) { exit 1 }
+
+      # ── Bash shard: CRLF guard + shellcheck ──────────────────────────────
+      - name: Check .sh files — no Windows CRLF line endings
+        if: matrix.shard == 'bash'
+        run: |
+          any_fail=0
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q CRLF; then
+              echo "::error file=${f}::Shell script has CRLF line endings — will fail on macOS/Linux with '\\r: command not found'. Convert to LF."
+              any_fail=1
+            else
+              echo "OK (LF): $f"
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*' -print0)
+          exit $any_fail
+
+      - name: Check .sh files — bash syntax
+        if: matrix.shard == 'bash'
+        run: |
+          any_fail=0
+          while IFS= read -r -d '' f; do
+            if bash -n "$f" 2>&1; then
+              echo "OK (syntax): $f"
+            else
+              echo "::error file=${f}::bash -n reported syntax errors"
+              any_fail=1
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*' -print0)
+          exit $any_fail
+
+      - name: Check .sh files — shellcheck
+        if: matrix.shard == 'bash'
+        run: |
+          # shellcheck is pre-installed on ubuntu-latest GitHub runners
+          any_fail=0
+          while IFS= read -r -d '' f; do
+            if shellcheck --severity=warning "$f"; then
+              echo "OK (shellcheck): $f"
+            else
+              echo "::error file=${f}::shellcheck found warnings/errors"
+              any_fail=1
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*' -print0)
+          exit $any_fail
+
+      - name: Check .sh files — executable bit
+        if: matrix.shard == 'bash'
+        run: |
+          any_fail=0
+          while IFS= read -r -d '' f; do
+            if [ ! -x "$f" ]; then
+              echo "::warning file=${f}::Shell script is not executable (chmod +x). Users will need to run it with 'bash $f' rather than './$f'."
+            else
+              echo "OK (executable): $f"
+            fi
+          done < <(find scripts/ -name '*.sh' -print0 2>/dev/null || true)
+          # Not a hard fail — executable bit is lost on Windows checkouts
+          exit 0
 
   # ---------------------------------------------------------------------------
   # Dependency Review (PRs only)
