@@ -35,7 +35,11 @@
     "category": "Utility",
     "publisher": "Transfera Team",
     "copyright": "Copyright © 2026 Transfera Team",
-    "resources": ["resources/wpd_helper.exe", "resources/exiftool.exe"],
+    "resources": [
+      "resources/wpd_helper.exe",
+      "resources/exiftool.exe",
+      "resources/exiftool_files/**"
+    ],
     "externalBin": ["binaries/transfera-engine"]
   }
 }

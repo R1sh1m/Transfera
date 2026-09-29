@@ -30,9 +30,10 @@ TEMP_SUFFIX: str = ".tmp"
 # Frozen-sidecar support (Tauri `transfera-engine` via PyInstaller one-dir):
 # when frozen, `__file__` points inside the bundle temp dir, so backend code
 # and data files resolve through sys._MEIPASS. Tauri ships helper binaries
-# (wpd_helper.exe, single-file exiftool.exe) in its `resources/` dir next to
-# the sidecar — located via TRANSFERA_RESOURCE_DIR (set by the Tauri shell
-# and release packaging) with a sibling-of-executable fallback.
+# (wpd_helper.exe, exiftool.exe + exiftool_files/ Perl runtime tree) in its
+# `resources/` dir next to the sidecar — located via TRANSFERA_RESOURCE_DIR
+# (set by the Tauri shell and release packaging) with a sibling-of-executable
+# fallback.
 import sys as _sys
 
 _FROZEN: bool = getattr(_sys, "frozen", False)
@@ -66,9 +67,10 @@ LOG_DIR: Path = DATA_DIR / "logs"
 EXPORT_DIR: Path = DATA_DIR / "exports"
 EXIFTOOL_DIR: Path = DATA_DIR / "bin" / "exiftool"
 PACKAGED_EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
-# Single-file ExifTool (~12 MB) shipped as a Tauri resource — replaces the
-# ~33 MB unpacked Perl tree when present. The bootstrapper in
-# engines/metadata_extractor.py checks this path first.
+# ExifTool launcher stub shipped as a Tauri resource. ExifTool v13.59+ uses a
+# stub exe + sibling exiftool_files/ Perl runtime tree — both are staged into
+# resources/ at build time. The bootstrapper in engines/metadata_extractor.py
+# checks this path first (Tier 1 before the writable AppData copy).
 PACKAGED_EXIFTOOL_EXE: Path = SIDECAR_RESOURCE_DIR / "exiftool.exe"
 
 

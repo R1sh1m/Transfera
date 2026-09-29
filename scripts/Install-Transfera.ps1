@@ -1,4 +1,4 @@
-﻿<#Requires -Version 5.1>
+<#Requires -Version 5.1>
 <#
 .SYNOPSIS
   Transfera one-shot installer — builds the app from source on your PC.
@@ -249,8 +249,13 @@ try {
   if (-not $staged) { Fail "Sidecar staging failed." }
   Copy-Item backend\bin\wpd_helper.exe frontend\src-tauri\resources\wpd_helper.exe -Force -ErrorAction SilentlyContinue
   Copy-Item backend\bin\exiftool\exiftool.exe frontend\src-tauri\resources\exiftool.exe -Force
+  # ExifTool v13.59+ ships as a stub exe + exiftool_files/ Perl runtime tree.
+  # Copy the whole tree so the launcher can resolve its runtime.
+  if (Test-Path "backend\bin\exiftool\exiftool_files") {
+    Copy-Item backend\bin\exiftool\exiftool_files frontend\src-tauri\resources\exiftool_files -Recurse -Force
+  }
   & frontend\src-tauri\resources\exiftool.exe -ver | Out-Null
-  if ($LASTEXITCODE -ne 0) { Fail "Single-file ExifTool smoke test failed." }
+  if ($LASTEXITCODE -ne 0) { Fail "ExifTool smoke test failed." }
 } finally { Pop-Location }
 Ok "Sidecar frozen, helpers staged"
 
