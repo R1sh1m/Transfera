@@ -41,6 +41,18 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $Dest = Join-Path $OutDir "transfera-engine-$Triple.exe"
 Copy-Item $Built $Dest -Force
 Write-Host "Sidecar staged: $Dest"
+# Tauri's NSIS bundler on Windows resolves externalBin to the msvc triple
+# even when the active Rust toolchain is gnu (frozen PyInstaller exe is
+# toolchain-agnostic), so always stage the sibling triple too. Otherwise
+# `tauri build` compiles fine for 9+ min then fails at bundle time with
+# "resource path binaries\transfera-engine-x86_64-pc-windows-msvc.exe doesn't exist".
+foreach ($AltTriple in @("x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu")) {
+    if ($AltTriple -ne $Triple) {
+        $AltDest = Join-Path $OutDir "transfera-engine-$AltTriple.exe"
+        Copy-Item $Built $AltDest -Force
+        Write-Host "Sidecar staged (alias): $AltDest"
+    }
+}
 $SizeMB = [math]::Round((Get-Item $Dest).Length / 1MB, 1)
 $DirMB = [math]::Round(((Get-ChildItem (Join-Path $Root "dist\transfera-engine") -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host "exe: ${SizeMB} MB, one-dir total: ${DirMB} MB"
