@@ -7,8 +7,8 @@ Publisher: Transfera Team
 PublisherUrl: https://github.com/R1sh1m/Transfera
 PublisherSupportUrl: https://github.com/R1sh1m/Transfera/issues
 Author: Rishi Misra
-ShortDescription: Local media backup and deduplication desktop app.
-Description: Transfera v2 is a desktop application that lets you move and organize photos and videos from local folders and connected iOS devices into a clean, deduplicated, and organized library.
+ShortDescription: High-speed, local-first media vault and verified photo organizer.
+Description: Transfera is a local-first desktop application that moves and organizes photos and videos from phones, cameras, SD cards, and USB drives into a clean, deduplicated, and verified library using streaming BLAKE3 hashing and atomic two-stage ingestion.
 License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)
 LicenseUrl: https://github.com/R1sh1m/Transfera/blob/main/LICENSE
 Copyright: Copyright © 2026 Rishi Misra
@@ -21,8 +21,12 @@ Tags:
   - media
   - sync
   - deduplicate
-  - electron
+  - tauri
+  - rust
   - iphone
   - local
+  - privacy
+  - blake3
+  - exiftool
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0

@@ -75,6 +75,48 @@ def _get_progress(client: httpx.Client, sid: int, tries: int = 12) -> dict:
     raise last
 
 
+def _pause_session(client: httpx.Client, sid: int, tries: int = 5) -> dict:
+    """POST pause, tolerating transient disconnects (same live-server load
+    caveat as _get_progress). A lost response is ambiguous — the pause may
+    have landed — so disambiguate via progress instead of blindly
+    retrying into a 400 ("cannot pause a paused session")."""
+    last: Exception | None = None
+    for _ in range(tries):
+        try:
+            return _json(client.post(f"/api/sessions/{sid}/pause"))
+        except httpx.TransportError as exc:
+            last = exc
+            try:
+                if _get_progress(client, sid).get("status") == "paused":
+                    return {"status": "paused"}
+            except httpx.TransportError:
+                pass
+            time.sleep(0.5)
+    assert last is not None
+    raise last
+
+
+def _resume_session(client: httpx.Client, sid: int, tries: int = 5) -> dict:
+    """POST start (fresh start or resume), same transient tolerance. An
+    already-running session — or one that reached a terminal success state
+    between the lost response and the check — proves the start landed."""
+    last: Exception | None = None
+    for _ in range(tries):
+        try:
+            return _json(client.post(f"/api/sessions/{sid}/start"))
+        except httpx.TransportError as exc:
+            last = exc
+            try:
+                st = _get_progress(client, sid).get("status")
+                if st in ("running", "completed", "completed_with_errors"):
+                    return {"status": st}
+            except httpx.TransportError:
+                pass
+            time.sleep(0.5)
+    assert last is not None
+    raise last
+
+
 # ======================================================================
 # Server lifecycle
 # ======================================================================
@@ -252,8 +294,11 @@ def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
         _assert_ok(r, 200)
         sid = _json(r)["id"]
 
-        r = client.post(f"/api/sessions/{sid}/start")
-        _assert_ok(r)
+        data = _resume_session(client, sid)
+        _check(
+            data.get("status") in ("running", "completed", "completed_with_errors"),
+            f"Expected running after start, got {data.get('status')}",
+        )
 
         # Catch it running
         saw_running = False
@@ -267,11 +312,10 @@ def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
             time.sleep(0.1)
         _check(saw_running, "Transfer never observed in 'running' state")
 
-        r = client.post(f"/api/sessions/{sid}/pause")
-        _assert_ok(r)
+        data = _pause_session(client, sid)
         _check(
-            _json(r)["status"] == "paused",
-            f"Expected paused, got {_json(r)['status']}",
+            data.get("status") == "paused",
+            f"Expected paused, got {data.get('status')}",
         )
 
         # Progress must freeze while paused
@@ -288,8 +332,11 @@ def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
         )
 
         # Resume via start, run to terminal
-        r = client.post(f"/api/sessions/{sid}/start")
-        _assert_ok(r)
+        data = _resume_session(client, sid)
+        _check(
+            data.get("status") in ("running", "completed", "completed_with_errors"),
+            f"Expected running after resume, got {data.get('status')}",
+        )
         final = {}
         for _ in range(300):
             final = _get_progress(client, sid)
