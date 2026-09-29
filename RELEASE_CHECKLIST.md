@@ -2,12 +2,11 @@
 
 Run through this matrix before publishing a GitHub release tag (`v*`).
 The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml` ↔
-`frontend/src-tauri/tauri.conf.json` ↔ `frontend/src-tauri/Cargo.toml` ↔
-`winget/Transfera.Transfera.yaml` (`PackageVersion`) all matching the tag.
+`frontend/src-tauri/tauri.conf.json` ↔ `frontend/src-tauri/Cargo.toml` all matching the tag.
 
 ## Pre-flight
 
-- [ ] `frontend/package.json`, `pyproject.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `winget/Transfera.Transfera.yaml` versions all equal the tag (without the leading `v`).
+- [ ] `frontend/package.json`, `pyproject.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` versions all equal the tag (without the leading `v`).
 - [ ] `python run.py` boots clean on a dev machine (backend `:47821` healthy, Tauri window opens).
 - [ ] `SHA256SUMS.txt` generated and verified in CI for the shipped Tauri installer.
 

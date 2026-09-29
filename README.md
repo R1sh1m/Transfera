@@ -28,14 +28,8 @@
 
 ## ⚡ Quick Install
 
-Get up and running in seconds:
+Get up and running in seconds with our one-line automated installers:
 
-### Windows (WinGet)
-```powershell
-winget install Transfera.Transfera
-```
-
-### Automated One-Line Installers
 <table>
 <tr>
 <th>🪟 Windows (PowerShell)</th>

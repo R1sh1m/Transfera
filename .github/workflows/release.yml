@@ -33,12 +33,6 @@ jobs:
               Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but pyproject.toml version is '$pyVersion'."
               exit 1
           }
-          $wingetLine = Get-Content winget/Transfera.Transfera.yaml | Where-Object { $_ -match '^PackageVersion:' } | Select-Object -First 1
-          $wingetVersion = ($wingetLine -replace '^PackageVersion:\s*', '').Trim()
-          if ($tagVersion -ne $wingetVersion) {
-              Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but winget PackageVersion is '$wingetVersion'."
-              exit 1
-          }
           $tauriVersion = (Get-Content frontend/src-tauri/tauri.conf.json | ConvertFrom-Json).version
           if ($tagVersion -ne $tauriVersion) {
               Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but src-tauri/tauri.conf.json version is '$tauriVersion'."
@@ -49,7 +43,7 @@ jobs:
               Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but src-tauri/Cargo.toml version is '$cargoVersion'."
               exit 1
           }
-          Write-Host "Version verification successful: tag '$tag' matches package.json, pyproject.toml, winget manifest, tauri.conf.json, and Cargo.toml ('$version')."
+          Write-Host "Version verification successful: tag '$tag' matches package.json, pyproject.toml, tauri.conf.json, and Cargo.toml ('$version')."
 
       - name: Set up Rust (stable, MSVC)
         uses: dtolnay/rust-toolchain@stable

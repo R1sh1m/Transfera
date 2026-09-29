@@ -5,8 +5,7 @@ description = "Transfera v2 - Local media backup desktop app (Tauri shell)"
 authors = ["Transfera Team"]
 edition = "2021"
 
-# Keep in sync: frontend/package.json ↔ pyproject.toml ↔
-# winget/Transfera.Transfera.yaml ↔ src-tauri/tauri.conf.json (release.yml gates all four).
+# Keep in sync: frontend/package.json ↔ pyproject.toml ↔ src-tauri/tauri.conf.json (release.yml gates all).
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
