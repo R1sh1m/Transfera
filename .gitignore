@@ -117,3 +117,4 @@ test_source/
 opencode.json
 .pytest_cache/
 .ruff_cache/
+test/
