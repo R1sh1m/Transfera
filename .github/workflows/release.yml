@@ -134,7 +134,10 @@ jobs:
         # resolves via backend.config.SIDECAR_RESOURCE_DIR. The ExifTool
         # smoke test is fail-closed: the single file must run standalone
         # (no unpacked Perl tree ships in the Tauri bundle).
+        # NOTE: resources/ and binaries/ are gitignored (*.exe excluded) so
+        # they don't exist after a fresh checkout — create them first.
         run: |
+          New-Item -ItemType Directory -Path frontend/src-tauri/resources -Force | Out-Null
           Copy-Item backend/bin/wpd_helper.exe frontend/src-tauri/resources/wpd_helper.exe -Force
           Copy-Item backend/bin/exiftool/exiftool.exe frontend/src-tauri/resources/exiftool.exe -Force
           & frontend/src-tauri/resources/exiftool.exe -ver
