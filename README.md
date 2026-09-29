@@ -1,166 +1,219 @@
-# Transfera
+<div align="center">
 
-**Back up the photos and videos on your phone, camera, or USB drive — safely, privately, on your own PC.**
+# 📷 Transfera
 
-Transfera copies your pictures and videos into one tidy, organized archive folder. It checks every file twice so nothing corrupt ever slips in, skips files you already backed up, and sorts everything by date. There is no cloud, no account, and no subscription. Your files never leave your computer.
+**Your photos and videos. Your computer. Your rules.**
+
+Back up every photo and video from your phone, camera, or USB drive — verified twice, sorted by date, stored locally. No cloud. No account. No subscription.
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-green.svg)](https://nodejs.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-lightgrey.svg)](#)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#-install)
+
+</div>
 
 ---
 
-## Install (pick one — easiest first)
+## ✨ What it does
 
-You need **Windows 10 or 11**. Nothing else to install.
+- **Two-hop verification** — every file is hashed while copying, then re-hashed before landing in your archive. Corruption is impossible.
+- **Smart deduplication** — already have it? Transfera skips it.
+- **Auto-organizes** by date → `Photos/2026/09-September/IMG_1234.jpg`
+- **iPhone & iPad** — plug in, trust, done. No iTunes. Apple drivers included on day one.
+- **AI search** — find "sunset beach" or "birthday cake" across your whole library (downloads once, runs on CPU, completely local).
+- **Zero cloud** — the only internet access ever is downloading helper tools, once, with your permission.
 
-### Option 1: Setup installer
+---
 
-1. From **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**, download `Transfera-X.Y.Z-x64-setup.exe` and run it.
-2. It adds a Start-menu shortcut. To remove it later: Settings → Apps → Transfera → Uninstall.
+## 🚀 Install
 
-Small print: everything ships inside the installer (app, engine, AI runtime, helpers) — no first-launch downloads, no setup wizard. App data (library database, settings) lives in `%APPDATA%\Transfera` — delete that folder too for a fully clean removal. The AI search *weights* (~207 MB) download once when you first press **Get AI models** in the Library.
+> **Clone once, run one script.** It figures out your OS and does everything — installs dependencies, downloads Apple drivers, builds the app, ships every feature at day one.
 
-### Option 2: One command (winget)
+### Step 1 — Clone
 
-```powershell
-winget install --id Transfera.Transfera -e
+```bash
+git clone https://github.com/R1sh1m/Transfera.git
+cd Transfera
 ```
 
-### "Windows protected your PC"?
+### Step 2 — Run the installer for your platform
 
-You may see this warning the first time you run Transfera. It appears because the app is new and does not yet have a paid signing certificate — **not** because anything is wrong:
+<table>
+<tr>
+<th>🍎 macOS &nbsp;/&nbsp; 🐧 Linux</th>
+<th>🪟 Windows</th>
+</tr>
+<tr>
+<td>
 
-- Transfera is fully open source — every line of code is on GitHub for anyone to inspect.
-- Releases are built automatically on GitHub's own servers, never on somebody's laptop.
-- You can verify your download yourself. Compare its fingerprint against `SHA256SUMS.txt` from the same release page:
+```bash
+bash scripts/install.sh
+```
 
-  ```powershell
-  certutil -hashfile Transfera-X.Y.Z-x64-setup.exe SHA256
-  ```
+Detects macOS or Linux, installs system deps via Homebrew / apt / dnf / pacman, sets up the Python venv, builds the frontend, installs **libimobiledevice** for iPhone support, and produces a DMG (macOS) or .deb / .AppImage (Linux).
 
-  If the long code matches, the file is exactly what GitHub built.
+</td>
+<td>
 
-To continue past the warning, click **More info → Run anyway**. Windows remembers your choice.
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File scripts\Install-Transfera.ps1
+```
+
+Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer — **no SmartScreen warning**.
+
+</td>
+</tr>
+</table>
+
+That's it. First run takes 5–15 minutes (downloads + build). Every subsequent launch starts in seconds.
+
+#### Optional flags (both scripts)
+
+| Flag | Effect |
+|---|---|
+| `--skip-driver` | Skip Apple device support install |
+| `--skip-native` | Skip C++ helper build (folder backup still works) |
+| `--yes` | Non-interactive — assume yes to all prompts |
+
+**Windows only:** add `-Silent` to run the produced installer with zero click-through.
 
 ---
 
-## Your first backup (5 minutes)
+### 🛡️ Why no SmartScreen warning?
 
-1. **Open Transfera.** You land on the **Dashboard**.
-2. Click the big blue **Start New Backup** button (or **Setup** in the left sidebar).
+The installer compiles Transfera **on your own machine**. Windows SmartScreen only flags files downloaded from the internet — locally built binaries carry no Mark-of-the-Web, so the warning never appears.
+
+**Still want the pre-built `.exe`?**
+
+> Download `Transfera-X.Y.Z-x64-setup.exe` from **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**, verify the hash against `SHA256SUMS.txt` on the same page, then click **More info → Run anyway** to dismiss the one-time SmartScreen prompt. Every line of code is on GitHub, open for inspection.
+>
+> ```powershell
+> certutil -hashfile Transfera-X.Y.Z-x64-setup.exe SHA256
+> ```
+
+---
+
+## 📸 Your first backup (5 minutes)
+
+1. **Open Transfera** — you land on the **Dashboard**.
+2. Hit **Start New Backup** (or **Setup** in the sidebar).
 3. **Source** — where are your photos?
-   - *A folder on this PC:* click **Browse**, pick the folder, and you will instantly see a preview grid of the photos and videos inside. Tick the ones you want (or keep them all).
-   - *An iPhone/iPad:* plug it in with a USB cable, unlock it, and tap **Trust** on the phone. Then pick it from **Connected devices**. (First time only, Transfera may offer to install Apple's free driver for you in one click — see [iPhone notes](#iphone--ipad).)
-4. **Destination** — click **Browse** and choose (or create) the folder where your archive should live, for example `D:\Photos`.
-5. **Transfer Mode** — leave it on **Backup (Copy)**. Your originals stay untouched; Transfera only reads them. (Choose **Space Saver (Move)** only if you want the originals deleted after a verified copy.)
-6. Press **Start**. The **Transfer** page shows live progress, speed, and thumbnails as each file lands.
-7. When it finishes, open the **Library** page: your archive, searchable, with Timeline, Moments, Duplicates, and Trash sections.
+   - *This PC / external drive:* click **Browse**, pick the folder, preview the grid, tick what you want.
+   - *iPhone / iPad:* plug in via USB, unlock, tap **Trust** on the phone. It appears under **Connected devices** instantly.
+4. **Destination** — click **Browse**, pick or create your archive folder (e.g., `D:\Photos` or `~/Photos`).
+5. **Mode** — leave it on **Backup (Copy)**. Your originals are never touched. Switch to **Space Saver (Move)** only if you want originals deleted after a verified copy.
+6. Press **Start**. Watch live progress, speeds, and thumbnails on the **Transfer** page.
+7. Open **Library** — searchable by date, content (AI), duplicates, trash, and more.
 
-Your archive is organized automatically into folders by date, like `D:\Photos\2026\09-September\photo.jpg`.
+### FAQ
 
-### Everyday answers
-
-- **Where are my files?** Exactly where you pointed Destination — plain JPG/MP4 files in date folders. You can open them with any app, even if you delete Transfera.
-- **Is anything uploaded?** No. Transfera has no servers. The only internet it ever uses is downloading helper tools (photo-metadata reader, AI search model) once, with your permission.
-- **What if I unplug mid-transfer?** Plug back in and press Start again — finished files are skipped, interrupted ones resume. Nothing half-written ever lands in your archive.
-- **I pressed the wrong thing — are my originals safe?** Yes, in Copy mode Transfera never writes to, moves, or deletes your source files. Move mode deletes originals only after each file is verified twice.
-- **I deleted something in the Library?** It goes to **Trash** first. Emptying Trash permanently deletes those archive copies (your originals elsewhere are never touched).
-- **How do I search?** Type in the Library search box. Press **Get AI models** once (~210 MB, one time) and search understands content too — try "sunset" or "dog".
-- **How do I update?** Download the new release and run it over the old one. Your library, sessions, and settings are kept.
-
----
-
-## iPhone & iPad
-
-- **Easiest path:** USB cable + unlock + Trust. Transfera reads your Camera Roll directly — no iTunes needed.
-- If Windows is missing Apple's free driver, Transfera shows an **Install Driver** card on the Dashboard. One click installs it via winget (Windows may ask for admin permission once).
-- No driver and no admin rights? Transfera automatically falls back to its built-in open-source bridge (WSL2 + usbipd) where available, and plain folder backup always works regardless.
+| Question | Answer |
+|---|---|
+| Where are my files? | Exactly where you set Destination — plain JPG/MP4 in date folders. Any app can open them. |
+| Is anything uploaded? | No. Zero servers. |
+| Unplugged mid-transfer? | Plug back in → press Start → finished files are skipped, interrupted ones resume cleanly. |
+| Are my originals safe? | In Copy mode Transfera never writes to, moves, or deletes source files. |
+| Deleted something? | Goes to **Trash** first. Emptying Trash only removes archive copies. |
+| How do I search by content? | Press **Get AI models** in Library once (~210 MB, CPU-only, fully local). Then search "sunset" or "dog". |
+| How do I update? | Download the new release and run it over the old one. Library and settings are kept. |
 
 ---
 
-## Troubleshooting
+## 📱 iPhone & iPad
+
+- **Easiest path:** USB cable → unlock → tap **Trust**. No iTunes required.
+- The installer ships Apple's driver on day one (AMDS on Windows, `libimobiledevice` on macOS/Linux) — nothing extra to do.
+- Missed it? Transfera shows an **Install Driver** card on the Dashboard — one click, done.
+- No admin rights? Falls back to its open-source usbipd bridge automatically. Folder backup always works regardless.
+
+---
+
+## 🔧 Troubleshooting
 
 | What you see | What to do |
 |---|---|
-| App window is blank / won't open | Close it fully, wait 10 seconds, open again. Still stuck? Delete `%APPDATA%\Transfera` session files and relaunch. |
-| iPhone not listed | Use a data cable (some cables charge only), unlock the phone, tap **Trust**, unplug and replug. Then check the Dashboard driver card. |
-| A transfer paused with "duplicates found" | Transfera thinks some files are already archived. Open the popup, choose **Skip** (don't copy again), **Keep both**, or **Overwrite** per file, then Resume. |
-| "Session ... is not paused" after resolving | Just press Start/Resume once more — resolving already restarted the transfer in the background. |
-| Search finds nothing | Filenames only match by default. Press **Get AI models** in the Library header, wait for the download, press **Index library**, then search again. |
-| Antivirus flags a file | Add the Transfera folder to your antivirus exclusions — freshly built helper programs sometimes trip heuristics. |
-| Something looks broken | The log file `backend\data\logs\transfera.log` (next to the app) records what happened — attach it when asking for help. |
+| App window is blank | Close fully, wait 10 s, reopen. Still broken? Delete app data (`%APPDATA%\Transfera` / `~/.local/share/transfera` / `~/Library/Application Support/transfera`) and relaunch. |
+| iPhone not listed | Use a data cable (not charge-only), unlock, tap **Trust**, unplug and replug. Check the Dashboard driver card. |
+| "duplicates found" paused | Open the popup → **Skip**, **Keep both**, or **Overwrite** → Resume. |
+| Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait, press **Index library**, search again. |
+| Antivirus flags a file | Add the Transfera folder to your AV exclusions — freshly compiled helpers sometimes trip heuristics. |
+| Something looks broken | Attach `backend/data/logs/transfera.log` when asking for help. |
 
 ---
 
-## For developers (building from source)
+## 🛠️ Developer mode
 
-You need just two tools installed first (everything else — Python packages, npm packages, ExifTool, the device helper — sets itself up on first launch):
+Need Python 3.12, Node.js 20+, and Git (the installer handles all of this).
 
-```powershell
-winget install -e --id Python.Python.3.12 ; winget install -e --id OpenJS.NodeJS.LTS
-# For the Tauri shell (WebView2 app — the only packaged shell):
-winget install -e --id Rustlang.Rustup
-```
-
-Then:
-
-```powershell
+```bash
 git clone https://github.com/R1sh1m/Transfera.git
 cd Transfera
-python run.py              # full app (backend + Tauri window)
+python run.py           # full stack — backend + compiled frontend
 ```
 
 | Command | What it does |
 |---|---|
 | `python run.py` | Start everything (recommended) |
-| `python run.py --backend` | API only, on `http://127.0.0.1:47821` |
+| `python run.py --backend` | API only on `http://127.0.0.1:47821` |
 | `python run.py --frontend` | Tauri dev shell only (adopts a running backend) |
 | `python run.py --tauri` | Backend + Tauri dev shell (WebView2) |
-| `python run.py --skip-deps` | Skip setup checks (fast relaunch) |
+| `python run.py --skip-deps` | Fast relaunch — skip setup checks |
 
-First launch takes 2–4 minutes (creates `.venv`, installs packages — AI runtime included from day one — builds the frontend, downloads ExifTool). Later launches skip finished steps. Press **Ctrl+C** to stop everything cleanly.
+First launch takes 2–4 minutes (creates `.venv`, installs packages, builds frontend, downloads ExifTool). Later launches skip what's already done. `Ctrl+C` stops everything cleanly.
 
-Building the iPhone helper from source additionally needs MSVC (Visual Studio 2022 Build Tools with the C++ workload) — without it, folder backup still works fully; only iPhone/WPD detection stays unavailable.
+**Before committing:**
 
-### Checks before you commit or release
+```bash
+# macOS / Linux
+.venv/bin/python -m pytest backend/tests/ -q
+.venv/bin/python -m ruff check backend/
+cd frontend && npm run typecheck
 
-```powershell
-.venv\Scripts\python -m pytest backend/tests/ -q   # backend suite
-.venv\Scripts\python -m ruff check backend/        # backend lint
-cd frontend && npm run typecheck                    # frontend types
+# Windows
+.venv\Scripts\python -m pytest backend/tests/ -q
+.venv\Scripts\python -m ruff check backend/
+cd frontend; npm run typecheck
 ```
 
 Keep `frontend/package.json`, `pyproject.toml`, `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/Cargo.toml`, and `winget/Transfera.Transfera.yaml` on the same version — the release workflow enforces `v<that-version>` tags against all five.
 
+---
+
 ### How it works (60 seconds)
 
-Every file travels in two verified hops: **source → staging cache** (streamed copy + BLAKE3 hash, kept as `.partial` until the hash matches), then **cache → archive** (hash re-verified, atomic move into `YYYY/MM/DD`, source deleted only in Move mode after verification). Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. On-board AI (MobileCLIP, ONNX, CPU) is optional and downloads once on request.
+Every file travels two verified hops:
+
+```
+Source ──[stream + BLAKE3 hash]──► .partial in cache
+                                        │  hash match?
+                                        ▼
+Archive ◄──[re-verify + atomic move]── YYYY/MM/DD/filename.jpg
+```
+
+Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. On-board AI (MobileCLIP, ONNX, CPU-only) ships in the base install — only the model *weights* (~207 MB) download once, when you first press **Get AI models**.
 
 ```
 Transfera/
-├── run.py                 # one-command orchestrator — start here
-├── backend/               # Python 3.12 + FastAPI + SQLite (WAL)
-│   ├── api/               # REST routes, WebSocket, auth, device preview
-│   ├── database/          # models, async engine, migrations
-│   ├── engines/           # scanner, cache, importer, duplicates, EXIF,
-│   │                      # thumbnails, CLIP, organizer, recovery, reports
-│   ├── requirements.txt   # backend deps (incl. onnxruntime for AI search)
-│   ├── data/              # runtime DB, cache, exports, logs, models (ignored)
-│   └── tests/             # pytest suite (isolated temp DBs — never touches yours)
-├── frontend/              # Tauri 2 + React 18 + Vite + TypeScript + Tailwind
-│   ├── src-tauri/         # Tauri 2 shell (WebView2): lifecycle, tray, sidecar, updater
-│   └── src/pages/         # Dashboard, DeviceSetup, Transfer, Library
-├── native/wpd_helper/     # C++ WPD helper source + build.bat
-└── .github/workflows/     # ci.yml (tests/typecheck/lint) + release.yml (build+sign)
+├── run.py                 ← start here
+├── backend/               ← Python 3.12 · FastAPI · SQLite WAL
+│   ├── api/               ← REST routes, WebSocket, auth
+│   ├── engines/           ← scanner, importer, thumbnailer, CLIP, organizer…
+│   └── tests/             ← pytest suite (isolated, never touches your library)
+├── frontend/              ← Tauri 2 · React 18 · Vite · TypeScript · Tailwind
+├── native/wpd_helper/     ← C++ WPD helper (Windows iPhone/WPD detection)
+└── scripts/
+    ├── install.sh             ← macOS & Linux installer
+    └── Install-Transfera.ps1  ← Windows installer
 ```
 
 ---
 
-## License
+## 📄 License
 
-**AGPL-3.0-or-later** — see [LICENSE](LICENSE). Free for personal, academic, and commercial *use*; if you modify or re-host Transfera (including as a network service), keep Rishi Misra's copyright notice, state your changes, and share your modified source under the same terms. The "Transfera" name and artwork are reserved.
+**AGPL-3.0-or-later** — see [LICENSE](LICENSE).  
+Free for personal, academic, and commercial *use*. If you modify or re-host Transfera (including as a network service), keep the copyright notice, state your changes, and share modified source under the same terms. The "Transfera" name and artwork are reserved.
 
 Copyright © 2026 Rishi Misra
