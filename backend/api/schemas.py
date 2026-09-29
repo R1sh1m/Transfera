@@ -137,6 +137,7 @@ class SessionInfo(BaseModel):
     completed_items: int
     failed_items: int
     only_new_mode: bool = False
+    is_prescan: bool = False
     folder_layout: str = "year/month"
     total_bytes_volume: int | None = None
     session_report_path: str | None = None
@@ -521,6 +522,8 @@ class FolderMetadataRequest(BaseModel):
 
 class FolderMetadataResponse(BaseModel):
     path: str
+    size_bytes: int = 0
+    size_human: str = "0 B"
     size_gb: float
     file_count: int
 

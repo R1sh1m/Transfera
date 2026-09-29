@@ -226,6 +226,13 @@ class TransferSession(Base):
     # --- Incremental import ---
     only_new_mode: Mapped[bool] = mapped_column(nullable=False, default=False)
 
+    # --- Prescan marker ---
+    # True for sessions created by POST /api/scan (inventory only — never a
+    # transfer). Prescan sessions are excluded from crash-recovery auto-resume
+    # (a scan is idempotent; resuming one as a transfer would import files
+    # into the staging/cache dir as if it were an archive destination).
+    is_prescan: Mapped[bool] = mapped_column(nullable=False, default=False)
+
     # --- Selective import (persisted file selections) ---
     selected_files_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 

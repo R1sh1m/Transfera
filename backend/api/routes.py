@@ -878,12 +878,13 @@ async def start_scan(
     dest = Path(req.dest_path).resolve() if req.dest_path else CACHE_DIR
     session_name = req.session_name or f"scan-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
 
-    # Create session
+    # Create session (prescan: inventory only, never auto-resumed as a transfer)
     async with session_scope() as session:
         ts = TransferSession(
             session_name=session_name,
             source_root=source_root_str,
             dest_root=str(dest),
+            is_prescan=True,
         )
         session.add(ts)
         await session.flush()
@@ -2132,6 +2133,17 @@ async def list_media(
     )
 
 
+@router.get("/media/thumbnail-cache-stats")
+async def thumbnail_cache_stats():
+    """Return LRU cache statistics for debugging.
+
+    NOTE: this static route must stay registered ABOVE /media/{item_id} —
+    FastAPI matches in registration order and the parameterized route would
+    otherwise swallow "thumbnail-cache-stats" as an item_id (422).
+    """
+    return thumbnail_cache.stats()
+
+
 @router.get("/media/{item_id}", response_model=MediaItemDetail)
 async def get_media_item(
     item_id: int,
@@ -2347,12 +2359,6 @@ async def get_thumbnail_status(item_id: int):
     if thumbnail_cache.has(item_id):
         return {"status": "ready"}
     return {"status": db_item.thumbnail_status}
-
-
-@router.get("/media/thumbnail-cache-stats")
-async def thumbnail_cache_stats():
-    """Return LRU cache statistics for debugging."""
-    return thumbnail_cache.stats()
 
 
 async def _remove_orphaned_media_item(item_id: int) -> None:
@@ -2903,12 +2909,13 @@ async def get_disk_space(req: DiskSpaceRequest, _: None = Depends(require_local_
 # Folder Metadata (lightweight size + count for dashboard cards)
 # ---------------------------------------------------------------------------
 def _measure_folder_metadata(dir_path: str) -> dict:
-    """Synchronous directory traversal returning size in GB and file count."""
+    """Synchronous directory traversal returning exact size, a human string,
+    legacy GB float, and file count."""
     total_bytes = 0
     file_count = 0
     p = Path(dir_path)
     if not p.exists():
-        return {"size_gb": 0.0, "file_count": 0}
+        return {"size_bytes": 0, "size_human": "0 B", "size_gb": 0.0, "file_count": 0}
     for entry in p.rglob("*"):
         if entry.is_file():
             try:
@@ -2916,7 +2923,12 @@ def _measure_folder_metadata(dir_path: str) -> dict:
             except OSError:
                 pass
             file_count += 1
-    return {"size_gb": round(total_bytes / (1024**3), 2), "file_count": file_count}
+    return {
+        "size_bytes": total_bytes,
+        "size_human": _format_size(total_bytes),
+        "size_gb": round(total_bytes / (1024**3), 2),
+        "file_count": file_count,
+    }
 
 
 @router.post("/utils/folder-metadata", response_model=FolderMetadataResponse)
@@ -2930,6 +2942,8 @@ async def get_folder_metadata(
         raise HTTPException(status_code=400, detail=f"Cannot measure folder: {exc}")
     return FolderMetadataResponse(
         path=req.path,
+        size_bytes=result["size_bytes"],
+        size_human=result["size_human"],
         size_gb=result["size_gb"],
         file_count=result["file_count"],
     )
@@ -3173,6 +3187,7 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
         completed_items=ts.completed_items,
         failed_items=ts.failed_items,
         only_new_mode=ts.only_new_mode,
+        is_prescan=bool(getattr(ts, "is_prescan", False)),
         folder_layout=ts.folder_layout,
         total_bytes_volume=ts.total_bytes_volume,
         session_report_path=ts.session_report_path,

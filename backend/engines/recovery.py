@@ -136,15 +136,40 @@ async def recover_interrupted_batches(
         )
         stuck_batches = list(result.scalars().all())
 
+        # Prescan sessions are inventory-only: their batches still get state
+        # repair below (consistent DB), but they are never auto-resumed —
+        # re-running a transfer task on one would import files into the
+        # staging dir as if it were an archive destination.
+        prescan_ids: set[int] = set()
+        session_ids = {b.session_id for b in stuck_batches}
+        if session_ids:
+            prescan_rows = await session.execute(
+                select(TransferSession.id).where(
+                    TransferSession.id.in_(session_ids),
+                    TransferSession.is_prescan.is_(True),
+                )
+            )
+            prescan_ids = set(prescan_rows.scalars().all())
+            if prescan_ids:
+                logger.info(
+                    "Skipping auto-resume for %d prescan session(s): %s",
+                    len(prescan_ids),
+                    sorted(prescan_ids),
+                )
+
+        def _mark_resumable(session_id: int) -> None:
+            if session_id not in prescan_ids:
+                resumable.add(session_id)
+
         for batch in stuck_batches:
             if batch.status == BatchStatus.LOADING.value:
                 await _recover_loading_batch(batch, cache_dir=cache_dir)
                 stats["loading_recovered"] = int(stats["loading_recovered"]) + 1  # type: ignore[arg-type]
-                resumable.add(batch.session_id)
+                _mark_resumable(batch.session_id)
             elif batch.status == BatchStatus.ARCHIVED.value:
                 await _recover_archived_batch(batch, cache_dir=cache_dir)
                 stats["archived_recovered"] = int(stats["archived_recovered"]) + 1  # type: ignore[arg-type]
-                resumable.add(batch.session_id)
+                _mark_resumable(batch.session_id)
             else:  # PROCESSING / PARTIAL orphaned at boot -> re-queue
                 db_batch = await session.get(TransferBatch, batch.id)
                 if db_batch is not None:
@@ -156,7 +181,7 @@ async def recover_interrupted_batches(
                     db_batch.status = BatchStatus.PENDING.value
                     db_batch.error_message = None
                     db_batch.touch()
-                resumable.add(batch.session_id)
+                _mark_resumable(batch.session_id)
 
     # Orphaned partials cleanup (sync, no DB session needed — runs every startup)
     orphaned_partials_removed = _clean_orphaned_partials(cache_dir=cache_dir)
