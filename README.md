@@ -1,178 +1,140 @@
 <div align="center">
 
-<img src="docs/assets/banner.png" alt="Transfera — High-Speed, Two-Stage Verified Media Vault" width="100%" style="border-radius: 12px; max-width: 960px;" />
+```text
+█████████████████████████████████████████████████████████████████████████████████████████████
+█        ██       ██████  █████  ███████  ███      ███        ██        ██       ██████  ████
+████  █████  ████  ████    ████   ██████  ██  ████  ██  ████████  ████████  ████  ████    ███
+████  █████  ████  ███  ██  ███    █████  ██  ████  ██  ████████  ████████  ████  ███  ██  ██
+████  █████  ███   ██  ████  ██  ██  ███  ███  ███████  ████████  ████████  ███   ██  ████  █
+████  █████      ████  ████  ██  ███  ██  █████  █████      ████      ████      ████  ████  █
+████  █████  ████  ██        ██  ████  █  ███████  ███  ████████  ████████  ████  ██        █
+████  █████  ████  ██  ████  ██  █████    ██  ████  ██  ████████  ████████  ████  ██  ████  █
+████  █████  ████  ██  ████  ██  ██████   ██  ████  ██  ████████  ████████  ████  ██  ████  █
+████  █████  ████  ██  ████  ██  ███████  ███      ███  ████████        ██  ████  ██  ████  █
+█████████████████████████████████████████████████████████████████████████████████████████████
+```
 
-<br />
+**Backup and Move files and photos easily.**
 
-# Transfera
-### High-Speed, Two-Stage Verified Media Vault for Windows, macOS & Linux
+Transfera is a simple utility to transfer files and photos from your phone, camera, or USB drive to your computer.
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/R1sh1m/Transfera?color=0066cc&label=release)](https://github.com/R1sh1m/Transfera/releases)
-[![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app)
-[![Rust](https://img.shields.io/badge/Rust-2021-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Integrity](https://img.shields.io/badge/Integrity-BLAKE3-blueviolet)](#-how-it-works-the-two-hop-guarantee)
-[![Privacy](https://img.shields.io/badge/Zero%20Cloud-100%25%20Local-success)](#)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-
-<p align="center">
-  <b>Transfera</b> is a local-first desktop application engineered to ingest, verify, deduplicate, and organize photos and videos from phones, cameras, SD cards, and USB drives into a pristine archive — with absolute mathematical integrity, zero cloud lock-in, and zero subscriptions.
-</p>
-
-[Download Installer](https://github.com/R1sh1m/Transfera/releases/latest) • [Quick Install](#-quick-install) • [Features](#-features) • [How It Works](#-how-it-works-the-two-hop-guarantee) • [Troubleshooting](#-troubleshooting)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-green.svg)](https://nodejs.org/)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#-install)
 
 </div>
 
 ---
 
-## ⚡ Quick Install
+## Features
 
-Get up and running in seconds with our one-line automated installers:
+- **Two-hop verification** — every file is hashed while copying, then re-hashed before landing in your archive. Corruption is impossible.
+- **Smart deduplication** — already have it? Transfera skips it.
+- **Auto-organizes** by date → `Photos/2026/09-September/IMG_1234.jpg`
+- **iPhone & iPad** — plug in, trust, done. No need for iTunes.
+- **AI search** — find "sunset beach" or "birthday cake" across your whole library (completely local).
+- **Zero cloud** — internet access needed only for downloading helper tools, once.
+
+---
+
+## 🚀 Installation
+
+### Step 1 — Clone
+
+```bash
+git clone https://github.com/R1sh1m/Transfera.git
+cd Transfera
+```
+
+### Step 2 — Run the installer for your platform
 
 <table>
 <tr>
-<th>🪟 Windows (PowerShell)</th>
-<th>🍎 macOS &nbsp;/&nbsp; 🐧 Linux (Bash)</th>
+<th>🍎 macOS &nbsp;/&nbsp; 🐧 Linux</th>
+<th>🪟 Windows</th>
 </tr>
 <tr>
 <td>
 
-```powershell
-irm https://raw.githubusercontent.com/R1sh1m/Transfera/main/scripts/Install-Transfera.ps1 | iex
+```bash
+bash scripts/install.sh
 ```
+
+Detects macOS or Linux, installs system deps via Homebrew / apt / dnf / pacman, sets up the Python venv, builds the frontend, installs **libimobiledevice** for iPhone support, and produces a DMG (macOS) or .deb / .AppImage (Linux).
 
 </td>
 <td>
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/R1sh1m/Transfera/main/scripts/install.sh | bash
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-Transfera.ps1
 ```
+
+Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer. (Make sure you ran `cd Transfera` first).
 
 </td>
 </tr>
 </table>
 
-> [!TIP]
-> Prefer standalone binaries? Download the latest standalone `.exe` or `.dmg` directly from [GitHub Releases](https://github.com/R1sh1m/Transfera/releases/latest).
+First run takes 5–15 minutes (downloads + build). Every subsequent launch starts in seconds.
+
+#### Optional flags (both scripts)
+
+| Flag | Effect |
+|---|---|
+| `--skip-driver` | Skip Apple device support install |
+| `--skip-native` | Skip C++ helper build (folder backup still works) |
+| `--yes` | Non-interactive — assume yes to all prompts |
+
+**Windows only:** add `-Silent` to run the produced installer with zero click-through.
 
 ---
 
-## 💡 Why Transfera?
+## 📸 Your first backup 
 
-Traditional file explorers and cloud sync utilities drop connections, duplicate files, corrupt partially copied files, or force you into expensive monthly cloud storage. Transfera was built from scratch to solve this:
+1. **Open Transfera** — you land on the **Dashboard**.
+2. Hit **Start New Backup** (or **Setup** in the sidebar).
+3. **Source** — where are your photos?
+   - *This PC / external drive:* click **Browse**, pick the folder, preview the grid, tick what you want.
+   - *iPhone / iPad:* plug in via USB, unlock, tap **Trust** on the phone. It appears under **Connected devices** instantly.
+4. **Destination** — click **Browse**, pick or create your archive folder (e.g., `D:\Photos` or `~/Photos`).
+5. **Mode** — leave it on **Backup (Copy)**. Your originals are never touched. Switch to **Space Saver (Move)** only if you want originals deleted after a verified copy.
+6. Press **Start**. Watch live progress, speeds, and thumbnails on the **Transfer** page.
+7. Open **Library** — searchable by date, content (AI), duplicates, trash, and more.
 
-| Feature | Transfera | Windows Photos / Explorer | Cloud Sync (iCloud / Google) | Manual Drag & Drop |
-| :--- | :---: | :---: | :---: | :---: |
-| **Integrity Guarantee** | **Two-Stage BLAKE3 Streaming** | ❌ None (Silent bit-rot/drops) | ⚠️ Cloud compression risk | ❌ None |
-| **Zero Cloud / Privacy** | **100% Offline & Local** | ⚠️ OneDrive sync prompts | ❌ Requires Cloud / Subscription | ✅ Local |
-| **iPhone & iPad Ingestion** | **Native WPD / USB (No iTunes)** | ⚠️ Frequent lockups & disconnects| ❌ Requires app sync / bandwidth | ⚠️ Unreliable Explorer MTP |
-| **Smart Deduplication** | **Perceptual + Exact Cryptographic**| ❌ None | ⚠️ Cloud-only duplicates | ❌ Overwrites or duplicates |
-| **Crash-Resilient Staging**| **Atomic Staging (`.partial`)** | ❌ Leaves corrupt half-files | ⚠️ Incomplete background sync | ❌ Corrupt partial files |
-| **Metadata Preservation** | **ExifTool Stay-Open Worker** | ⚠️ Often strips/modifies EXIF | ⚠️ Strips GPS/metadata on sync | ⚠️ Fragile filesystem timestamps |
-| **On-Device Semantic Search** | **Local MobileCLIP AI (No Cloud)** | ❌ None | ⚠️ Server-side facial & data scans| ❌ None |
-
----
-
-## ✨ Features
-
-- **🛡️ Two-Hop Mathematical Integrity**  
-  Every file streams through a real-time BLAKE3 cryptographic hash during transfer into temporary `.partial` storage, then re-verifies prior to atomic placement. Corrupted transfers are physically impossible.
-- **⚡ Native Hardware Ingestion**  
-  Plug in your iPhone, iPad, camera, or USB SD card. Direct hardware helpers detect media instantly without iTunes or third-party drivers.
-- **🔍 Smart Deduplication**  
-  Eliminate duplicate shots and duplicate imports across devices using byte-level cryptographic hashes and perceptual image similarity matching.
-- **📁 Automatic Chronological Archiving**  
-  Deep EXIF extraction extracts actual capture timestamps from photo and video streams to organize your archive into clean, predictable directories (`Photos/YYYY/MM-Month/IMG_XXXX.jpg`).
-- **🧠 On-Device Semantic AI Search**  
-  Find "sunset on the beach", "birthday celebration", or "documents" across your entire photo vault using local, CPU-optimized MobileCLIP neural embeddings. Zero data leaves your machine.
-- **🔒 Non-Destructive Ingestion**  
-  Default **Backup (Copy)** mode guarantees your source device is strictly read-only. Switch to **Space Saver (Move)** only when you choose to safely reclaim device space after full cryptographic verification.
-
----
-
-## 🔬 How It Works: The Two-Hop Guarantee
-
-Transfera eliminates file corruption, aborted transfers, and orphaned partial writes through its two-stage ingestion pipeline:
-
-```
-[ Camera / iPhone / SD Card / Folder ]
-                  │
-                  ▼  (Hop 1: Ingestion & Streaming BLAKE3 Hashing)
-        [ Cache: .partial file ]
-                  │
-       Cryptographic Hash Match?
-            ├── YES ──► (Hop 2: Verification & Atomic Rename)
-            │                  │
-            │                  ▼
-            │        [ Final Vault: YYYY/MM/DD/filename.jpg ]
-            │
-            └── NO  ──► Abort & alert user (Zero partial/corrupted files placed)
-```
-
-1. **Hop 1 (Ingest & Hash)**: As bytes stream from the device, a BLAKE3 streaming hasher computes the checksum concurrently with disk writing. Files are held with a `.partial` extension.
-2. **Hop 2 (Atomic Placement)**: The file is verified against its manifest, thumbnails are generated in the background, EXIF metadata is parsed, and an atomic filesystem move safely deposits the file into your organized archive.
-
----
-
-## 📸 Your First Backup
-
-1. **Open Transfera** — launch the app to the **Dashboard**.
-2. Click **Start New Backup** (or **Setup** in the navigation bar).
-3. **Select Source**:
-   - *Connected Devices (iPhone / iPad):* Connect via USB, unlock your device, tap **Trust**, and select it in the device picker.
-   - *This PC / External Drives / SD Cards:* Click **Browse** and pick the source folder.
-4. **Select Destination**:
-   - Choose your external hard drive, NAS mount, or local photo folder (e.g., `D:\MediaVault` or `~/Photos`).
-5. **Choose Mode**:
-   - **Backup (Copy)**: Keeps source files intact (recommended).
-   - **Space Saver (Move)**: Safely removes source files only after verified vaulting.
-6. **Start Ingestion**:
-   - Monitor real-time transfer speeds, hashing rates, and live thumbnail previews.
-7. **Explore Your Library**:
-   - Filter by date, inspect metadata, locate duplicates, or run local natural language search queries.
-
----
-
-## 🛠️ Build From Source
-
-### Prerequisites
-- **Python**: 3.12+
-- **Node.js**: 20+
-- **Rust**: Latest stable (`rustc`, `cargo`)
-- **C++ Compiler**: MSVC (Windows Build Tools) / Clang (macOS) / GCC (Linux)
-
-### Development Setup
-
-```bash
-# 1. Clone repository
-git clone https://github.com/R1sh1m/Transfera.git
-cd Transfera
-
-# 2. Run bootstrapping script
-python run.py
-```
-
-`run.py` automatically sets up the Python virtual environment (`.venv`), installs dependencies, compiles native helpers, and launches the Tauri v2 desktop shell with Vite HMR.
-
----
 
 ## 🔧 Troubleshooting
 
-| Symptom | Resolution |
-| :--- | :--- |
-| **iPhone not appearing in device list** | Use an authentic data-capable USB cable (not charge-only), unlock the screen, tap **Trust This Computer**, and reconnect. Verify the Apple Mobile Device Support service is active. |
-| **"Duplicates Found" dialog pauses transfer** | Review the flagged items in the duplicate resolution dialog. Select **Skip**, **Keep Both**, or **Overwrite**, then click **Resume**. |
-| **AI search returns no results** | Semantic search requires the local ONNX MobileCLIP weights. Open **Library** → click **Get AI Models** (~200MB download once) → click **Index Library**. |
-| **Antivirus alert during installation** | Locally compiled native helpers (`wpd_helper.exe`) and sidecar binaries can trigger heuristic false-positives. Add your Transfera installation directory to your antivirus exclusions. |
-| **Need support or found a bug?** | Export application logs from `backend/data/logs/transfera.log` and open an issue on our [Issue Tracker](https://github.com/R1sh1m/Transfera/issues). |
+| What you see | What to do |
+|---|---|
+| App window is blank | Close fully, wait 10 s, reopen. Still broken? Delete app data (`%APPDATA%\Transfera` / `~/.local/share/transfera` / `~/Library/Application Support/transfera`) and relaunch. |
+| iPhone not listed | Use a data cable (not charge-only), unlock, tap **Trust**, unplug and replug. Check the Dashboard driver card. |
+| "duplicates found" paused | Open the popup → **Skip**, **Keep both**, or **Overwrite** → Resume. |
+| Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait, press **Index library**, search again. |
+| Antivirus flags a file | Add the Transfera folder to your AV exclusions — freshly compiled helpers sometimes trip heuristics. |
+| Something looks broken | Attach `backend/data/logs/transfera.log` when asking for help. |
+
+---
+
+### How it works (60 seconds)
+
+Every file travels two verified hops:
+
+```
+Source ──[stream + BLAKE3 hash]──► .partial in cache
+                                        │  hash match?
+                                        ▼
+Archive ◄──[re-verify + atomic move]── YYYY/MM/DD/filename.jpg
+```
+
+Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. On-board AI (MobileCLIP, ONNX, CPU-only) ships in the base install — only the model *weights* (~207 MB) download once, when you first press **Get AI models**.
 
 ---
 
 ## 📄 License
 
-Distributed under the **GNU Affero General Public License v3.0 or later** (AGPL-3.0-or-later). See [LICENSE](LICENSE) for details.
+**AGPL-3.0-or-later** — see [LICENSE](LICENSE).  
+Free for personal, academic, and commercial *use*. If you modify or re-host Transfera (including as a network service), keep the copyright notice, state your changes, and share modified source under the same terms. The "Transfera" name and artwork are reserved.
 
-Transfera is free for personal, academic, and commercial use. If you modify or re-host Transfera, maintain the copyright notice, state all changes, and publish modifications under the same license terms.
-
-*Copyright © 2026 Rishi Misra. All rights reserved.*
+Copyright © 2026 Rishi Misra

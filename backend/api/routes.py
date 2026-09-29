@@ -1931,6 +1931,25 @@ async def _run_transfer_background(session_id: int) -> None:
         _active_tasks.pop(session_id, None)
         _cleanup_session_state(session_id)
 
+    except asyncio.CancelledError:
+        # Cooperative stop (pause/resume race, cancel, or shutdown).
+        # The DB already carries the authoritative status — pause/cancel set
+        # it BEFORE signalling — so there is nothing to mark FAILED here.
+        # Critically, the transfer runs as a Starlette response-background
+        # task inside the still-open response cycle of the request that
+        # started it: letting CancelledError escape surfaces as
+        # "Exception in ASGI application", kills the keep-alive connection,
+        # and the client's next request dies with RemoteProtocolError.
+        # Swallow it after detaching. Cleanup is conditional: a resumer may
+        # already have registered a fresh event/lock, which must be left
+        # alone — only release state this task still owns.
+        if _active_tasks.get(session_id) is _current:
+            _active_tasks.pop(session_id, None)
+        if _cancellation_events.get(session_id) is cancel_event:
+            _cleanup_session_state(session_id)
+        logger.info("Transfer background for session %d stopped by cancellation", session_id)
+        return
+
     except Exception as exc:
         _active_tasks.pop(session_id, None)
         _cleanup_session_state(session_id)
