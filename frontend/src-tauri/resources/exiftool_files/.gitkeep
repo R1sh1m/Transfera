@@ -1,0 +1,4 @@
+Placeholder keeping resources/exiftool_files/ tracked so the Tauri
+build-script's resources entry resolves on fresh checkouts. Real
+ExifTool runtime files are staged here at build time (release.yml,
+Install-Transfera.ps1, or the manual copy step) and are gitignored.

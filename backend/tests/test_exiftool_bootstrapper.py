@@ -49,7 +49,10 @@ def _isolated_bin_dir():
 
     The mutating tests must never touch the real data directory: it may
     hold a genuinely installed binary (possibly locked by AV/scanner),
-    and fall-through tests must not "find" it. Works under pytest and
+    and fall-through tests must not "find" it. Tier 0
+    (``PACKAGED_EXIFTOOL_EXE``, the Tauri resource dir) is redirected to a
+    nonexistent path too — a staged ``resources/exiftool.exe`` would
+    otherwise leak into every resolution test. Works under pytest and
     the file's own main() runner (no fixtures needed).
     """
     with tempfile.TemporaryDirectory() as tmp:
@@ -58,6 +61,8 @@ def _isolated_bin_dir():
         with (
             patch.object(me, "EXIFTOOL_DIR", bin_dir),
             patch.object(me, "_LOCAL_EXIFTOOL", bin_dir / me._EXIFTOOL_EXE_NAME),
+            patch.object(me, "PACKAGED_EXIFTOOL_EXE", Path(tmp) / "no-such-resource" / "exiftool.exe"),
+            patch.object(me, "_PACKAGED_EXIFTOOL", Path(tmp) / "no-such-package" / me._EXIFTOOL_EXE_NAME),
         ):
             yield bin_dir
 
@@ -370,6 +375,61 @@ def test_bootstrap_idempotent() -> None:
 
 
 # ======================================================================
+# 11. Zero-byte Tier 0 placeholder is skipped (fresh-checkout layout)
+# ======================================================================
+def test_zero_byte_placeholder_skipped() -> None:
+    print("\n=== Zero-Byte Placeholder Skipped ===")
+
+    _reset_state()
+
+    # src-tauri/resources/ carries 0-byte placeholders on fresh checkouts
+    # (and for Windows-only helpers on Linux/macOS). Bootstrap must fall
+    # through them to the next tier holding a real binary.
+    with tempfile.TemporaryDirectory() as tmp:
+        placeholder = Path(tmp) / "exiftool.exe"
+        placeholder.write_bytes(b"")
+        fake_local = Path(tmp) / "local" / me._EXIFTOOL_EXE_NAME
+        fake_local.parent.mkdir(parents=True)
+        fake_local.write_bytes(b"fake-exiftool")
+        with (
+            patch.object(me, "PACKAGED_EXIFTOOL_EXE", placeholder),
+            patch.object(me, "_PACKAGED_EXIFTOOL", Path(tmp) / "no-packaged" / me._EXIFTOOL_EXE_NAME),
+            patch.object(me, "_LOCAL_EXIFTOOL", fake_local),
+            patch.object(shutil, "which", return_value=None),
+            patch.object(me, "_download_exiftool", return_value=None),
+        ):
+            result = me._bootstrap_exiftool()
+            _check(
+                "Skips 0-byte Tier 0 placeholder",
+                result == str(fake_local),
+                f"got: {result}",
+            )
+    _reset_state()
+
+
+# ======================================================================
+# 12. Auto-download refuses off Windows (no Windows PE on Linux/macOS)
+# ======================================================================
+def test_download_refused_off_windows() -> None:
+    print("\n=== Download Refused Off Windows ===")
+
+    _reset_state()
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("no network fetch may run off Windows")
+
+    with patch("sys.platform", "linux"):
+        with patch("backend.engines.metadata_extractor.urlopen", _fail_if_called):
+            result = me._download_exiftool()
+    _check(
+        "Returns None without touching the network off Windows",
+        result is None,
+        f"got: {result}",
+    )
+    _reset_state()
+
+
+# ======================================================================
 # Runner
 # ======================================================================
 def main() -> None:
@@ -389,6 +449,8 @@ def main() -> None:
     test_download_url_construction()
     test_platform_detection()
     test_bootstrap_idempotent()
+    test_zero_byte_placeholder_skipped()
+    test_download_refused_off_windows()
 
     print("\n" + "=" * 60)
     total = _PASS + _FAIL

@@ -201,21 +201,48 @@ npm run build
 ok "Frontend built"
 cd "$ROOT"
 
-# ── 5  ExifTool + helpers ────────────────────────────────────
+# ── 5  ExifTool + sidecar staging ────────────────────────────
 echo -e "\n${CB}${CC}"
-echo "  ╔════════════════════════════════════════════╗"
-echo "  ║  🔍  Step 5/6 — ExifTool & Metadata Helpers ║"
-echo "  ╚════════════════════════════════════════════╝${CR}"
-.venv/bin/python -c "
-from backend.engines.metadata_extractor import _download_exiftool
-import sys, pathlib
-p = _download_exiftool('backend/bin/exiftool')
-sys.exit(0 if p and pathlib.Path(str(p)).exists() else 1)
-" && ok "ExifTool pre-seeded" || warn "ExifTool pre-seed failed — it will auto-download on first launch."
+echo "  ╔══════════════════════════════════════════════════════╗"
+echo "  ║  🔍  Step 5/6 — ExifTool, Sidecar & Tauri Staging    ║"
+echo "  ╚══════════════════════════════════════════════════════╝${CR}"
+# System ExifTool (the backend's Windows auto-downloader refuses off
+# Windows by design; here the backend resolves via PATH at runtime).
+if ! command -v exiftool &>/dev/null; then
+  if [ "$PLATFORM" = macos ]; then
+    brew install exiftool || warn "brew install exiftool failed."
+  else
+    case "$PM" in
+      apt)    sudo apt-get install -y libimage-exiftool-perl 2>/dev/null ;;
+      dnf)    sudo dnf install -y perl-Image-ExifTool 2>/dev/null ;;
+      pacman) sudo pacman -S --noconfirm perl-image-exiftool 2>/dev/null ;;
+    esac
+  fi
+fi
+command -v exiftool &>/dev/null \
+  && ok "System ExifTool: $(exiftool -ver 2>/dev/null || echo present)" \
+  || warn "ExifTool not installed — metadata falls back to filesystem timestamps. Install it later (apt: libimage-exiftool-perl, brew: exiftool)."
 
 $SKIP_NATIVE \
   && warn "C++ WPD helper skipped (--skip-native). Windows-only feature; irrelevant on $PLATFORM." \
   || warn "WPD helper is Windows-only. iPhone access on $PLATFORM uses libimobiledevice."
+
+# Frozen Python sidecar -> frontend/src-tauri/binaries/transfera-engine-<triple>.
+# Without this, `tauri build` compiles Rust for minutes and then fails at
+# bundle time with "resource path binaries/transfera-engine-<triple>
+# doesn't exist" (fail fast here instead).
+step "Building frozen sidecar (PyInstaller — takes a few minutes)..."
+bash "$ROOT/scripts/build-sidecar.sh"
+ok "Sidecar staged."
+
+# Windows-only Tauri resources must still EXIST or the Rust build-script
+# fails on its resources list. They ship as 0-byte placeholders here; the
+# backend ignores empty files and uses the system ExifTool / skips WPD.
+mkdir -p "$ROOT/frontend/src-tauri/resources/exiftool_files"
+for _ph in wpd_helper.exe exiftool.exe; do
+  [ -f "$ROOT/frontend/src-tauri/resources/$_ph" ] || : > "$ROOT/frontend/src-tauri/resources/$_ph"
+done
+ok "Tauri resource placeholders ensured."
 
 # ── 6  Tauri desktop app ─────────────────────────────────────
 echo -e "\n${CB}${CC}"
@@ -224,7 +251,16 @@ echo "  ║  🦀  Step 6/6 — Building the Tauri Desktop App (Rust)  ║"
 echo "  ║      Grab a coffee ☕  — Rust compile is the slow part  ║"
 echo "  ╚════════════════════════════════════════════════════════╝${CR}"
 cd "$ROOT/frontend"
-npm run tauri:build
+# Preflight validates staging BEFORE the slow Rust compile (fails fast with
+# fixes). Then build platform bundles explicitly: tauri.conf.json targets
+# NSIS (Windows releases) — without --bundles this step would attempt an
+# NSIS build on macOS/Linux and fail after compiling.
+node scripts/tauri-preflight.mjs
+if [ "$PLATFORM" = macos ]; then
+  npx tauri build --bundles dmg
+else
+  npx tauri build --bundles deb appimage
+fi
 ok "Tauri app built."
 
 if [ "$PLATFORM" = macos ]; then

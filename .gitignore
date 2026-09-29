@@ -70,7 +70,15 @@ frontend/src-tauri/binaries/*
 !frontend/src-tauri/binaries/.gitkeep
 frontend/src-tauri/resources/*
 !frontend/src-tauri/resources/.gitkeep
-frontend/src-tauri/resources/exiftool_files/
+# Ignore the ExifTool runtime *contents* (33 MB Perl tree, staged at build
+# time) but keep the directory itself tracked via .gitkeep: a missing dir
+# makes the Tauri build-script fail with
+# "glob pattern resources/exiftool_files path not found". Negations must
+# re-include each level: resources/* hides the dir itself, so un-hide it
+# first or git never descends far enough to see the .gitkeep exception.
+!frontend/src-tauri/resources/exiftool_files/
+frontend/src-tauri/resources/exiftool_files/*
+!frontend/src-tauri/resources/exiftool_files/.gitkeep
 # PyInstaller one-dir output (staged into src-tauri/binaries/ by scripts/build-sidecar.ps1)
 dist/transfera-engine/
 

@@ -135,6 +135,21 @@ _resolved_exiftool: str | None = None
 _bootstrap_done = False
 
 
+def _is_real_binary(path: Path) -> bool:
+    """True when *path* is a non-empty file.
+
+    ``src-tauri/resources/`` holds 0-byte placeholders on fresh checkouts (and
+    for Windows-only helpers on Linux/macOS) so ``cargo check`` / the Tauri
+    build-script passes without packaging. Those placeholders must never win
+    bootstrap resolution — same rule as ``_resolve_wpd_helper`` in
+    ``backend/config.py``.
+    """
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _bootstrap_exiftool() -> str | None:
     """
     Resolve the ExifTool binary path using a five-tier fallback:
@@ -152,23 +167,22 @@ def _bootstrap_exiftool() -> str | None:
         return _resolved_exiftool
     _bootstrap_done = True
 
-    # Tier 0: Single-file Tauri resource (preferred — 12 MB vs 33 MB tree)
-    try:
-        if PACKAGED_EXIFTOOL_EXE.is_file():
-            logger.info("ExifTool found as single-file resource at %s", PACKAGED_EXIFTOOL_EXE)
-            _resolved_exiftool = str(PACKAGED_EXIFTOOL_EXE)
-            return _resolved_exiftool
-    except OSError:
-        pass
+    # Tier 0: Single-file Tauri resource (preferred — 12 MB vs 33 MB tree).
+    # Size-gated: fresh checkouts and non-Windows stages carry 0-byte
+    # placeholders here that must not shadow a real binary further down.
+    if _is_real_binary(PACKAGED_EXIFTOOL_EXE):
+        logger.info("ExifTool found as single-file resource at %s", PACKAGED_EXIFTOOL_EXE)
+        _resolved_exiftool = str(PACKAGED_EXIFTOOL_EXE)
+        return _resolved_exiftool
 
     # Tier 1: Packaged binary (prioritized for Microsoft Store and offline support)
-    if _PACKAGED_EXIFTOOL.is_file():
+    if _is_real_binary(_PACKAGED_EXIFTOOL):
         logger.info("ExifTool found in package resources at %s", _PACKAGED_EXIFTOOL)
         _resolved_exiftool = str(_PACKAGED_EXIFTOOL)
         return _resolved_exiftool
 
     # Tier 2: Writable AppData local binary (fallback for non-Store download channel)
-    if _LOCAL_EXIFTOOL.is_file():
+    if _is_real_binary(_LOCAL_EXIFTOOL):
         logger.info("ExifTool found in AppData local storage at %s", _LOCAL_EXIFTOOL)
         _resolved_exiftool = str(_LOCAL_EXIFTOOL)
         return _resolved_exiftool
@@ -289,8 +303,23 @@ def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
     ``dest_dir`` selects the install root (defaults to the user-data
     ``EXIFTOOL_DIR``). Release builds pass ``backend/bin/exiftool`` so the
     binary ships inside the installer and first-run works offline.
+
+    Windows only: the official distribution channels scraped here ship
+    Windows PE binaries. On Linux/macOS the backend resolves ExifTool via
+    Tier 1 (pre-seeded Unix layout) or Tier 3 (system package, e.g.
+    ``apt install libimage-exiftool-perl`` / ``brew install exiftool``) —
+    downloading a Windows executable there would only shadow the working
+    system binary, so refuse immediately.
     """
     import tempfile
+
+    if sys.platform != "win32":
+        logger.warning(
+            "ExifTool auto-download is Windows-only -- on Linux/macOS install "
+            "the system package (apt: libimage-exiftool-perl, brew: exiftool) "
+            "and rely on PATH resolution"
+        )
+        return None
 
     candidates = _fetch_zip_candidates()
     if not candidates:

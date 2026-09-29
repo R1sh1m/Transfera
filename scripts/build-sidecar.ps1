@@ -8,6 +8,17 @@
 # `tauri build` resolve the binary).
 
 $ErrorActionPreference = "Stop"
+
+# Windows-only: venv layout (.venv\Scripts), .exe suffixes, and the
+# msvc/gnu alias pair below are all Windows-specific.
+# macOS/Linux users: bash scripts/build-sidecar.sh (same contract).
+# $IsWindows only exists on PowerShell 6+; Windows PowerShell 5.1 (which is
+# Windows-only) has no such variable, so absence means Windows.
+if ((Test-Path variable:IsWindows) -and (-not $IsWindows)) {
+    Write-Error "This script is for Windows. On macOS/Linux use: bash scripts/build-sidecar.sh"
+    exit 1
+}
+
 $Root = Split-Path -Parent $PSScriptRoot
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $OutDir = Join-Path $Root "frontend\src-tauri\binaries"

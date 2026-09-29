@@ -52,6 +52,29 @@ def _json(response: httpx.Response) -> dict:
     return response.json()
 
 
+def _get_progress(client: httpx.Client, sid: int, tries: int = 12) -> dict:
+    """GET session progress, tolerating transient disconnects.
+
+    The `client` fixture is a live uvicorn server in a background thread.
+    While a transfer saturates it (hash + DB + thumbnails for hundreds of
+    files), loaded CI runners occasionally reset a poll connection
+    (``httpx.RemoteProtocolError``). A single blip must not fail the test,
+    so retry with backoff; if the server is truly down all tries fail and
+    the last error propagates loudly. GETs are side-effect free, so
+    retrying them cannot double-apply state (unlike pause/start POSTs,
+    which intentionally stay single-shot).
+    """
+    last: Exception | None = None
+    for attempt in range(tries):
+        try:
+            return _json(client.get(f"/api/sessions/{sid}/progress"))
+        except httpx.TransportError as exc:
+            last = exc
+            time.sleep(0.2 * (attempt + 1))
+    assert last is not None  # tries >= 1 by contract
+    raise last
+
+
 # ======================================================================
 # Server lifecycle
 # ======================================================================
@@ -235,7 +258,7 @@ def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
         # Catch it running
         saw_running = False
         for _ in range(200):
-            st = _json(client.get(f"/api/sessions/{sid}/progress"))["status"]
+            st = _get_progress(client, sid)["status"]
             if st == "running":
                 saw_running = True
                 break
@@ -252,9 +275,9 @@ def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
         )
 
         # Progress must freeze while paused
-        p1 = _json(client.get(f"/api/sessions/{sid}/progress"))
+        p1 = _get_progress(client, sid)
         time.sleep(1.5)
-        p2 = _json(client.get(f"/api/sessions/{sid}/progress"))
+        p2 = _get_progress(client, sid)
         _check(
             p2["completed_items"] == p1["completed_items"],
             f"Progress moved while paused: {p1['completed_items']} -> {p2['completed_items']}",
@@ -269,7 +292,7 @@ def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
         _assert_ok(r)
         final = {}
         for _ in range(300):
-            final = _json(client.get(f"/api/sessions/{sid}/progress"))
+            final = _get_progress(client, sid)
             if final["status"] in (
                 "completed",
                 "completed_with_errors",

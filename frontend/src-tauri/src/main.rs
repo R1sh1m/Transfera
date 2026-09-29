@@ -176,8 +176,11 @@ fn shutdown_backend(app: &AppHandle) {
             std::thread::sleep(Duration::from_millis(200));
         }
     }
+    // Last resort: kill whatever still owns the backend port. Windows-only;
+    // on macOS/Linux the sidecar is a child process reaped on app exit, so
+    // the graceful POST above is sufficient.
+    #[cfg(target_os = "windows")]
     if port_open() {
-        // Last resort: kill whatever still owns the backend port.
         let _ = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -272,6 +275,18 @@ struct ElevatedResult {
 
 #[tauri::command]
 fn run_elevated(executable: String, args: Vec<String>) -> ElevatedResult {
+    // The allowlist is Windows driver tooling (winget/wsl/usbipd/sc).
+    // Fail closed with a clear message instead of spawning a nonexistent
+    // `powershell` on macOS/Linux.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&executable, &args);
+        return ElevatedResult {
+            success: false,
+            exit_code: None,
+            error: Some("Elevated install is only supported on Windows".into()),
+        };
+    }
     let Some(exe) = normalize_allowed_executable(&executable) else {
         return ElevatedResult {
             success: false,
@@ -340,12 +355,38 @@ fn show_item_in_folder(full_path: String) -> Result<(), String> {
     if !is_existing_path(&full_path) {
         return Err("Path does not exist".into());
     }
-    std::process::Command::new("explorer")
-        .arg("/select,")
-        .arg(&full_path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&full_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    // macOS Finder reveals with `open -R`; Linux has no reveal API, so
+    // fall back to opening the containing folder.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&full_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let parent = std::path::Path::new(&full_path)
+            .parent()
+            .map(|p| p.as_os_str().to_owned())
+            .unwrap_or_default();
+        std::process::Command::new("xdg-open")
+            .arg(&parent)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -353,11 +394,30 @@ fn open_path(full_path: String) -> Result<(), String> {
     if !is_existing_path(&full_path) {
         return Err("Path does not exist".into());
     }
-    std::process::Command::new("explorer")
-        .arg(&full_path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&full_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&full_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&full_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -387,6 +447,14 @@ struct VirtualizationStatus {
 
 #[tauri::command]
 fn check_virtualization() -> VirtualizationStatus {
+    // Answers the Windows-only "is VT-x/AMD-V on for WSL2?" setup question.
+    #[cfg(not(target_os = "windows"))]
+    {
+        return VirtualizationStatus {
+            available: false,
+            details: "Virtualization check applies to Windows (WSL2 setup) only".into(),
+        };
+    }
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -423,47 +491,88 @@ fn check_virtualization() -> VirtualizationStatus {
 // Removable-drive watcher (wmic poll, same semantics as Electron main)
 // ---------------------------------------------------------------------------
 
+/// Platform removable-drive poll: returns (id, volume_name) pairs, where id
+/// is a drive letter on Windows and a mount path elsewhere.
+#[cfg(target_os = "windows")]
+fn poll_removable_drives() -> Vec<(String, Option<String>)> {
+    let out = std::process::Command::new("wmic")
+        .args([
+            "logicaldisk",
+            "where",
+            "drivetype=2",
+            "get",
+            "caption,volumename",
+            "/format:csv",
+        ])
+        .output();
+    let mut drives = Vec::new();
+    if let Ok(o) = out {
+        let text = String::from_utf8_lossy(&o.stdout).into_owned();
+        for (i, line) in text.trim().lines().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() >= 2 {
+                let caption = parts[1].trim().to_string();
+                let volume = parts.get(2).map(|s| s.trim().to_string());
+                if !caption.is_empty() {
+                    drives.push((caption, volume));
+                }
+            }
+        }
+    }
+    drives
+}
+
+/// macOS: external disks mount under /Volumes; Linux: /media, /run/media, /mnt.
+#[cfg(not(target_os = "windows"))]
+fn poll_removable_drives() -> Vec<(String, Option<String>)> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    roots.push(std::path::PathBuf::from("/Volumes"));
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(user) = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")) {
+            roots.push(std::path::PathBuf::from(format!("/media/{user}")));
+            roots.push(std::path::PathBuf::from(format!("/run/media/{user}")));
+        }
+        roots.push(std::path::PathBuf::from("/mnt"));
+    }
+    let mut drives = Vec::new();
+    for root in roots {
+        let entries = std::fs::read_dir(&root);
+        if let Ok(it) = entries {
+            for entry in it.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    drives.push((path.to_string_lossy().into_owned(), Some(name)));
+                }
+            }
+        }
+    }
+    drives
+}
+
 fn start_drive_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let mut known: HashSet<String> = HashSet::new();
         loop {
-            let out = std::process::Command::new("wmic")
-                .args([
-                    "logicaldisk",
-                    "where",
-                    "drivetype=2",
-                    "get",
-                    "caption,volumename",
-                    "/format:csv",
-                ])
-                .output();
-            if let Ok(o) = out {
-                let text = String::from_utf8_lossy(&o.stdout).into_owned();
-                let mut current = HashSet::new();
-                for (i, line) in text.trim().lines().enumerate() {
-                    if i == 0 {
-                        continue;
-                    }
-                    let parts: Vec<&str> = line.split(',').collect();
-                    if parts.len() >= 2 {
-                        let caption = parts[1].trim().to_string();
-                        let volume = parts.get(2).map(|s| s.trim().to_string());
-                        if !caption.is_empty() {
-                            current.insert(caption.clone());
-                            if !known.contains(&caption) {
-                                let _ = app.emit(
-                                    "device:new-removable-drive",
-                                    serde_json::json!({
-                                        "driveLetter": caption,
-                                        "volumeName": volume,
-                                    }),
-                                );
-                            }
-                        }
-                    }
+            let mut current = HashSet::new();
+            for (id, volume) in poll_removable_drives() {
+                current.insert(id.clone());
+                if !known.contains(&id) {
+                    let _ = app.emit(
+                        "device:new-removable-drive",
+                        serde_json::json!({
+                            "driveLetter": id,
+                            "volumeName": volume,
+                        }),
+                    );
                 }
-                known = current;
             }
+            known = current;
             std::thread::sleep(Duration::from_secs(5));
         }
     });
