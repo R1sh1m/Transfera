@@ -24,6 +24,19 @@ These tests document bugs that were identified and fixed:
    when apt-get failed with "Could not get lock".  The fix added a
    lock-wait retry strategy and exposed ``error_code="APT_LOCK_TIMEOUT"``
    in the response so the frontend can show a targeted message.
+
+5. ``GET /api/media/thumbnail-cache-stats`` returned 422
+   (``int_parsing`` on ``item_id``) because it was registered AFTER
+   ``GET /media/{item_id}`` — FastAPI matches in registration order, so
+   the parameterized route would otherwise swallow the static path.  The fix registers
+   the static route first.
+
+6. Dashboard "Last Backup: 11h ago" minutes after a transfer looked like a
+   timezone bug, but investigation proved the chain consistent: writers use
+   aware ``datetime.now(UTC)``, SQLite stores UTC-naive, the API serializes
+   naive, and the frontend parses naive as UTC.  The test below locks that
+   contract — any future naive-local writer would shift every relative
+   timestamp display by the machine offset.
 """
 
 from __future__ import annotations
@@ -320,3 +333,62 @@ class TestThumbnailBrokenFile:
         assert resp.headers.get("x-thumbnail-status") == "failed"
         assert resp.headers.get("content-type") == "image/jpeg"
         assert len(resp.content) > 0
+
+
+# ===========================================================================
+# /api/media/thumbnail-cache-stats (static route vs /media/{item_id})
+# ===========================================================================
+
+
+class TestThumbnailCacheStatsRoute:
+    """The static stats route must not be swallowed by /media/{item_id}."""
+
+    def test_stats_reachable_without_item_id(self, test_client):
+        """GET returns 200 with cache counters — not a 422 int_parsing error."""
+        resp = test_client.get("/api/media/thumbnail-cache-stats")
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "entries" in data
+        assert "total_bytes" in data
+
+    def test_parameterized_item_route_still_works(self, test_client):
+        """A numeric id still routes to the item detail handler (404, not 422)."""
+        resp = test_client.get("/api/media/424242")
+
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+
+# ===========================================================================
+# UTC timestamp storage contract (naive == UTC, always)
+# ===========================================================================
+
+
+class TestUtcStorageContract:
+    """All DB timestamps must be UTC-naive on disk.
+
+    The frontend parses naive backend timestamps as UTC (see
+    ``parseBackendDate``).  If any writer ever stores naive *local* time,
+    every relative display ("11h ago") shifts by the machine offset.
+    """
+
+    def test_utcnow_is_aware_utc(self):
+        from datetime import UTC, datetime
+
+        from backend.database.models import _utcnow
+
+        now = _utcnow()
+        assert now.tzinfo is not None
+        assert now.utcoffset() == datetime.now(UTC).utcoffset()
+
+    def test_sqlite_stores_aware_utc_as_utc_naive(self):
+        """Aware UTC datetimes land in SQLite as UTC wall time (no shift)."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy.dialects.sqlite import DATETIME
+
+        aware = datetime(2026, 9, 28, 13, 35, 43, tzinfo=UTC)
+        stored = DATETIME(timezone=True).bind_processor(None)(aware)
+
+        assert stored == "2026-09-28 13:35:43.000000", stored

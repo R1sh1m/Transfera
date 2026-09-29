@@ -201,6 +201,93 @@ def test_session_pause_not_running(client: httpx.Client) -> None:
     _check(r2.status_code == 400, f"Expected 400 (not running), got {r2.status_code}")
 
 
+def test_pause_mid_transfer_then_resume(client: httpx.Client) -> None:
+    """Pause a live transfer, verify progress freezes, resume to completion.
+
+    Uses enough files that the transfer stays in 'running' long enough to
+    catch it (per-file hash + DB + thumbnail overhead dominates for tiny
+    files). If the transfer completes before the pause lands, the test
+    fails loudly rather than passing vacuously.
+    """
+    n_files = 400
+    with (
+        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as src_dir,
+        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as dest_dir,
+    ):
+        src = Path(src_dir)
+        for i in range(n_files):
+            (src / f"frame_{i:04d}.jpg").write_bytes(f"pause-test payload {i}".encode() * 64)
+
+        r = client.post(
+            "/api/sessions",
+            json={
+                "session_name": "pause-mid-transfer",
+                "source_root": str(src),
+                "dest_root": str(dest_dir),
+            },
+        )
+        _assert_ok(r, 200)
+        sid = _json(r)["id"]
+
+        r = client.post(f"/api/sessions/{sid}/start")
+        _assert_ok(r)
+
+        # Catch it running
+        saw_running = False
+        for _ in range(200):
+            st = _json(client.get(f"/api/sessions/{sid}/progress"))["status"]
+            if st == "running":
+                saw_running = True
+                break
+            if st in ("completed", "completed_with_errors", "failed", "cancelled"):
+                break
+            time.sleep(0.1)
+        _check(saw_running, "Transfer never observed in 'running' state")
+
+        r = client.post(f"/api/sessions/{sid}/pause")
+        _assert_ok(r)
+        _check(
+            _json(r)["status"] == "paused",
+            f"Expected paused, got {_json(r)['status']}",
+        )
+
+        # Progress must freeze while paused
+        p1 = _json(client.get(f"/api/sessions/{sid}/progress"))
+        time.sleep(1.5)
+        p2 = _json(client.get(f"/api/sessions/{sid}/progress"))
+        _check(
+            p2["completed_items"] == p1["completed_items"],
+            f"Progress moved while paused: {p1['completed_items']} -> {p2['completed_items']}",
+        )
+        _check(
+            p2["status"] == "paused",
+            f"Expected status paused, got {p2['status']}",
+        )
+
+        # Resume via start, run to terminal
+        r = client.post(f"/api/sessions/{sid}/start")
+        _assert_ok(r)
+        final = {}
+        for _ in range(300):
+            final = _json(client.get(f"/api/sessions/{sid}/progress"))
+            if final["status"] in (
+                "completed",
+                "completed_with_errors",
+                "failed",
+                "cancelled",
+            ):
+                break
+            time.sleep(0.5)
+        _check(
+            final.get("status") in ("completed", "completed_with_errors"),
+            f"Expected terminal success, got {final.get('status')}",
+        )
+        _check(
+            final.get("imported_files", 0) + final.get("failed_files", 0) >= n_files,
+            f"Expected all {n_files} files accounted, got imported={final.get('imported_files')} failed={final.get('failed_files')}",
+        )
+
+
 def test_media_list(client: httpx.Client) -> None:
     r = client.get("/api/media")
     _assert_ok(r)
@@ -351,6 +438,7 @@ def main() -> None:
         test_session_cancel(client)
         test_session_start_not_found(client)
         test_session_pause_not_running(client)
+        test_pause_mid_transfer_then_resume(client)
         test_media_list(client)
         test_media_list_pagination(client)
         test_duplicates_check(client)

@@ -582,6 +582,69 @@ async def test_mixed_bundle_crash() -> None:
 
 
 # ======================================================================
+# 5. Prescan sessions are repaired but never auto-resumed
+# ======================================================================
+@pytest.mark.asyncio
+async def test_prescan_session_not_auto_resumed() -> None:
+    """A crashed prescan session's batches get state repair, but the session
+    must NOT appear in resumable_session_ids — auto-running a transfer task
+    on it would import files into the staging dir as if it were an archive.
+    """
+    print("\n=== Prescan Session Excluded From Auto-Resume ===")
+    await _reset_db()
+
+    async with session_scope() as session:
+        pre = TransferSession(
+            session_name="scan-20260929-000000",
+            source_root="/src",
+            dest_root="/cache",
+            is_prescan=True,
+        )
+        real = TransferSession(
+            session_name="real-backup",
+            source_root="/src",
+            dest_root="/dst",
+        )
+        session.add_all([pre, real])
+        await session.flush()
+        pre_id, real_id = pre.id, real.id
+        session.add_all(
+            [
+                TransferBatch(
+                    session_id=pre_id,
+                    batch_number=1,
+                    status=BatchStatus.PROCESSING.value,
+                ),
+                TransferBatch(
+                    session_id=real_id,
+                    batch_number=1,
+                    status=BatchStatus.PROCESSING.value,
+                ),
+            ]
+        )
+        await session.flush()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        stats = await recover_interrupted_batches(cache_dir=Path(tmp))
+
+    _check(
+        "Prescan session excluded from resumable ids",
+        stats["resumable_session_ids"] == [real_id],
+        f"got: {stats['resumable_session_ids']}",
+    )
+
+    # Both batches still get the orphaned-PROCESSING -> PENDING repair
+    async with session_scope() as session:
+        result = await session.execute(select(TransferBatch.status).order_by(TransferBatch.id))
+        statuses = [r[0] for r in result.all()]
+    _check(
+        "Both batches reset to PENDING",
+        statuses == [BatchStatus.PENDING.value, BatchStatus.PENDING.value],
+        f"got: {statuses}",
+    )
+
+
+# ======================================================================
 # Runner
 # ======================================================================
 async def main() -> None:
@@ -600,6 +663,9 @@ async def main() -> None:
     await _reset_db()
 
     await test_mixed_bundle_crash()
+    await _reset_db()
+
+    await test_prescan_session_not_auto_resumed()
     await _reset_db()
 
     print("\n" + "=" * 60)
