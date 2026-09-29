@@ -29,8 +29,6 @@ import type {
   PathValidateResponse,
   PreflightValidateResponse,
   Pymobiledevice3InstallResponse,
-  ScanRequest,
-  ScanResponse,
   SessionCreate,
   SessionInfo,
   SessionList,
@@ -110,29 +108,12 @@ export function useHealth() {
 }
 
 // ---------------------------------------------------------------------------
-// Scan
-// ---------------------------------------------------------------------------
-export function useScan() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (req: ScanRequest) => {
-      const { data } = await apiClient.post<ScanResponse>("/scan", req);
-      return data;
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["sessions"] });
-    },
-    onError: (error) => {
-      useTransferStore
-        .getState()
-        .showNotification("error", extractErrorMessage(error));
-    },
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
+// NOTE: there is intentionally no useScan() hook. POST /api/scan creates its
+// own session AND ingests media rows; the setup flow creates exactly one
+// session via useCreateSession and starts it (the backend scans on start).
+// Wiring both would double-count every file in the library.
 export function useSessionList(page = 1, pageSize = 20) {
   return useQuery({
     queryKey: ["sessions", page, pageSize],

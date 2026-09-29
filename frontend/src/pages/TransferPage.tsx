@@ -1023,6 +1023,9 @@ export default function TransferPage() {
   const isRunning = transfer.status === "running";
   const isPaused = transfer.status === "paused";
   const isIdle = transfer.status === "created";
+  // No session loaded (fresh navigation): action buttons would be inert —
+  // hide them instead of rendering dead controls.
+  const hasSession = transfer.sessionId !== null;
   const isFinished = [
     "completed",
     "completed_with_errors",
@@ -1064,7 +1067,7 @@ export default function TransferPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {isIdle && (
+          {isIdle && hasSession && (
             <button
               onClick={handleStart}
               disabled={startSession.isPending}
@@ -1106,7 +1109,7 @@ export default function TransferPage() {
               )}
             </button>
           )}
-          {!isFinished && (
+          {!isFinished && hasSession && (
             <button
               onClick={handleCancel}
               disabled={cancelSession.isPending}

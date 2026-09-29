@@ -116,6 +116,7 @@ export interface SessionInfo {
   completed_items: number;
   failed_items: number;
   only_new_mode: boolean;
+  is_prescan?: boolean;
   folder_layout: string;
   created_at: string;
   updated_at: string;
@@ -383,6 +384,8 @@ export interface FolderMetadataRequest {
 
 export interface FolderMetadataResponse {
   path: string;
+  size_bytes: number;
+  size_human: string;
   size_gb: number;
   file_count: number;
 }

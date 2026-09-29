@@ -202,7 +202,7 @@ function DirMetricsCard({
           <div className="grid grid-cols-2 gap-2">
             <div className="text-center">
               <p className="text-sm font-bold text-foreground">
-                {metrics.size_gb} GB
+                {metrics.size_human}
               </p>
               <p className="text-[10px] text-muted-foreground">Total Size</p>
             </div>
@@ -252,7 +252,9 @@ function ResumeAlert() {
   const [dismissed, setDismissed] = useState(false);
   const pausedSessions =
     sessionList?.sessions?.filter(
-      (s) => s.status === "paused" || s.status === "created",
+      // Prescan sessions are inventory-only — a scan is idempotent, there is
+      // nothing to resume, so they never prompt recovery.
+      (s) => !s.is_prescan && (s.status === "paused" || s.status === "created"),
     ) ?? [];
 
   // Reset dismiss when the underlying list changes (new sessions appear on
@@ -681,8 +683,8 @@ function SessionRow({ session }: { session: SessionInfo }) {
   };
 
   return (
-    <tr className="border-b border-border hover:bg-muted/30 transition-colors">
-      <td className="py-2.5 pr-3">
+    <tr className="border-b border-border last:border-b-0 hover:bg-muted/30 transition-colors">
+      <td className="py-3 pl-4 pr-3">
         <StatusBadge status={session.status} />
       </td>
       <td className="py-2.5 pr-3">
@@ -693,7 +695,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
           {session.session_name}
         </p>
       </td>
-      <td className="py-2.5 pr-3">
+      <td className="py-3 pr-3">
         <p
           className="text-xs text-muted-foreground truncate max-w-[220px]"
           title={session.source_root}
@@ -701,7 +703,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
           {session.source_root}
         </p>
       </td>
-      <td className="py-2.5 pr-3">
+      <td className="py-3 pr-3">
         <p
           className="text-xs text-muted-foreground truncate max-w-[220px]"
           title={session.dest_root}
@@ -709,7 +711,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
           {session.dest_root}
         </p>
       </td>
-      <td className="py-2.5 pr-3">
+      <td className="py-3 pr-3">
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">
             {session.completed_items.toLocaleString()} /{" "}
@@ -723,12 +725,12 @@ function SessionRow({ session }: { session: SessionInfo }) {
             )}
         </div>
       </td>
-      <td className="py-2.5 pr-3">
+      <td className="py-3 pr-3">
         <span className="text-xs text-muted-foreground">
           {parseBackendDate(session.created_at).toLocaleDateString()}
         </span>
       </td>
-      <td className="py-2.5">
+      <td className="py-3 pr-4">
         <div className="flex items-center gap-1.5">
           {session.status === "paused" && (
             <button
@@ -1232,7 +1234,7 @@ export default function DashboardPage() {
                   <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-3 w-[90px]">
                     Date
                   </th>
-                  <th className="text-left text-xs font-normal text-muted-foreground py-2 w-[120px]">
+                  <th className="text-left text-xs font-normal text-muted-foreground py-2 pr-4 w-[120px]">
                     Actions
                   </th>
                 </tr>
