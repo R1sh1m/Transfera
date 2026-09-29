@@ -38,7 +38,7 @@
     "resources": [
       "resources/wpd_helper.exe",
       "resources/exiftool.exe",
-      "resources/exiftool_files/**"
+      "resources/exiftool_files"
     ],
     "externalBin": ["binaries/transfera-engine"]
   }

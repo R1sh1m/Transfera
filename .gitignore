@@ -66,8 +66,11 @@ backend/data/cache/
 # --- Tauri shell (Rust + sidecar staging) ---
 frontend/src-tauri/target/
 frontend/src-tauri/gen/
-frontend/src-tauri/binaries/*.exe
-frontend/src-tauri/resources/*.exe
+frontend/src-tauri/binaries/*
+!frontend/src-tauri/binaries/.gitkeep
+frontend/src-tauri/resources/*
+!frontend/src-tauri/resources/.gitkeep
+frontend/src-tauri/resources/exiftool_files/
 # PyInstaller one-dir output (staged into src-tauri/binaries/ by scripts/build-sidecar.ps1)
 dist/transfera-engine/
 
@@ -117,4 +120,5 @@ test_source/
 opencode.json
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 test/
