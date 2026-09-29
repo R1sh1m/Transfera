@@ -1,6 +1,6 @@
 [package]
 name = "transfera"
-version = "2.5.1"
+version = "2.6.0"
 description = "Transfera v2 - Local media backup desktop app (Tauri shell)"
 authors = ["Transfera Team"]
 edition = "2021"

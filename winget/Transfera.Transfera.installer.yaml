@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 PackageIdentifier: Transfera.Transfera
-PackageVersion: 2.5.1
+PackageVersion: 2.6.0
 InstallerType: nullsoft
 Installers:
   - Architecture: x64
     InstallerLocale: en-US
-    InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.5.1/Transfera-Setup-2.5.1.exe
+    InstallerUrl: https://github.com/R1sh1m/Transfera/releases/download/v2.6.0/Transfera_2.6.0_x64-setup.exe
     # Refreshed from the published v2.5.1 release asset (SHA256SUMS.txt).
     InstallerSha256: 6e5f5fc1ec34592f7b4bc099e5a9cc426ef4c392f059acfdb5d5d4eb01a08db1
     InstallerType: nullsoft

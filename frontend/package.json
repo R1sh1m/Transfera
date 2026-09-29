@@ -1,6 +1,6 @@
 {
   "name": "transfera-frontend",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "private": true,
   "type": "module",
   "description": "Transfera v2 - Local media backup desktop app",
@@ -14,7 +14,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "build:native": "cmd /c \"..\\native\\wpd_helper\\build.bat\"",
+    "build:native": "node -e \"if(process.platform==='win32'){const {execSync}=require('child_process');execSync('cmd /c \\\"..\\\\native\\\\wpd_helper\\\\build.bat\\\"',{stdio:'inherit'})}else{console.log('build:native: WPD helper is Windows-only — skipping on '+process.platform)}\"",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run build:native && tauri build",
     "tauri:check": "tauri info",

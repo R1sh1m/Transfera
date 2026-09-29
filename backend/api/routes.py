@@ -217,7 +217,7 @@ def _cleanup_session_state(session_id: int) -> None:
 @router.get("/health")
 async def health_check() -> dict:
     """Return service health status for frontend polling and startup detection."""
-    return {"status": "ok", "version": "2.5.1"}
+    return {"status": "ok", "version": "2.6.0"}
 
 
 # ---------------------------------------------------------------------------
