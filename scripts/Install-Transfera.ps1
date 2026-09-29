@@ -47,7 +47,15 @@ function Step([string]$msg) {
   Write-Host ""
   Write-Host "==> $msg" -ForegroundColor Cyan
 }
-function Ok([string]$msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
+function StepBox([string]$icon, [string]$num, [string]$title, [string]$note = "") {
+  $line = "  " + ("═" * 58)
+  Write-Host ""
+  Write-Host $line -ForegroundColor Cyan
+  Write-Host "  ║  $icon  Step $num — $title" -ForegroundColor Cyan
+  if ($note -ne "") { Write-Host "  ║      $note" -ForegroundColor DarkCyan }
+  Write-Host $line -ForegroundColor Cyan
+}
+function Ok([string]$msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Fail([string]$msg) {
   Write-Host "  [FAIL] $msg" -ForegroundColor Red
@@ -61,7 +69,7 @@ function Confirm-Step([string]$msg) {
 function Refresh-Path {
   # Pick up machine + user PATH changes from winget installs in this session.
   $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
-  $user = [Environment]::GetEnvironmentVariable("Path", "User")
+  $user    = [Environment]::GetEnvironmentVariable("Path", "User")
   $env:Path = "$machine;$user"
 }
 function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
@@ -76,8 +84,23 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
   Ok "$name installed"
 }
 
+# ── ASCII banner ──────────────────────────────────────────────────────────────
+cls 2>$null
+Write-Host ""
+Write-Host " ████████╗██████╗  █████╗ ███╗  ██╗███████╗███████╗███████╗██████╗  █████╗" -ForegroundColor Cyan
+Write-Host "    ██╔══╝██╔══██╗██╔══██╗████╗ ██║██╔════╝██╔════╝██╔════╝██╔══██╗██╔══██╗" -ForegroundColor Cyan
+Write-Host "    ██║   ██████╔╝███████║██╔██╗██║███████╗█████╗  █████╗  ██████╔╝███████║" -ForegroundColor Cyan
+Write-Host "    ██║   ██╔══██╗██╔══██║██║╚████║╚════██║██╔══╝  ██╔══╝  ██╔══██╗██╔══██║" -ForegroundColor Cyan
+Write-Host "    ██║   ██║  ██║██║  ██║██║ ╚███║███████║██║     ███████╗██║  ██║██║  ██║" -ForegroundColor Cyan
+Write-Host "    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚══╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Your photos & videos. Your machine. Your rules." -ForegroundColor White
+Write-Host "  Windows installer — building everything locally from source" -ForegroundColor DarkCyan
+Write-Host ""
+
+
 # ---------------------------------------------------------------------------
-Step "1/9  Checking Windows + winget"
+StepBox "🪟" "1/9" "Checking Windows + winget"
 # ---------------------------------------------------------------------------
 $os = (Get-CimInstance Win32_OperatingSystem).Version
 if ([version]$os -lt [version]"10.0.0") { Fail "Windows 10 or 11 is required (found $os)." }
@@ -87,7 +110,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 Ok "Windows $os, winget present"
 
 # ---------------------------------------------------------------------------
-Step "2/9  Toolchain: Python 3.12, Node LTS, Rust, Git"
+StepBox "📦" "2/9" "Toolchain: Python 3.12, Node LTS, Rust, Git"
 # ---------------------------------------------------------------------------
 Winget-Ensure "Python.Python.3.12" "Python 3.12"
 Winget-Ensure "OpenJS.NodeJS.LTS" "Node.js LTS"
@@ -103,7 +126,7 @@ if ([int]$nodeMajor -lt 20) { Fail "Node.js v20+ required (found $(node --versio
 Ok "Toolchain ready (node $(node --version), $(cargo --version))"
 
 # ---------------------------------------------------------------------------
-Step "3/9  Apple Mobile Device Support (iPhone driver)"
+StepBox "📱" "3/9" "Apple Mobile Device Support (iPhone driver)"
 # ---------------------------------------------------------------------------
 if ($SkipDriver) {
   Warn "Skipped (-SkipDriver). iPhone access falls back to Tier-1/folder backup."
@@ -112,7 +135,7 @@ if ($SkipDriver) {
 }
 
 # ---------------------------------------------------------------------------
-Step "4/9  MSVC Build Tools (C++ iPhone helper)"
+StepBox "🔧" "4/9" "MSVC Build Tools (C++ iPhone helper)" "~2-5 GB download, only needed once"
 # ---------------------------------------------------------------------------
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $hasMsvc = (Test-Path $vswhere) -and (& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null)
@@ -132,7 +155,7 @@ if ($SkipNative) {
 }
 
 # ---------------------------------------------------------------------------
-Step "5/9  Getting Transfera source"
+StepBox "📥" "5/9" "Getting Transfera source"
 # ---------------------------------------------------------------------------
 if ($RepoDir -ne "" -and (Test-Path (Join-Path $RepoDir "run.py"))) {
   $Root = (Resolve-Path $RepoDir).Path
@@ -158,7 +181,7 @@ if ($RepoDir -ne "" -and (Test-Path (Join-Path $RepoDir "run.py"))) {
 }
 
 # ---------------------------------------------------------------------------
-Step "6/9  Python backend (venv + all features, AI runtime included)"
+StepBox "🐍" "6/9" "Python backend (venv + all features, AI runtime included)"
 # ---------------------------------------------------------------------------
 Push-Location $Root
 try {
@@ -170,7 +193,7 @@ try {
 Ok "Backend venv ready (FastAPI + AI runtime + device stack)"
 
 # ---------------------------------------------------------------------------
-Step "7/9  Frontend (npm ci + production build)"
+StepBox "⚛️ " "7/9" "Frontend (npm ci + production build)"
 # ---------------------------------------------------------------------------
 Push-Location (Join-Path $Root "frontend")
 try {
@@ -183,7 +206,7 @@ try {
 Ok "Frontend built"
 
 # ---------------------------------------------------------------------------
-Step "8/9  Native helper + ExifTool + frozen sidecar"
+StepBox "🔍" "8/9" "Native helper + ExifTool + frozen sidecar"
 # ---------------------------------------------------------------------------
 Push-Location (Join-Path $Root "frontend")
 try {
@@ -208,7 +231,7 @@ try {
 Ok "Sidecar frozen, helpers staged"
 
 # ---------------------------------------------------------------------------
-Step "9/9  Building + installing the Tauri app"
+StepBox "🦀" "9/9" "Building + installing the Tauri app" "Grab a coffee ☕ — Rust compile is the slow part"
 # ---------------------------------------------------------------------------
 Push-Location (Join-Path $Root "frontend")
 try {
@@ -228,8 +251,19 @@ if ($Silent) {
   Start-Process $installer.FullName -Wait
 }
 Write-Host ""
-Write-Host "Done! Transfera is installed with every feature on day one:" -ForegroundColor Green
-Write-Host "  - Backup engine + AI search runtime + ExifTool + device helpers"
-Write-Host "  - Apple driver: $(if ($SkipDriver) { 'skipped (Tier-1/folder fallback)' } else { 'installed' })"
-Write-Host "  - iPhone WPD helper: $(if ((Test-Path (Join-Path $Root 'backend\bin\wpd_helper.exe'))) { 'built' } else { 'not built (folder backup unaffected)' })"
-Write-Host "  - App data lives in %APPDATA%\Transfera"
+Write-Host "  ══════════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "  ║                                                            ║" -ForegroundColor Green
+Write-Host "  ║   ✅  ALL DONE!  Transfera is installed & ready to roll.  ║" -ForegroundColor Green
+Write-Host "  ║                                                            ║" -ForegroundColor Green
+Write-Host "  ║   Everything ships on day one:                             ║" -ForegroundColor Green
+Write-Host "  ║     📁  Backup engine + two-hop verification               ║" -ForegroundColor Green
+Write-Host "  ║     🤖  AI search  (ONNX / CPU, 100%% local)               ║" -ForegroundColor Green
+Write-Host "  ║     🔍  ExifTool metadata extraction                       ║" -ForegroundColor Green
+Write-Host "  ║     📱  Apple driver: $(if ($SkipDriver) { 'skipped (fallback active)' } else { 'installed          ' })          ║" -ForegroundColor Green
+Write-Host "  ║     🔧  iPhone WPD helper: $(if ((Test-Path (Join-Path $Root 'backend\bin\wpd_helper.exe'))) { 'built              ' } else { 'skipped (folder OK)' })       ║" -ForegroundColor Green
+Write-Host "  ║                                                            ║" -ForegroundColor Green
+Write-Host "  ║   App data lives in:  %APPDATA%\Transfera                  ║" -ForegroundColor Green
+Write-Host "  ║   Launch it from the Start Menu  🚀                        ║" -ForegroundColor Green
+Write-Host "  ║                                                            ║" -ForegroundColor Green
+Write-Host "  ══════════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host ""

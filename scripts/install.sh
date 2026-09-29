@@ -17,17 +17,34 @@ set -euo pipefail
 # ── Colours ──────────────────────────────────────────────────
 if [ -t 1 ]; then
   CR="\033[0m"; CB="\033[1m"; CG="\033[32m"
-  CY="\033[33m"; CC="\033[36m"; CRED="\033[31m"
+  CY="\033[33m"; CC="\033[36m"; CRED="\033[31m"; CM="\033[35m"
 else
-  CR=""; CB=""; CG=""; CY=""; CC=""; CRED=""
+  CR=""; CB=""; CG=""; CY=""; CC=""; CRED=""; CM=""
 fi
 
 step()  { echo -e "\n${CB}${CC}==> $*${CR}"; }
 ok()    { echo -e "  ${CG}[OK]${CR} $*"; }
 warn()  { echo -e "  ${CY}[WARN]${CR} $*"; }
 fail()  { echo -e "  ${CRED}[FAIL]${CR} $*"; exit 1; }
+banner(){ echo -e "${CM}${CB}$*${CR}"; }
 
-# ── Parse flags ──────────────────────────────────────────────
+# ── ASCII banner ──────────────────────────────────────────────
+clear 2>/dev/null || true
+echo -e "${CB}${CC}"
+cat << 'BANNER'
+ ████████╗██████╗  █████╗ ███╗  ██╗███████╗███████╗███████╗██████╗  █████╗
+    ██╔══╝██╔══██╗██╔══██╗████╗ ██║██╔════╝██╔════╝██╔════╝██╔══██╗██╔══██╗
+    ██║   ██████╔╝███████║██╔██╗██║███████╗█████╗  █████╗  ██████╔╝███████║
+    ██║   ██╔══██╗██╔══██║██║╚████║╚════██║██╔══╝  ██╔══╝  ██╔══██╗██╔══██║
+    ██║   ██║  ██║██║  ██║██║ ╚███║███████║██║     ███████╗██║  ██║██║  ██║
+    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚══╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+BANNER
+echo -e "${CR}"
+echo -e "  ${CB}Your photos & videos. Your machine. Your rules.${CR}"
+echo -e "  ${CY}macOS / Linux installer  —  building everything locally from source${CR}"
+echo ""
+
+
 SKIP_DRIVER=false; SKIP_NATIVE=false; ASSUME_YES=false
 for arg in "$@"; do
   case "$arg" in
@@ -60,7 +77,10 @@ else fail "Cannot find run.py. Run this script from inside the Transfera repo.";
 ok "Repo: $ROOT"
 
 # ── 1  System dependencies ───────────────────────────────────
-step "1/6  System dependencies"
+echo -e "\n${CB}${CC}"
+echo "  ╔══════════════════════════════════════════╗"
+echo "  ║  📦  Step 1/6 — System Dependencies     ║"
+echo "  ╚══════════════════════════════════════════╝${CR}"
 
 if [ "$PLATFORM" = macos ]; then
   command -v brew &>/dev/null || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -125,7 +145,10 @@ for cmd in python3.12 node npm git cargo; do
 done
 
 # ── 2  iPhone / device support ───────────────────────────────
-step "2/6  iPhone support"
+echo -e "\n${CB}${CC}"
+echo "  ╔══════════════════════════════════════════╗"
+echo "  ║  📱  Step 2/6 — iPhone / Device Support  ║"
+echo "  ╚══════════════════════════════════════════╝${CR}"
 if $SKIP_DRIVER; then
   warn "Skipped (--skip-driver)."
 elif [ "$PLATFORM" = macos ]; then
@@ -140,7 +163,10 @@ else
 fi
 
 # ── 3  Python backend venv ───────────────────────────────────
-step "3/6  Python backend (venv + all features, AI runtime included)"
+echo -e "\n${CB}${CC}"
+echo "  ╔══════════════════════════════════════════════════════╗"
+echo "  ║  🐍  Step 3/6 — Python Backend (AI runtime included) ║"
+echo "  ╚══════════════════════════════════════════════════════╝${CR}"
 cd "$ROOT"
 python3.12 -m venv .venv
 # shellcheck source=/dev/null
@@ -150,7 +176,10 @@ pip install -r backend/requirements.txt
 ok "Backend venv ready"
 
 # ── 4  Frontend ──────────────────────────────────────────────
-step "4/6  Frontend (npm ci + production build)"
+echo -e "\n${CB}${CC}"
+echo "  ╔═══════════════════════════════════════════════════╗"
+echo "  ║  ⚛️   Step 4/6 — Frontend (React + Vite build)    ║"
+echo "  ╚═══════════════════════════════════════════════════╝${CR}"
 cd "$ROOT/frontend"
 npm ci
 npm run build
@@ -159,7 +188,10 @@ ok "Frontend built"
 cd "$ROOT"
 
 # ── 5  ExifTool + helpers ────────────────────────────────────
-step "5/6  ExifTool + metadata helpers"
+echo -e "\n${CB}${CC}"
+echo "  ╔════════════════════════════════════════════╗"
+echo "  ║  🔍  Step 5/6 — ExifTool & Metadata Helpers ║"
+echo "  ╚════════════════════════════════════════════╝${CR}"
 .venv/bin/python -c "
 from backend.engines.metadata_extractor import _download_exiftool
 import sys, pathlib
@@ -172,7 +204,11 @@ $SKIP_NATIVE \
   || warn "WPD helper is Windows-only. iPhone access on $PLATFORM uses libimobiledevice."
 
 # ── 6  Tauri desktop app ─────────────────────────────────────
-step "6/6  Building the Tauri desktop app"
+echo -e "\n${CB}${CC}"
+echo "  ╔════════════════════════════════════════════════════════╗"
+echo "  ║  🦀  Step 6/6 — Building the Tauri Desktop App (Rust)  ║"
+echo "  ║      Grab a coffee ☕  — Rust compile is the slow part  ║"
+echo "  ╚════════════════════════════════════════════════════════╝${CR}"
 cd "$ROOT/frontend"
 npm run tauri:build
 ok "Tauri app built."
@@ -193,9 +229,23 @@ fi
 
 cd "$ROOT"
 echo ""
-echo -e "${CB}${CG}Done! Transfera is ready with every feature on day one:${CR}"
-echo "  • Backup engine  •  AI search (ONNX/CPU)  •  ExifTool metadata"
-echo "  • iPhone support via libimobiledevice"
-echo "  • App data: ~/.local/share/transfera  (macOS: ~/Library/Application Support/transfera)"
+echo -e "${CB}${CG}"
+cat << 'DONE'
+  ╔══════════════════════════════════════════════════════════════╗
+  ║                                                              ║
+  ║   ✅  ALL DONE!  Transfera is installed & ready to roll.    ║
+  ║                                                              ║
+  ║   Everything ships on day one:                               ║
+  ║     📁  Backup engine + two-hop verification                 ║
+  ║     🤖  AI search  (ONNX / CPU, 100% local)                 ║
+  ║     🔍  ExifTool metadata extraction                         ║
+  ║     📱  iPhone support via libimobiledevice                  ║
+  ║                                                              ║
+  ╚══════════════════════════════════════════════════════════════╝
+DONE
+echo -e "${CR}"
+echo -e "  App data lives in:"
+echo -e "    macOS  →  ${CB}~/Library/Application Support/transfera${CR}"
+echo -e "    Linux  →  ${CB}~/.local/share/transfera${CR}"
 echo ""
-echo -e "  Dev mode: ${CB}python run.py${CR}  (backend + frontend hot-reload)"
+echo -e "  Dev mode: ${CB}python run.py${CR}  (backend + Vite hot-reload)"
