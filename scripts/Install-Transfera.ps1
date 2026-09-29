@@ -27,6 +27,8 @@
   folder backup + Tier-1 iPhone access still work).
 .PARAMETER SkipDriver
   Skip the Apple Mobile Device Support install.
+.PARAMETER SkipAI
+  Skip downloading the on-board AI stack (onnxruntime + tokenizers) and MobileCLIP models (~320 MB total).
 .PARAMETER Yes
   Non-interactive: assume yes for the (small) confirmation prompts.
 #>
@@ -37,6 +39,7 @@ param(
   [switch]$Silent,
   [switch]$SkipNative,
   [switch]$SkipDriver,
+  [switch]$SkipAI,
   [switch]$Yes
 )
 
@@ -87,12 +90,15 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
 # ── ASCII banner ──────────────────────────────────────────────────────────────
 cls 2>$null
 Write-Host ""
-Write-Host " ████████╗██████╗  █████╗ ███╗  ██╗███████╗███████╗███████╗██████╗  █████╗" -ForegroundColor Cyan
-Write-Host "    ██╔══╝██╔══██╗██╔══██╗████╗ ██║██╔════╝██╔════╝██╔════╝██╔══██╗██╔══██╗" -ForegroundColor Cyan
-Write-Host "    ██║   ██████╔╝███████║██╔██╗██║███████╗█████╗  █████╗  ██████╔╝███████║" -ForegroundColor Cyan
-Write-Host "    ██║   ██╔══██╗██╔══██║██║╚████║╚════██║██╔══╝  ██╔══╝  ██╔══██╗██╔══██║" -ForegroundColor Cyan
-Write-Host "    ██║   ██║  ██║██║  ██║██║ ╚███║███████║██║     ███████╗██║  ██║██║  ██║" -ForegroundColor Cyan
-Write-Host "    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚══╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝" -ForegroundColor Cyan
+Write-Host "__/\\\\\\\\\\\\\\\____/\\\\\\\\\_________/\\\\\\\\\_____/\\\\\_____/\\\_____/\\\\\\\\\\\____/\\\\\\\\\\\\\\\__/\\\\\\\\\\\\\\\____/\\\\\\\\\_________/\\\\\\\\\____" -ForegroundColor Cyan
+Write-Host " _\///////\\\/////___/\\\///////\\\_____/\\\\\\\\\\\\\__\/\\\\\\___\/\\\___/\\\/////////\\\_\/\\\///////////__\/\\\///////////___/\\\///////\\\_____/\\\\\\\\\\\\\__" -ForegroundColor Cyan
+Write-Host "  _______\/\\\_______\/\\\_____\/\\\____/\\\/////////\\\_\/\\\/\\\__\/\\\__\//\\\______\///__\/\\\_____________\/\\\_____________\/\\\_____\/\\\____/\\\/////////\\\_" -ForegroundColor Cyan
+Write-Host "   _______\/\\\_______\/\\\\\\\\\\\/____\/\\\_______\/\\\_\/\\\//\\\_\/\\\___\////\\\_________\/\\\\\\\\\\\_____\/\\\\\\\\\\\_____\/\\\\\\\\\\\/____\/\\\_______\/\\\_" -ForegroundColor Cyan
+Write-Host "    _______\/\\\_______\/\\\//////\\\____\/\\\\\\\\\\\\\\\_\/\\\\//\\\\/\\\______\////\\\______\/\\\///////______\/\\\///////______\/\\\//////\\\____\/\\\\\\\\\\\\\\\_" -ForegroundColor Cyan
+Write-Host "     _______\/\\\_______\/\\\____\//\\\___\/\\\/////////\\\_\/\\\_\//\\\/\\\_________\////\\\___\/\\\_____________\/\\\_____________\/\\\____\//\\\___\/\\\/////////\\\_" -ForegroundColor Cyan
+Write-Host "      _______\/\\\_______\/\\\_____\//\\\__\/\\\_______\/\\\_\/\\\__\//\\\\\\__/\\\______\//\\\__\/\\\_____________\/\\\_____________\/\\\_____\//\\\__\/\\\_______\/\\\_" -ForegroundColor Cyan
+Write-Host "       _______\/\\\_______\/\\\______\//\\\_\/\\\_______\/\\\_\/\\\___\//\\\\\_\///\\\\\\\\\\\/___\/\\\_____________\/\\\\\\\\\\\\\\\_\/\\\______\//\\\_\/\\\_______\/\\\_" -ForegroundColor Cyan
+Write-Host "        _______\///________\///________\///__\///________\///__\///_____\/////____\///////////_____\///______________\///////////////__\///________\///__\///________\///__" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Your photos & videos. Your machine. Your rules." -ForegroundColor White
 Write-Host "  Windows installer — building everything locally from source" -ForegroundColor DarkCyan
@@ -181,7 +187,7 @@ if ($RepoDir -ne "" -and (Test-Path (Join-Path $RepoDir "run.py"))) {
 }
 
 # ---------------------------------------------------------------------------
-StepBox "🐍" "6/9" "Python backend (venv + all features, AI runtime included)"
+StepBox "🐍" "6/9" "Python backend (venv + all features, AI runtime & models included)"
 # ---------------------------------------------------------------------------
 Push-Location $Root
 try {
@@ -189,8 +195,19 @@ try {
   .\.venv\Scripts\python -m pip install --upgrade pip
   .\.venv\Scripts\python -m pip install -r backend\requirements.txt
   if ($LASTEXITCODE -ne 0) { Fail "Backend pip install failed." }
+
+  if ($SkipAI) {
+    Warn "Skipped (-SkipAI). Semantic search runtime and models not downloaded."
+  } else {
+    Step "Installing on-board AI stack (onnxruntime + tokenizers)..."
+    .\.venv\Scripts\python -m pip install -r backend\requirements-ai.txt
+    if ($LASTEXITCODE -ne 0) { Warn "AI dependencies install reported issues — continuing." }
+
+    Step "Downloading MobileCLIP AI models (~207 MB) for Day-1 semantic search..."
+    .\.venv\Scripts\python -c "from backend.engines.clip import ensure_models; ok = ensure_models(); print('AI models ready' if ok else 'Model download skipped')"
+  }
 } finally { Pop-Location }
-Ok "Backend venv ready (FastAPI + AI runtime + device stack)"
+Ok "Backend venv ready (FastAPI + AI runtime + models + device stack)"
 
 # ---------------------------------------------------------------------------
 StepBox "⚛️ " "7/9" "Frontend (npm ci + production build)"

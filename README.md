@@ -1,17 +1,20 @@
 <div align="center">
 
 ```
- ████████╗██████╗  █████╗ ███╗  ██╗███████╗███████╗███████╗██████╗  █████╗
-    ██╔══╝██╔══██╗██╔══██╗████╗ ██║██╔════╝██╔════╝██╔════╝██╔══██╗██╔══██╗
-    ██║   ██████╔╝███████║██╔██╗██║███████╗█████╗  █████╗  ██████╔╝███████║
-    ██║   ██╔══██╗██╔══██║██║╚████║╚════██║██╔══╝  ██╔══╝  ██╔══██╗██╔══██║
-    ██║   ██║  ██║██║  ██║██║ ╚███║███████║██║     ███████╗██║  ██║██║  ██║
-    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚══╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+__/\\\\\\\\\\\\\\\____/\\\\\\\\\_________/\\\\\\\\\_____/\\\\\_____/\\\_____/\\\\\\\\\\\____/\\\\\\\\\\\\\\\__/\\\\\\\\\\\\\\\____/\\\\\\\\\_________/\\\\\\\\\____
+ _\///////\\\/////___/\\\///////\\\_____/\\\\\\\\\\\\\__\/\\\\\\___\/\\\___/\\\/////////\\\_\/\\\///////////__\/\\\///////////___/\\\///////\\\_____/\\\\\\\\\\\\\__
+  _______\/\\\_______\/\\\_____\/\\\____/\\\/////////\\\_\/\\\/\\\__\/\\\__\//\\\______\///__\/\\\_____________\/\\\_____________\/\\\_____\/\\\____/\\\/////////\\\_
+   _______\/\\\_______\/\\\\\\\\\\\/____\/\\\_______\/\\\_\/\\\//\\\_\/\\\___\////\\\_________\/\\\\\\\\\\\_____\/\\\\\\\\\\\_____\/\\\\\\\\\\\/____\/\\\_______\/\\\_
+    _______\/\\\_______\/\\\//////\\\____\/\\\\\\\\\\\\\\\_\/\\\\//\\\\/\\\______\////\\\______\/\\\///////______\/\\\///////______\/\\\//////\\\____\/\\\\\\\\\\\\\\\_
+     _______\/\\\_______\/\\\____\//\\\___\/\\\/////////\\\_\/\\\_\//\\\/\\\_________\////\\\___\/\\\_____________\/\\\_____________\/\\\____\//\\\___\/\\\/////////\\\_
+      _______\/\\\_______\/\\\_____\//\\\__\/\\\_______\/\\\_\/\\\__\//\\\\\\__/\\\______\//\\\__\/\\\_____________\/\\\_____________\/\\\_____\//\\\__\/\\\_______\/\\\_
+       _______\/\\\_______\/\\\______\//\\\_\/\\\_______\/\\\_\/\\\___\//\\\\\_\///\\\\\\\\\\\/___\/\\\_____________\/\\\\\\\\\\\\\\\_\/\\\______\//\\\_\/\\\_______\/\\\_
+        _______\///________\///________\///__\///________\///__\///_____\/////____\///////////_____\///______________\///////////////__\///________\///__\///________\///__
 ```
 
-**Your photos and videos. Your computer. Your rules.**
+**Backup and Move files and photos easily.**
 
-Back up every photo and video from your phone, camera, or USB drive — verified twice, sorted by date, stored locally. No cloud. No account. No subscription.
+Tranfera is a simple utility to transfer files and photos from your phone, camera, or USB drive to your computer.
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -23,20 +26,20 @@ Back up every photo and video from your phone, camera, or USB drive — verified
 
 ---
 
-## ✨ What it does
+## Features
 
 - **Two-hop verification** — every file is hashed while copying, then re-hashed before landing in your archive. Corruption is impossible.
 - **Smart deduplication** — already have it? Transfera skips it.
 - **Auto-organizes** by date → `Photos/2026/09-September/IMG_1234.jpg`
-- **iPhone & iPad** — plug in, trust, done. No iTunes. Apple drivers included on day one.
-- **AI search** — find "sunset beach" or "birthday cake" across your whole library (downloads once, runs on CPU, completely local).
-- **Zero cloud** — the only internet access ever is downloading helper tools, once, with your permission.
+- **iPhone & iPad** — plug in, trust, done. No need for iTunes.
+- **AI search** — find "sunset beach" or "birthday cake" across your whole library (completely local).
+- **Zero cloud** — internet access needed only for downloading helper tools, once.
 
 ---
 
 ## 🚀 Install
 
-> **Clone once, run one script.** It figures out your OS and does everything — installs dependencies, downloads Apple drivers, builds the app, ships every feature at day one.
+> **Clone once and run the script** It installs dependencies, drivers, builds the app.
 
 ### Step 1 — Clone
 
@@ -69,13 +72,13 @@ powershell -ExecutionPolicy Bypass `
   -File scripts\Install-Transfera.ps1
 ```
 
-Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer — **no SmartScreen warning**.
+Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer.
 
 </td>
 </tr>
 </table>
 
-That's it. First run takes 5–15 minutes (downloads + build). Every subsequent launch starts in seconds.
+First run takes 5–15 minutes (downloads + build). Every subsequent launch starts in seconds.
 
 #### Optional flags (both scripts)
 
@@ -89,21 +92,7 @@ That's it. First run takes 5–15 minutes (downloads + build). Every subsequent 
 
 ---
 
-### 🛡️ Why no SmartScreen warning?
-
-The installer compiles Transfera **on your own machine**. Windows SmartScreen only flags files downloaded from the internet — locally built binaries carry no Mark-of-the-Web, so the warning never appears.
-
-**Still want the pre-built `.exe`?**
-
-> Download `Transfera-X.Y.Z-x64-setup.exe` from **[GitHub Releases](https://github.com/R1sh1m/Transfera/releases)**, verify the hash against `SHA256SUMS.txt` on the same page, then click **More info → Run anyway** to dismiss the one-time SmartScreen prompt. Every line of code is on GitHub, open for inspection.
->
-> ```powershell
-> certutil -hashfile Transfera-X.Y.Z-x64-setup.exe SHA256
-> ```
-
----
-
-## 📸 Your first backup (5 minutes)
+## 📸 Your first backup 
 
 1. **Open Transfera** — you land on the **Dashboard**.
 2. Hit **Start New Backup** (or **Setup** in the sidebar).
@@ -115,28 +104,6 @@ The installer compiles Transfera **on your own machine**. Windows SmartScreen on
 6. Press **Start**. Watch live progress, speeds, and thumbnails on the **Transfer** page.
 7. Open **Library** — searchable by date, content (AI), duplicates, trash, and more.
 
-### FAQ
-
-| Question | Answer |
-|---|---|
-| Where are my files? | Exactly where you set Destination — plain JPG/MP4 in date folders. Any app can open them. |
-| Is anything uploaded? | No. Zero servers. |
-| Unplugged mid-transfer? | Plug back in → press Start → finished files are skipped, interrupted ones resume cleanly. |
-| Are my originals safe? | In Copy mode Transfera never writes to, moves, or deletes source files. |
-| Deleted something? | Goes to **Trash** first. Emptying Trash only removes archive copies. |
-| How do I search by content? | Press **Get AI models** in Library once (~210 MB, CPU-only, fully local). Then search "sunset" or "dog". |
-| How do I update? | Download the new release and run it over the old one. Library and settings are kept. |
-
----
-
-## 📱 iPhone & iPad
-
-- **Easiest path:** USB cable → unlock → tap **Trust**. No iTunes required.
-- The installer ships Apple's driver on day one (AMDS on Windows, `libimobiledevice` on macOS/Linux) — nothing extra to do.
-- Missed it? Transfera shows an **Install Driver** card on the Dashboard — one click, done.
-- No admin rights? Falls back to its open-source usbipd bridge automatically. Folder backup always works regardless.
-
----
 
 ## 🔧 Troubleshooting
 
@@ -148,44 +115,6 @@ The installer compiles Transfera **on your own machine**. Windows SmartScreen on
 | Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait, press **Index library**, search again. |
 | Antivirus flags a file | Add the Transfera folder to your AV exclusions — freshly compiled helpers sometimes trip heuristics. |
 | Something looks broken | Attach `backend/data/logs/transfera.log` when asking for help. |
-
----
-
-## 🛠️ Developer mode
-
-Need Python 3.12, Node.js 20+, and Git (the installer handles all of this).
-
-```bash
-git clone https://github.com/R1sh1m/Transfera.git
-cd Transfera
-python run.py           # full stack — backend + compiled frontend
-```
-
-| Command | What it does |
-|---|---|
-| `python run.py` | Start everything (recommended) |
-| `python run.py --backend` | API only on `http://127.0.0.1:47821` |
-| `python run.py --frontend` | Tauri dev shell only (adopts a running backend) |
-| `python run.py --tauri` | Backend + Tauri dev shell (WebView2) |
-| `python run.py --skip-deps` | Fast relaunch — skip setup checks |
-
-First launch takes 2–4 minutes (creates `.venv`, installs packages, builds frontend, downloads ExifTool). Later launches skip what's already done. `Ctrl+C` stops everything cleanly.
-
-**Before committing:**
-
-```bash
-# macOS / Linux
-.venv/bin/python -m pytest backend/tests/ -q
-.venv/bin/python -m ruff check backend/
-cd frontend && npm run typecheck
-
-# Windows
-.venv\Scripts\python -m pytest backend/tests/ -q
-.venv\Scripts\python -m ruff check backend/
-cd frontend; npm run typecheck
-```
-
-Keep `frontend/package.json`, `pyproject.toml`, `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/Cargo.toml`, and `winget/Transfera.Transfera.yaml` on the same version — the release workflow enforces `v<that-version>` tags against all five.
 
 ---
 
@@ -201,20 +130,6 @@ Archive ◄──[re-verify + atomic move]── YYYY/MM/DD/filename.jpg
 ```
 
 Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. On-board AI (MobileCLIP, ONNX, CPU-only) ships in the base install — only the model *weights* (~207 MB) download once, when you first press **Get AI models**.
-
-```
-Transfera/
-├── run.py                 ← start here
-├── backend/               ← Python 3.12 · FastAPI · SQLite WAL
-│   ├── api/               ← REST routes, WebSocket, auth
-│   ├── engines/           ← scanner, importer, thumbnailer, CLIP, organizer…
-│   └── tests/             ← pytest suite (isolated, never touches your library)
-├── frontend/              ← Tauri 2 · React 18 · Vite · TypeScript · Tailwind
-├── native/wpd_helper/     ← C++ WPD helper (Windows iPhone/WPD detection)
-└── scripts/
-    ├── install.sh             ← macOS & Linux installer
-    └── Install-Transfera.ps1  ← Windows installer
-```
 
 ---
 
