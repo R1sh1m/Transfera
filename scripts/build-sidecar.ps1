@@ -1,4 +1,4 @@
-# Transfera v2 — build the frozen Python sidecar for the Tauri shell.
+﻿# Transfera v2 — build the frozen Python sidecar for the Tauri shell.
 # Usage (from repo root):  powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1
 #
 # Steps: ensure .venv (Python 3.12) → pip install requirements.txt +

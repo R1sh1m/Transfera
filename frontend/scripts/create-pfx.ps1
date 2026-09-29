@@ -1,4 +1,4 @@
-# Transfera v2 — Local Code Signing Cert Generator
+﻿# Transfera v2 — Local Code Signing Cert Generator
 # Run this script as Administrator to create and trust a self-signed PFX for code signing.
 
 $password = "transfera123"

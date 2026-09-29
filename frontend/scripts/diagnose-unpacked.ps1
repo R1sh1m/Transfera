@@ -1,4 +1,4 @@
-$env:ELECTRON_ENABLE_LOGGING = "1"
+﻿$env:ELECTRON_ENABLE_LOGGING = "1"
 $stdoutLog = "unpacked-stdout.log"
 $stderrLog = "unpacked-stderr.log"
 

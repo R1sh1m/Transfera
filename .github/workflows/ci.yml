@@ -207,16 +207,18 @@ jobs:
         shell: pwsh
         run: |
           $failures = @()
-          Get-ChildItem -Recurse -Filter "*.ps1" -File | ForEach-Object {
-            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
-            # UTF-8 BOM = 0xEF 0xBB 0xBF
-            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
-              $failures += $_.FullName
-              Write-Host "::error file=$($_.FullName)::Missing UTF-8 BOM — PS5.1 will corrupt Unicode characters (em-dash, emoji, box-drawing). Re-save as UTF-8 with BOM."
-            } else {
-              Write-Host "OK (BOM present): $($_.FullName)"
+          Get-ChildItem -Recurse -Filter "*.ps1" -File |
+            Where-Object { $_.FullName -notmatch '\\node_modules\\' -and $_.FullName -notmatch '\\.venv\\' } |
+            ForEach-Object {
+              $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+              # UTF-8 BOM = 0xEF 0xBB 0xBF
+              if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+                $failures += $_.FullName
+                Write-Host "::error file=$($_.FullName)::Missing UTF-8 BOM — PS5.1 will corrupt Unicode characters (em-dash, emoji, box-drawing). Re-save as UTF-8 with BOM."
+              } else {
+                Write-Host "OK (BOM present): $($_.FullName)"
+              }
             }
-          }
           if ($failures.Count -gt 0) { exit 1 }
 
       - name: Check PS1 files — syntax parse
@@ -224,20 +226,22 @@ jobs:
         shell: pwsh
         run: |
           $anyFail = $false
-          Get-ChildItem -Recurse -Filter "*.ps1" -File | ForEach-Object {
-            $errors = $null; $tokens = $null
-            $null = [System.Management.Automation.Language.Parser]::ParseFile(
-              $_.FullName, [ref]$tokens, [ref]$errors
-            )
-            if ($errors.Count -gt 0) {
-              $anyFail = $true
-              foreach ($e in $errors) {
-                Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+          Get-ChildItem -Recurse -Filter "*.ps1" -File |
+            Where-Object { $_.FullName -notmatch '\\node_modules\\' -and $_.FullName -notmatch '\\.venv\\' } |
+            ForEach-Object {
+              $errors = $null; $tokens = $null
+              $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref]$tokens, [ref]$errors
+              )
+              if ($errors.Count -gt 0) {
+                $anyFail = $true
+                foreach ($e in $errors) {
+                  Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+                }
+              } else {
+                Write-Host "OK (parse): $($_.FullName)"
               }
-            } else {
-              Write-Host "OK (parse): $($_.FullName)"
             }
-          }
           if ($anyFail) { exit 1 }
 
       # ── Bash shard: CRLF guard + shellcheck ──────────────────────────────

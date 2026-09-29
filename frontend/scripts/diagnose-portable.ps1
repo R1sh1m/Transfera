@@ -1,4 +1,4 @@
-$env:ELECTRON_ENABLE_LOGGING = "1"
+﻿$env:ELECTRON_ENABLE_LOGGING = "1"
 $stdoutLog = "portable-stdout.log"
 $stderrLog = "portable-stderr.log"
 

@@ -1,4 +1,4 @@
-# Transfera v2 — Release Code Signing Certificate Generator
+﻿# Transfera v2 — Release Code Signing Certificate Generator
 # Run this script in PowerShell as Administrator to generate a self-signed release certificate.
 # This produces both a .pfx (for signing the build) and a .cer (to distribute to users so they can trust it).
 
