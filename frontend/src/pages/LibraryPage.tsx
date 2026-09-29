@@ -52,7 +52,21 @@ import { useTransferStore } from "@/store/transfer";
 import { cn } from "@/lib/utils";
 import { fetchThumbnail } from "@/lib/thumbnail-fetch";
 import { createThumbQueue } from "@/lib/thumb-queue";
-import type { MediaItemInfo, HopStatus } from "@/types/api";
+import type {
+  MediaItemInfo,
+  HopStatus,
+  DocumentMigratePreview,
+} from "@/types/api";
+
+// Documents kind buckets — mirrors DOCUMENT_KINDS in backend/config.py.
+const DOCUMENT_KINDS = [
+  "PDFs",
+  "Spreadsheets",
+  "Presentations",
+  "Word-Docs",
+  "Text-CSV",
+  "eBooks",
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -526,7 +540,14 @@ class MediaGridBoundary extends Component<
 export default function LibraryPage() {
   const [search, setSearch] = useState("");
   const [extension, setExtension] = useState("");
+  const [docKind, setDocKind] = useState("");
   const [finalStatus, setFinalStatus] = useState("completed");
+  const [migratePreview, setMigratePreview] =
+    useState<DocumentMigratePreview | null>(null);
+  const [migrateLoading, setMigrateLoading] = useState(false);
+  const [migrateRunning, setMigrateRunning] = useState(false);
+  const [migrateDismissed, setMigrateDismissed] = useState(false);
+  const [migrateResult, setMigrateResult] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"masonry" | "list" | "history">(
     "masonry",
   );
@@ -588,10 +609,60 @@ export default function LibraryPage() {
     pageSize: 50,
     sessionId: sessionFilter,
     extension: extension || undefined,
+    docKind: docKind || undefined,
     finalStatus: finalStatus || undefined,
     search: search || undefined,
     favorite: favoritesOnly ? true : undefined,
   });
+
+  const fetchMigratePreview = useCallback(async () => {
+    setMigrateLoading(true);
+    try {
+      const res = await apiClient.get<DocumentMigratePreview>(
+        "/library/migrate-documents/preview",
+      );
+      setMigratePreview(res.data);
+    } catch {
+      setMigratePreview(null);
+    } finally {
+      setMigrateLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (section === "vault" && !migrateDismissed && migratePreview === null) {
+      fetchMigratePreview();
+    }
+  }, [section, migrateDismissed, migratePreview, fetchMigratePreview]);
+
+  const handleMigrateDocuments = useCallback(async () => {
+    setMigrateRunning(true);
+    setMigrateResult(null);
+    try {
+      const res = await apiClient.post(
+        "/library/migrate-documents/execute",
+        {},
+      );
+      const result = res.data as {
+        moved?: number;
+        skipped?: number;
+        failed?: number;
+        message?: string;
+      };
+      setMigrateResult(
+        result.message ??
+          `Moved ${result.moved ?? 0} document(s) into Documents/`,
+      );
+      setMigratePreview(null);
+      queryClient.invalidateQueries({ queryKey: ["media"] });
+    } catch (e) {
+      setMigrateResult(
+        e instanceof Error ? e.message : "Migration failed — try again.",
+      );
+    } finally {
+      setMigrateRunning(false);
+    }
+  }, [queryClient]);
 
   const trashQuery = useTrash(1);
   const semanticActive = semanticQuery.trim().length > 1;
@@ -618,6 +689,7 @@ export default function LibraryPage() {
   }, [
     search,
     extension,
+    docKind,
     finalStatus,
     sessionFilter,
     favoritesOnly,
@@ -845,6 +917,63 @@ export default function LibraryPage() {
         <SemanticSearchBar onResults={(q) => setSemanticQuery(q)} />
       )}
 
+      {/* Documents migration card — manual move from the legacy unified
+          tree into Documents/<Kind>/ date folders */}
+      {section === "vault" && !migrateDismissed && (
+        <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
+          <div className="shrink-0 w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+            <FileText className="w-4 h-4 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-foreground">
+              Documents now file separately
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {migrateLoading
+                ? "Checking for documents in the old shared folders…"
+                : migratePreview && migratePreview.total > 0
+                  ? `${migratePreview.total} document(s) are still in the shared date folders. Move them into Documents/<Kind>/ date folders.`
+                  : "New documents land in Documents/<Kind>/ date folders. Nothing left to move."}
+            </p>
+            {migrateResult && (
+              <p className="text-xs text-muted-foreground mt-1">
+                {migrateResult}
+              </p>
+            )}
+            <div className="flex items-center gap-2 mt-2">
+              {migratePreview && migratePreview.total > 0 ? (
+                <button
+                  type="button"
+                  onClick={handleMigrateDocuments}
+                  disabled={migrateRunning}
+                  className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {migrateRunning
+                    ? "Moving…"
+                    : `Move ${migratePreview.total} into Documents/`}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={fetchMigratePreview}
+                  disabled={migrateLoading}
+                  className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
+                >
+                  {migrateLoading ? "Checking…" : "Check again"}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setMigrateDismissed(true)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="flex items-center gap-3">
         <div className="flex-1 relative">
@@ -867,6 +996,20 @@ export default function LibraryPage() {
           {allExtensions.map((ext) => (
             <option key={ext} value={ext}>
               {ext}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={docKind}
+          onChange={(e) => setDocKind(e.target.value)}
+          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+          title="Filter documents by kind folder (Documents/<Kind>/)"
+        >
+          <option value="">All doc kinds</option>
+          {DOCUMENT_KINDS.map((kind) => (
+            <option key={kind} value={kind}>
+              {kind}
             </option>
           ))}
         </select>

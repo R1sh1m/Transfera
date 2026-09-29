@@ -2430,6 +2430,14 @@ export default function DeviceSetupPage() {
                 ? `${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, "0")}/IMG_0001.jpg`
                 : `${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, "0")}/${String(new Date().getDate()).padStart(2, "0")}/IMG_0001.jpg`}
           </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Documents:{" "}
+            {folderLayout === "flat"
+              ? "Documents/PDFs/Report.pdf"
+              : folderLayout === "year/month"
+                ? `Documents/PDFs/${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, "0")}/Report.pdf`
+                : `Documents/PDFs/${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, "0")}/${String(new Date().getDate()).padStart(2, "0")}/Report.pdf`}
+          </div>
         </div>
 
         {isSamePath && (

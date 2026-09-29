@@ -309,12 +309,18 @@ async def _recover_archived_batch(
 
             # Clean up any .partial siblings for base + located file
             try:
-                from backend.engines.organizer import build_folder, derive_timestamp
+                from backend.engines.organizer import build_folder, build_folder_for_item, derive_timestamp
 
                 dt = derive_timestamp(item)
-                folder = build_folder(dest_root, dt, folder_layout)
+                folder = build_folder_for_item(dest_root, item, dt, folder_layout)
                 base = folder / item.file_name
                 base.with_suffix(base.suffix + PARTIAL_SUFFIX).unlink(missing_ok=True)
+                # Documents: also sweep the legacy unified-tree slot so
+                # pre-split partials never block re-import.
+                legacy_folder = build_folder(dest_root, dt, folder_layout)
+                if legacy_folder != folder:
+                    legacy_base = legacy_folder / item.file_name
+                    legacy_base.with_suffix(legacy_base.suffix + PARTIAL_SUFFIX).unlink(missing_ok=True)
             except OSError:
                 pass
             if existing is not None:

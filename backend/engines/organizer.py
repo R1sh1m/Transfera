@@ -3,6 +3,10 @@ Transfera v2 — File Organizer
 Resolves hierarchical destination paths (Year/Month/Day) with conflict
 resolution via numerical suffixes.  Live Photo pairs are placed in the
 same folder using the image component's timestamp.
+
+Documents live under a sibling tree — ``<dest_root>/Documents/<Kind>/`` —
+with the same date-wise skeleton below it. Photos/video/audio are
+unchanged directly under ``<dest_root>/``.
 """
 
 from __future__ import annotations
@@ -11,6 +15,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from backend.config import (
+    DOCUMENT_EXTENSIONS,
+    DOCUMENTS_DIR_NAME,
+    document_kind_for_extension,
+)
 from backend.database.models import MediaItem
 
 logger = logging.getLogger(__name__)
@@ -75,6 +84,51 @@ def parse_month_folder(name: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Document helpers
+# ---------------------------------------------------------------------------
+def _item_extension(item: MediaItem) -> str:
+    """Best-effort lowercase extension for *item* (column first, filename fallback)."""
+    ext = (item.extension or "").lower()
+    if ext:
+        return ext
+    try:
+        return Path(item.file_name).suffix.lower()
+    except Exception:
+        return ""
+
+
+def is_document_item(item: MediaItem) -> bool:
+    """Return True when *item* is a document (separate Documents tree)."""
+    return _item_extension(item) in DOCUMENT_EXTENSIONS
+
+
+def document_kind_for_item(item: MediaItem) -> str | None:
+    """Kind bucket (``PDFs``, ``Spreadsheets``, ...) for documents, else None."""
+    if not is_document_item(item):
+        return None
+    return document_kind_for_extension(_item_extension(item))
+
+
+def build_folder_for_item(
+    dest_root: Path,
+    item: MediaItem,
+    dt: datetime | None,
+    layout: str,
+) -> Path:
+    """Document-aware folder builder — Documents/<Kind>/ prefix for docs."""
+    return build_folder(dest_root, dt, layout, doc_kind=document_kind_for_item(item))
+
+
+def is_under_documents(path: Path, dest_root: Path) -> bool:
+    """Return True when *path* already lives inside the Documents tree."""
+    try:
+        path.relative_to(dest_root / DOCUMENTS_DIR_NAME)
+        return True
+    except ValueError:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 def resolve_archive_path(
@@ -106,7 +160,7 @@ def resolve_archive_path(
     dt = derive_timestamp(item)
     safe_name = sanitize_filename(item.file_name)
 
-    folder = build_folder(dest_root, dt, layout)
+    folder = build_folder_for_item(dest_root, item, dt, layout)
     base = folder / safe_name
 
     # Conflict resolution — never overwrite
@@ -134,7 +188,8 @@ def locate_archive_file(
 
     dt = derive_timestamp(item)
     safe_name = sanitize_filename(item.file_name)
-    folder = build_folder(dest_root, dt, layout)
+    doc_kind = document_kind_for_item(item)
+    folder = build_folder(dest_root, dt, layout, doc_kind=doc_kind)
     base = folder / safe_name
 
     def _matches(p: Path) -> bool:
@@ -152,23 +207,37 @@ def locate_archive_file(
         except OSError:
             return False
 
-    # 1. Check if the base path is the correct file
-    if _matches(base):
-        return base
+    def _search(base_path: Path) -> Path | None:
+        if _matches(base_path):
+            return base_path
+        stem = base_path.stem
+        suffix = base_path.suffix
+        parent = base_path.parent
+        for i in range(1, _MAX_SUFFIX + 1):
+            candidate = parent / f"{stem}_{i:03d}{suffix}"
+            if candidate.is_file():
+                if _matches(candidate):
+                    return candidate
+            else:
+                # Break early as organizer._safe_path allocates suffixes sequentially.
+                break
+        return None
 
-    # 2. Check conflict-resolution sequential suffixes (stem_001, stem_002, etc.)
-    stem = base.stem
-    suffix = base.suffix
-    parent = base.parent
+    # 1. New-tree location (Documents/<Kind>/... for documents)
+    found = _search(base)
+    if found is not None:
+        return found
 
-    for i in range(1, _MAX_SUFFIX + 1):
-        candidate = parent / f"{stem}_{i:03d}{suffix}"
-        if candidate.is_file():
-            if _matches(candidate):
-                return candidate
-        else:
-            # Break early as organizer._safe_path allocates suffixes sequentially.
-            break
+    # 2. Legacy fallback: documents imported before the split live in the
+    # unified media tree. Probe it so old rows stay resolvable during and
+    # after the manual migration.
+    if doc_kind is not None:
+        legacy_folder = build_folder(dest_root, dt, layout)
+        legacy_base = legacy_folder / safe_name
+        found = _search(legacy_base)
+        if found is not None:
+            logger.debug("Located legacy-tree document %s at %s", item.file_name, found)
+            return found
 
     return None
 
@@ -195,13 +264,21 @@ def build_folder(
     dest_root: Path,
     dt: datetime | None,
     layout: str,
+    *,
+    doc_kind: str | None = None,
 ) -> Path:
-    """Build the sub-folder hierarchy based on the chosen layout."""
+    """Build the sub-folder hierarchy based on the chosen layout.
+
+    When *doc_kind* is set, the hierarchy is rooted at
+    ``<dest_root>/Documents/<Kind>/``; otherwise directly at *dest_root*.
+    """
+    base = dest_root / DOCUMENTS_DIR_NAME / doc_kind if doc_kind else dest_root
+
     if layout.lower() == "flat":
-        return dest_root
+        return base
 
     if dt is None:
-        return dest_root / "_unsorted"
+        return base / "_unsorted"
 
     parts = layout.lower().split("/")
     segments: list[str] = []
@@ -215,9 +292,9 @@ def build_folder(
             segments.append(f"{dt.day:02d}")
 
     if not segments:
-        return dest_root / "_unsorted"
+        return base / "_unsorted"
 
-    return dest_root / Path(*segments)
+    return base / Path(*segments)
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +362,7 @@ def claim_archive_path(
 
     dt = derive_timestamp(item)
     safe_name = sanitize_filename(item.file_name)
-    folder = build_folder(dest_root, dt, layout)
+    folder = build_folder_for_item(dest_root, item, dt, layout)
     folder.mkdir(parents=True, exist_ok=True)
     base = folder / safe_name
 

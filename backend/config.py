@@ -215,6 +215,56 @@ DOCUMENT_EXTENSIONS: frozenset[str] = frozenset(
 ALL_MEDIA_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS | DOCUMENT_EXTENSIONS
 
 # ---------------------------------------------------------------------------
+# Documents archive layout (date-wise skeleton under a sibling folder)
+# ---------------------------------------------------------------------------
+# Documents land under ``<dest_root>/Documents/<Kind>/YYYY/09-September/DD/``
+# while photos/video/audio stay directly under ``<dest_root>/YYYY/...``.
+# Kind buckets are a frozen extension map — deterministic, offline, no AI.
+DOCUMENTS_DIR_NAME: str = "Documents"
+
+DOCUMENT_KIND_MAP: dict[str, str] = {
+    ".pdf": "PDFs",
+    ".doc": "Word-Docs",
+    ".docx": "Word-Docs",
+    ".rtf": "Word-Docs",
+    ".odt": "Word-Docs",
+    ".xls": "Spreadsheets",
+    ".xlsx": "Spreadsheets",
+    ".ods": "Spreadsheets",
+    ".csv": "Spreadsheets",
+    ".ppt": "Presentations",
+    ".pptx": "Presentations",
+    ".odp": "Presentations",
+    ".txt": "Text-CSV",
+    ".epub": "eBooks",
+    ".mobi": "eBooks",
+}
+
+DOCUMENT_KINDS: frozenset[str] = frozenset(sorted(set(DOCUMENT_KIND_MAP.values())))
+
+DOCUMENT_KIND_FALLBACK: str = "Others"
+
+
+def is_document_extension(ext: str | None) -> bool:
+    """Return True when *ext* (e.g. ``".pdf"``) is a known document extension."""
+    if not ext:
+        return False
+    return ext.lower() in DOCUMENT_EXTENSIONS
+
+
+def document_kind_for_extension(ext: str | None) -> str:
+    """Map a file extension to its Documents kind bucket (fallback: ``Others``)."""
+    if not ext:
+        return DOCUMENT_KIND_FALLBACK
+    return DOCUMENT_KIND_MAP.get(ext.lower(), DOCUMENT_KIND_FALLBACK)
+
+
+def document_kind_extensions(kind: str) -> frozenset[str]:
+    """Return all extensions belonging to a kind bucket (empty set if unknown)."""
+    return frozenset(ext for ext, k in DOCUMENT_KIND_MAP.items() if k == kind)
+
+
+# ---------------------------------------------------------------------------
 # Local secret token (destructive endpoint protection)
 # ---------------------------------------------------------------------------
 _TOKEN_FILE: Path = DATA_DIR / "local_secret.json"

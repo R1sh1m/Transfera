@@ -450,6 +450,7 @@ export function useMediaList(params: {
   hop2Status?: string;
   finalStatus?: string;
   extension?: string;
+  docKind?: string;
   search?: string;
   favorite?: boolean;
   trashed?: boolean;

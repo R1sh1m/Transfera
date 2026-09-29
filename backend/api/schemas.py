@@ -74,6 +74,8 @@ class ConfigResponse(BaseModel):
     video_extensions: list[str]
     audio_extensions: list[str]
     document_extensions: list[str]
+    documents_dir: str = "Documents"
+    document_kinds: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +565,40 @@ class PathValidateResponse(BaseModel):
     exists: bool
     is_dir: bool
     readable: bool
+
+
+# ---------------------------------------------------------------------------
+# Document migration (unified tree -> Documents/<Kind>/ date tree)
+# ---------------------------------------------------------------------------
+class DocumentMigrateMove(BaseModel):
+    item_id: int
+    file_name: str
+    file_size: int
+    kind: str
+    src_path: str
+    dest_path: str
+
+
+class DocumentMigratePreviewResponse(BaseModel):
+    total: int = 0
+    total_bytes: int = 0
+    truncated: bool = False
+    moves: list[DocumentMigrateMove] = []
+
+
+class DocumentMigrateExecuteRequest(BaseModel):
+    item_ids: list[int] | None = Field(
+        None,
+        description="Subset of item IDs to move. If omitted, moves all preview candidates.",
+    )
+
+
+class DocumentMigrateExecuteResponse(BaseModel):
+    moved: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[str] = []
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------

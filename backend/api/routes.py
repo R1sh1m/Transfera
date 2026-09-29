@@ -40,6 +40,10 @@ from backend.api.schemas import (
     DirSizeResponse,
     DiskSpaceRequest,
     DiskSpaceResponse,
+    DocumentMigrateExecuteRequest,
+    DocumentMigrateExecuteResponse,
+    DocumentMigrateMove,
+    DocumentMigratePreviewResponse,
     DuplicateCheckRequest,
     DuplicateEntrySchema,
     DuplicateReportResponse,
@@ -87,12 +91,15 @@ from backend.config import (
     CACHE_DIR,
     DB_DIR,
     DOCUMENT_EXTENSIONS,
+    DOCUMENT_KINDS,
+    DOCUMENTS_DIR_NAME,
     HOST,
     IMAGE_EXTENSIONS,
     LOCAL_SECRET_TOKEN,
     MAX_RETRY,
     PORT,
     VIDEO_EXTENSIONS,
+    document_kind_extensions,
 )
 from backend.database.manager import (
     session_scope,
@@ -302,6 +309,8 @@ async def get_config() -> ConfigResponse:
         video_extensions=sorted(VIDEO_EXTENSIONS),
         audio_extensions=sorted(AUDIO_EXTENSIONS),
         document_extensions=sorted(DOCUMENT_EXTENSIONS),
+        documents_dir=DOCUMENTS_DIR_NAME,
+        document_kinds=sorted(DOCUMENT_KINDS),
     )
 
 
@@ -1319,11 +1328,19 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
                             if archive_session and archive_session.dest_root:
                                 try:
                                     from backend.engines.importer import verify_file_hash
-                                    from backend.engines.organizer import build_folder, derive_timestamp
+                                    from backend.engines.organizer import (
+                                        build_folder_for_item,
+                                        derive_timestamp,
+                                    )
 
                                     dest_root_path = Path(archive_session.dest_root)
                                     dt = derive_timestamp(archive_item)
-                                    folder = build_folder(dest_root_path, dt, archive_session.folder_layout)
+                                    folder = build_folder_for_item(
+                                        dest_root_path,
+                                        archive_item,
+                                        dt,
+                                        archive_session.folder_layout,
+                                    )
 
                                     base_name = archive_item.file_name
                                     p = Path(base_name)
@@ -2051,6 +2068,7 @@ async def list_media(
     hop2_status: str | None = Query(None),
     final_status: str | None = Query(None),
     extension: str | None = Query(None),
+    doc_kind: str | None = Query(None, description="Documents kind bucket (PDFs, Spreadsheets, ...)"),
     search: str | None = Query(None),
     favorite: bool | None = Query(None),
     trashed: bool | None = Query(None),
@@ -2077,6 +2095,11 @@ async def list_media(
             filters.append(MediaItem.final_status == final_status)
         if extension is not None:
             filters.append(MediaItem.extension == extension.lower())
+        if doc_kind is not None:
+            kind_exts = document_kind_extensions(doc_kind)
+            if not kind_exts:
+                raise HTTPException(status_code=400, detail=f"Unknown document kind: {doc_kind}")
+            filters.append(MediaItem.extension.in_(sorted(kind_exts)))
         if search:
             # Escape LIKE wildcards so user input can't inject %/_ patterns
             escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -2542,6 +2565,214 @@ async def clear_library(_: None = Depends(require_local_token)) -> ClearResponse
         media_items_cleared=media_count,
         thumbnails_removed=0,
         cache_files_removed=cache_files_removed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Document migration (unified tree -> Documents/<Kind>/ date tree)
+# ---------------------------------------------------------------------------
+_MIGRATE_PREVIEW_LIMIT = 5000
+
+
+async def _collect_document_moves(
+    session,
+    *,
+    item_ids: set[int] | None = None,
+    limit: int = _MIGRATE_PREVIEW_LIMIT,
+) -> tuple[list[DocumentMigrateMove], bool]:
+    """Find completed documents still sitting in the legacy unified tree.
+
+    Returns (moves, truncated). Each move pairs the currently located file
+    with its new-tree destination (conflict-resolved, non-existing).
+    """
+    from backend.engines.organizer import (
+        document_kind_for_item,
+        is_document_item,
+        is_under_documents,
+        locate_archive_file,
+        resolve_archive_path,
+    )
+
+    result = await session.execute(
+        select(MediaItem)
+        .options(joinedload(MediaItem.session))
+        .where(MediaItem.final_status == HopStatus.COMPLETED.value)
+        .where(MediaItem.trashed == False)  # noqa: E712
+    )
+    items = list(result.unique().scalars().all())
+
+    moves: list[DocumentMigrateMove] = []
+    truncated = False
+    for item in items:
+        if item_ids is not None and item.id not in item_ids:
+            continue
+        try:
+            if not is_document_item(item):
+                continue
+        except Exception:
+            continue
+        ts = item.session
+        if ts is None and item.session_id is not None:
+            ts = await session.get(TransferSession, item.session_id)
+        if ts is None or not ts.dest_root:
+            continue
+        dest_root = Path(ts.dest_root)
+        layout = getattr(ts, "folder_layout", "year/month") or "year/month"
+        try:
+            current = locate_archive_file(dest_root, item, layout=layout)
+        except Exception:
+            continue
+        if current is None:
+            continue
+        try:
+            if is_under_documents(current, dest_root):
+                continue  # already migrated
+        except Exception:
+            continue
+        try:
+            target = resolve_archive_path(dest_root, item, layout=layout)
+        except Exception:
+            continue
+        if len(moves) >= limit:
+            truncated = True
+            break
+        moves.append(
+            DocumentMigrateMove(
+                item_id=item.id,
+                file_name=item.file_name,
+                file_size=item.file_size,
+                kind=document_kind_for_item(item) or "Others",
+                src_path=str(current),
+                dest_path=str(target),
+            )
+        )
+    moves.sort(key=lambda m: m.item_id)
+    return moves, truncated
+
+
+@router.get("/library/migrate-documents/preview", response_model=DocumentMigratePreviewResponse)
+async def preview_document_migration(_: None = Depends(require_local_token)) -> DocumentMigratePreviewResponse:
+    """Dry-run: list completed documents still in the legacy unified media tree."""
+    async with session_scope() as session:
+        moves, truncated = await _collect_document_moves(session)
+    total_bytes = sum(m.file_size for m in moves)
+    return DocumentMigratePreviewResponse(
+        total=len(moves),
+        total_bytes=total_bytes,
+        truncated=truncated,
+        moves=moves,
+    )
+
+
+@router.post("/library/migrate-documents/execute", response_model=DocumentMigrateExecuteResponse)
+async def execute_document_migration(
+    req: DocumentMigrateExecuteRequest | None = None,
+    _: None = Depends(require_local_token),
+) -> DocumentMigrateExecuteResponse:
+    """Move legacy-tree documents into ``Documents/<Kind>/`` date folders.
+
+    Idempotent and interrupt-safe: each file is size-verified before and
+    after the atomic move; already-migrated files are skipped; failures
+    leave the source in place and are reported per item.
+    """
+    from backend.engines.organizer import locate_archive_file
+    from backend.utils.durability import fsync_dir, fsync_file
+    from backend.utils.hashing import verify_hash as _verify_hash_fn
+
+    wanted: set[int] | None = set(req.item_ids) if req and req.item_ids else None
+
+    moved = 0
+    skipped = 0
+    failed = 0
+    errors: list[str] = []
+
+    async with session_scope() as session:
+        moves, _ = await _collect_document_moves(session, item_ids=wanted)
+        if wanted is not None:
+            # IDs that produced no move are already migrated or unlocatable.
+            wanted_ids = {m.item_id for m in moves}
+            skipped += len(wanted) - len(wanted_ids)
+        for move in moves:
+            item = await session.get(MediaItem, move.item_id)
+            if item is None:
+                skipped += 1
+                continue
+            src = Path(move.src_path)
+            dst = Path(move.dest_path)
+            try:
+                if not src.is_file():
+                    # Re-locate: file may have shifted since preview.
+                    ts = item.session
+                    if ts is None and item.session_id is not None:
+                        ts = await session.get(TransferSession, item.session_id)
+                    if ts is None or not ts.dest_root:
+                        skipped += 1
+                        continue
+                    current = locate_archive_file(
+                        Path(ts.dest_root),
+                        item,
+                        layout=getattr(ts, "folder_layout", "year/month") or "year/month",
+                    )
+                    if current is None:
+                        skipped += 1
+                        continue
+                    src = current
+                if src.stat().st_size != item.file_size:
+                    failed += 1
+                    errors.append(f"Item {item.id}: size mismatch, left in place")
+                    continue
+                if dst.exists():
+                    # Target claimed since preview — resolve a fresh free slot.
+                    from backend.engines.organizer import resolve_archive_path
+
+                    ts = item.session
+                    if ts is None and item.session_id is not None:
+                        ts = await session.get(TransferSession, item.session_id)
+                    if ts is None or not ts.dest_root:
+                        failed += 1
+                        errors.append(f"Item {item.id}: session missing")
+                        continue
+                    dst = resolve_archive_path(
+                        Path(ts.dest_root),
+                        item,
+                        layout=getattr(ts, "folder_layout", "year/month") or "year/month",
+                    )
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(src, dst)
+                try:
+                    fsync_file(dst)
+                    fsync_dir(dst.parent)
+                except Exception:
+                    pass
+                if not dst.is_file() or dst.stat().st_size != item.file_size:
+                    failed += 1
+                    errors.append(f"Item {item.id}: post-move verification failed")
+                    continue
+                if item.source_hash:
+                    try:
+                        if not _verify_hash_fn(dst, item.source_hash):
+                            failed += 1
+                            errors.append(f"Item {item.id}: post-move hash mismatch")
+                            continue
+                    except OSError as exc:
+                        failed += 1
+                        errors.append(f"Item {item.id}: hash read failed ({exc})")
+                        continue
+                item.touch()
+                moved += 1
+            except OSError as exc:
+                failed += 1
+                errors.append(f"Item {item.id}: {exc}")
+                continue
+        await session.commit()
+
+    logger.info("Document migration: %d moved, %d skipped, %d failed", moved, skipped, failed)
+    return DocumentMigrateExecuteResponse(
+        moved=moved,
+        skipped=skipped,
+        failed=failed,
+        errors=errors[:50],
+        message=f"Moved {moved} document(s) into Documents/, {skipped} skipped, {failed} failed",
     )
 
 

@@ -51,6 +51,33 @@ export interface ConfigResponse {
   video_extensions: string[];
   audio_extensions: string[];
   document_extensions: string[];
+  documents_dir?: string;
+  document_kinds?: string[];
+}
+
+// --- Document migration (unified tree -> Documents/<Kind>/ date tree) -----
+export interface DocumentMigrateMove {
+  item_id: number;
+  file_name: string;
+  file_size: number;
+  kind: string;
+  src_path: string;
+  dest_path: string;
+}
+
+export interface DocumentMigratePreview {
+  total: number;
+  total_bytes: number;
+  truncated: boolean;
+  moves: DocumentMigrateMove[];
+}
+
+export interface DocumentMigrateResult {
+  moved: number;
+  skipped: number;
+  failed: number;
+  errors: string[];
+  message: string;
 }
 
 // --- Scan -----------------------------------------------------------------
