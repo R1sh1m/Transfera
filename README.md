@@ -39,10 +39,7 @@ Transfera is a simple utility to transfer files and photos from your phone, came
 
 ---
 
-## 🚀 Install
-
-> **Clone once and run the script** 
-> Installs dependencies, drivers, builds the app.
+## 🚀 Installation
 
 ### Step 1 — Clone
 
