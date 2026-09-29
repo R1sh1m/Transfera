@@ -1,12 +1,17 @@
 <div align="center">
 
-```
-_/\\\\\___/\\\\______/\\\\_____/\\\_//\\___/\\\\\____/\\\\\____/\\\\\____/\\\\______/\\\\____
- _\///\\\__\/\\\//\\_/\\\//\\___\/\\\\/\\\__\/\\\///__\/\\\///__\/\\\///__\/\\\//\\_/\\\//\\__
-  ___\/\\\__\/\\\\\\/_\/\\\\\\\__\/\\\/\/\\\__\///\\\\_\/\\\\\___\/\\\\\___\/\\\\\\/_\/\\\\\\\_
-   ___\/\\\__\/\\\//\\_\/\\\//\\__\/\\\//\\\____\//\\\\_\/\\\///__\/\\\///__\/\\\//\\_\/\\\//\\_
-    ___\/\\\__\/\\\/\/__\/\\\_\/\\_\/\\\_\/\\\_/\\\\\\/__\/\\\_____\/\\\\\\\_\/\\\/\/__\/\\\_\/\\
-     ____\///__\///__\/__\///__\///_\///__\///__\///////__\///______\////////_\///__\/__\///__\///
+```text
+█████████████████████████████████████████████████████████████████████████████████████████████
+█        ██       ██████  █████  ███████  ███      ███        ██        ██       ██████  ████
+████  █████  ████  ████    ████   ██████  ██  ████  ██  ████████  ████████  ████  ████    ███
+████  █████  ████  ███  ██  ███    █████  ██  ████  ██  ████████  ████████  ████  ███  ██  ██
+████  █████  ███   ██  ████  ██  ██  ███  ███  ███████  ████████  ████████  ███   ██  ████  █
+████  █████      ████  ████  ██  ███  ██  █████  █████      ████      ████      ████  ████  █
+████  █████  ████  ██        ██  ████  █  ███████  ███  ████████  ████████  ████  ██        █
+████  █████  ████  ██  ████  ██  █████    ██  ████  ██  ████████  ████████  ████  ██  ████  █
+████  █████  ████  ██  ████  ██  ██████   ██  ████  ██  ████████  ████████  ████  ██  ████  █
+████  █████  ████  ██  ████  ██  ███████  ███      ███  ████████        ██  ████  ██  ████  █
+█████████████████████████████████████████████████████████████████████████████████████████████
 ```
 
 **Backup and Move files and photos easily.**
@@ -36,7 +41,8 @@ Transfera is a simple utility to transfer files and photos from your phone, came
 
 ## 🚀 Install
 
-> **Clone once and run the script** It installs dependencies, drivers, builds the app.
+> **Clone once and run the script** 
+> Installs dependencies, drivers, builds the app.
 
 ### Step 1 — Clone
 
@@ -65,11 +71,10 @@ Detects macOS or Linux, installs system deps via Homebrew / apt / dnf / pacman, 
 <td>
 
 ```powershell
-powershell -ExecutionPolicy Bypass `
-  -File scripts\Install-Transfera.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\Install-Transfera.ps1
 ```
 
-Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer.
+Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer. (Make sure you ran `cd Transfera` first).
 
 </td>
 </tr>

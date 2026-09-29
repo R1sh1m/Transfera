@@ -90,12 +90,17 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
 # ── ASCII banner ──────────────────────────────────────────────────────────────
 cls 2>$null
 Write-Host ""
-Write-Host "_/\\\\\___/\\\\______/\\\\_____/\\\_//\\___/\\\\\____/\\\\\____/\\\\\____/\\\\______/\\\\____" -ForegroundColor Cyan
-Write-Host " _\///\\\__\/\\\//\\_/\\\//\\___\/\\\\/\\\__\/\\\///__\/\\\///__\/\\\///__\/\\\//\\_/\\\//\\__" -ForegroundColor Cyan
-Write-Host "  ___\/\\\__\/\\\\\\/_\/\\\\\\\__\/\\\/\/\\\__\///\\\\_\/\\\\\___\/\\\\\___\/\\\\\\/_\/\\\\\\\_" -ForegroundColor Cyan
-Write-Host "   ___\/\\\__\/\\\//\\_\/\\\//\\__\/\\\//\\\____\//\\\\_\/\\\///__\/\\\///__\/\\\//\\_\/\\\//\\_" -ForegroundColor Cyan
-Write-Host "    ___\/\\\__\/\\\/\/__\/\\\_\/\\_\/\\\_\/\\\_/\\\\\\/__\/\\\_____\/\\\\\\\_\/\\\/\/__\/\\\_\/\\" -ForegroundColor Cyan
-Write-Host "     ____\///__\///__\/__\///__\///_\///__\///__\///////__\///______\////////_\///__\/__\///__\///" -ForegroundColor Cyan
+Write-Host "█████████████████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Cyan
+Write-Host "█        ██       ██████  █████  ███████  ███      ███        ██        ██       ██████  ████" -ForegroundColor Cyan
+Write-Host "████  █████  ████  ████    ████   ██████  ██  ████  ██  ████████  ████████  ████  ████    ███" -ForegroundColor Cyan
+Write-Host "████  █████  ████  ███  ██  ███    █████  ██  ████  ██  ████████  ████████  ████  ███  ██  ██" -ForegroundColor Cyan
+Write-Host "████  █████  ███   ██  ████  ██  ██  ███  ███  ███████  ████████  ████████  ███   ██  ████  █" -ForegroundColor Cyan
+Write-Host "████  █████      ████  ████  ██  ███  ██  █████  █████      ████      ████      ████  ████  █" -ForegroundColor Cyan
+Write-Host "████  █████  ████  ██        ██  ████  █  ███████  ███  ████████  ████████  ████  ██        █" -ForegroundColor Cyan
+Write-Host "████  █████  ████  ██  ████  ██  █████    ██  ████  ██  ████████  ████████  ████  ██  ████  █" -ForegroundColor Cyan
+Write-Host "████  █████  ████  ██  ████  ██  ██████   ██  ████  ██  ████████  ████████  ████  ██  ████  █" -ForegroundColor Cyan
+Write-Host "████  █████  ████  ██  ████  ██  ███████  ███      ███  ████████        ██  ████  ██  ████  █" -ForegroundColor Cyan
+Write-Host "█████████████████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Your photos & videos. Your machine. Your rules." -ForegroundColor White
 Write-Host "  Windows installer — building everything locally from source" -ForegroundColor DarkCyan
@@ -159,7 +164,12 @@ if ($SkipNative) {
 
 # ---------------------------------------------------------------------------
 StepBox "📥" "5/9" "Getting Transfera source"
-# ---------------------------------------------------------------------------
+if ($RepoDir -eq "" -and $PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "..\run.py"))) {
+  $RepoDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+} elseif ($RepoDir -eq "" -and (Test-Path "run.py")) {
+  $RepoDir = (Get-Location).Path
+}
+
 if ($RepoDir -ne "" -and (Test-Path (Join-Path $RepoDir "run.py"))) {
   $Root = (Resolve-Path $RepoDir).Path
   Ok "Using existing checkout: $Root"
