@@ -64,6 +64,25 @@ function Fail([string]$msg) {
   Write-Host "  [FAIL] $msg" -ForegroundColor Red
   exit 1
 }
+function Invoke-Native([ScriptBlock]$Command, [string]$ShowPattern) {
+  # Run a native command, printing only output lines matching $ShowPattern.
+  # Returns the exit code — callers MUST check it (`$code = ...; if ($code
+  # -ne 0) { Fail ... }`) because $LASTEXITCODE does not propagate out of
+  # this function scope. Use "(?!)" (never matches) to silence a command.
+  # The scoped Continue is load-bearing: with $ErrorActionPreference =
+  # "Stop", Windows PowerShell 5.1 turns 2>&1-merged native stderr into
+  # terminating errors, so the first vite/rustc/npm warning line would
+  # abort the whole installer (Step 7 died exactly this way on a vite
+  # chunking warning). Every caller still gates on the returned code.
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $Command 2>&1 | Where-Object { "$_" -match $ShowPattern } | ForEach-Object { Write-Host "  $_" }
+  } finally {
+    $ErrorActionPreference = $prevEAP
+  }
+  return $LASTEXITCODE
+}
 function Confirm-Step([string]$msg) {
   if ($Yes) { return $true }
   $ans = Read-Host "$msg [Y/n]"
@@ -198,9 +217,10 @@ StepBox "🐍" "6/9" "Python backend (venv + all features, AI runtime & models i
 # ---------------------------------------------------------------------------
 Push-Location $Root
 try {
-  & py -3.12 -m venv .venv 2>&1 | Out-Null
+  $code = Invoke-Native { & py -3.12 -m venv .venv } "(?!)"
+  if ($code -ne 0) { Fail "Python venv creation failed." }
   Step "Upgrading pip..."
-  .\.venv\Scripts\python -m pip install --upgrade pip -q 2>&1 | Out-Null
+  Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pip -q } "(?!)"
   Step "Installing Python dependencies (fastapi, sqlalchemy, pillow, blake3 + device stack)..."
   .\.venv\Scripts\python -m pip install -r backend\requirements.txt -q
   if ($LASTEXITCODE -ne 0) { Fail "Backend pip install failed." }
@@ -224,11 +244,11 @@ StepBox "⚛️ " "7/9" "Frontend (npm ci + production build)"
 Push-Location (Join-Path $Root "frontend")
 try {
   Step "Installing npm packages..."
-  npm ci --silent 2>&1 | Where-Object { $_ -match "(error|ERR!|warn)" } | ForEach-Object { Write-Host "  $_" }
-  if ($LASTEXITCODE -ne 0) { Fail "npm ci failed." }
+  $code = Invoke-Native { npm ci --silent } "(error|ERR!|warn)"
+  if ($code -ne 0) { Fail "npm ci failed." }
   Step "Building React frontend (tsc + vite)..."
-  npm run build 2>&1 | Where-Object { $_ -match "(error|ERR!|FAIL|built in)" } | ForEach-Object { Write-Host "  $_" }
-  if ($LASTEXITCODE -ne 0) { Fail "Frontend build failed." }
+  $code = Invoke-Native { npm run build } "(error|ERR!|FAIL|built in)"
+  if ($code -ne 0) { Fail "Frontend build failed." }
   if (-not (Test-Path "dist\index.html")) { Fail "dist\index.html missing after build." }
 } finally { Pop-Location }
 Ok "Frontend built"
@@ -239,7 +259,7 @@ StepBox "🔍" "8/9" "Native helper + ExifTool + frozen sidecar"
 Push-Location (Join-Path $Root "frontend")
 try {
   Step "Building C++ WPD helper (MSVC)..."
-  npm run build:native 2>&1 | Where-Object { $_ -match "(BUILD SUCCESSFUL|BUILD FAILED|error|up to date)" } | ForEach-Object { Write-Host "  $_" }
+  Invoke-Native { npm run build:native } "(BUILD SUCCESSFUL|BUILD FAILED|error|up to date)"
   if (-not (Test-Path "..\backend\bin\wpd_helper.exe")) {
     Warn "wpd_helper.exe not produced (MSVC missing?) — continuing without it."
   }
@@ -250,10 +270,10 @@ $nsisHeader  = Join-Path $Root "frontend\src-tauri\icons\nsis-header.bmp"
 $nsisSidebar = Join-Path $Root "frontend\src-tauri\icons\nsis-sidebar.bmp"
 if (-not (Test-Path $nsisHeader) -or -not (Test-Path $nsisSidebar)) {
   Step "Generating NSIS installer branding images..."
-  .\.venv\Scripts\python -m scripts.generate-nsis-images 2>&1 | Out-Null
+  Invoke-Native { .\.venv\Scripts\python -m scripts.generate-nsis-images } "(?!)"
   # Fallback: call the script file directly
   if (-not (Test-Path $nsisHeader)) {
-    .\.venv\Scripts\python (Join-Path $Root "scripts\generate-nsis-images.py") 2>&1 | Out-Null
+    Invoke-Native { .\.venv\Scripts\python (Join-Path $Root "scripts\generate-nsis-images.py") } "(?!)"
   }
   if (Test-Path $nsisHeader) { Ok "NSIS branding images generated" }
   else { Warn "Could not generate NSIS branding images — installer will use default logo." }
@@ -277,9 +297,9 @@ try {
   }
   if (-not (Test-Path "backend\bin\exiftool\exiftool.exe")) { Fail "ExifTool pre-seed failed (SourceForge mirrors unreachable?). Manual fix: download exiftool-13.59_64.zip from https://exiftool.org, extract exiftool.exe + exiftool_files/ into backend\bin\exiftool\, then re-run this script." }
   Step "Installing PyInstaller..."
-  .\.venv\Scripts\python -m pip install --upgrade pyinstaller -q 2>&1 | Out-Null
+  Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pyinstaller -q } "(?!)"
   Step "Freezing Python backend into sidecar (~200 MB, one-time)..."
-  powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1 2>&1 | Where-Object { $_ -match "(INFO: Build complete|WARNING|ERROR|Sidecar staged|exe:|Smoke-testing|smoke test)" } | ForEach-Object { Write-Host "  $_" }
+  $code = Invoke-Native { powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1 } "(INFO: Build complete|WARNING|ERROR|Sidecar staged|exe:|Smoke-testing|smoke test)"
   # build-sidecar.ps1 relays its own failures via exit code — but only the
   # filtered stream is shown above, so check explicitly: the staging files
   # below EXIST even when the smoke gate fails (staging precedes probing).
@@ -318,8 +338,8 @@ StepBox "🦀" "9/9" "Building + installing the Tauri app" "Grab a coffee ☕ �
 Push-Location (Join-Path $Root "frontend")
 try {
   Step "Compiling Rust shell + bundling NSIS installer (this takes ~5 min)..."
-  npm run tauri:build 2>&1 | Where-Object { $_ -match "(Compiling transfera |Finished |Built application|Running makensis|Finished \d|error\[|^error:)" } | ForEach-Object { Write-Host "  $_" }
-  if ($LASTEXITCODE -ne 0) { Fail "Tauri build failed. See the Rust/NSIS output above." }
+  $code = Invoke-Native { npm run tauri:build } "(Compiling transfera |Finished |Built application|Running makensis|Finished \d|error\[|^error:)"
+  if ($code -ne 0) { Fail "Tauri build failed. See the Rust/NSIS output above." }
 } finally { Pop-Location }
 $installer = Get-ChildItem -Path (Join-Path $Root "frontend\src-tauri\target\release\bundle\nsis") -Filter "*.exe" -File -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -like "Transfera*" } | Select-Object -First 1

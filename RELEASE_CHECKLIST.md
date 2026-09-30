@@ -41,6 +41,11 @@ E2E run by the agent before tagging (see release job for v2.7.0):
 - [ ] `python run.py` full-stack boot with visible Tauri window (backend proven separately; window not observed headless)
 - [ ] #2 upgrade, #3 offline first launch, #4/#12 10k-file perf, #5 iPhone without driver, #7 AV lock, #8 notification click, #10 mid-transfer kill screen, #11 second launch — need hardware/manual runs
 
+## Post-2.7.0 installer fix (on main, unreleased)
+
+- [x] `Install-Transfera.ps1` aborted Step 7 on the first vite/rustc/npm stderr warning: with `$ErrorActionPreference = "Stop"`, PS 5.1 turns `2>&1`-merged native stderr into terminating errors. All native pipelines now go through `Invoke-Native` (scoped Continue + explicit exit-code gates); mechanism proven under both 5.1 and 7.x.
+- [ ] Re-run the full installer from the main repo checkout (the failing run used the stale `test\Transfera` checkout, which predates the sidecar/resources fixes — always install from the repo with the fixes).
+
 ## Sign-off
 
 - [ ] All matrix rows pass (or failures filed as issues with scenario # referenced).
