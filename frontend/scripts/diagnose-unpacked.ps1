@@ -1,4 +1,4 @@
-$stdoutLog = "unpacked-stdout.log"
+﻿$stdoutLog = "unpacked-stdout.log"
 $stderrLog = "unpacked-stderr.log"
 
 if (Test-Path $stdoutLog) { Remove-Item $stdoutLog }

@@ -1,4 +1,4 @@
-$stdoutLog = "portable-stdout.log"
+﻿$stdoutLog = "portable-stdout.log"
 $stderrLog = "portable-stderr.log"
 
 if (Test-Path $stdoutLog) { Remove-Item $stdoutLog }
