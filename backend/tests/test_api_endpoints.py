@@ -34,6 +34,15 @@ class TestHealth:
         data = resp.json()
         assert data["status"] == "ok"
         assert "version" in data
+        assert "active_transfers" in data
+
+    def test_active_transfers_endpoint(self, client: TestClient):
+        resp = client.get("/api/transfers/active")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["active"] is False
+        assert data["count"] == 0
+        assert data["session_ids"] == []
 
 
 class TestConfig:

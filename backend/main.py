@@ -192,7 +192,13 @@ async def lifespan(app: FastAPI):
     resumable = stats.get("resumable_session_ids", [])
     if resumable:
         logger.info("Auto-resuming %d interrupted session(s): %s", len(resumable), resumable)
+        from backend.api.routes import _cancellation_events
+
         for sid in resumable:
+            # Register a fresh cancellation event BEFORE spawning so the UI can
+            # pause or cancel the resumed transfer immediately (GAP-4 fix).
+            if sid not in _cancellation_events:
+                _cancellation_events[sid] = asyncio.Event()
             asyncio.create_task(_run_transfer_background(sid))
 
     # Check if Tier 2 setup needs to resume after restart
@@ -267,6 +273,18 @@ async def lifespan(app: FastAPI):
         from backend.engines.metadata_extractor import _exiftool_session
 
         _exiftool_session.close()
+    except Exception:
+        pass
+
+    # Drain the thumbnail DB worker queue (ROUGH-1 fix): send the None
+    # sentinel so the daemon thread flushes its last batch before the
+    # engine is disposed and DB connections are closed.
+    try:
+        from backend.engines.cache_manager import _thumb_update_queue, _thumb_worker_started
+
+        if _thumb_worker_started:
+            _thumb_update_queue.put(None)  # sentinel — worker exits after draining
+            await asyncio.sleep(0.2)  # brief yield to let the worker flush
     except Exception:
         pass
 
@@ -367,11 +385,29 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "backend.main:app",
-        host=HOST,
-        port=PORT,
-        ws="wsproto",
-        reload=False,
-        log_level="info",
-    )
+    if getattr(sys, "frozen", False):
+        # PyInstaller one-dir: this entry script runs as __main__, so the
+        # "backend.main:app" import string cannot resolve inside the bundle
+        # (uvicorn dies with "Could not import module"). Hand over the
+        # already-created app object instead — identical serving behavior.
+        # use_colors=False: the windowed bootloader detaches stdio
+        # (sys.stdout is None), and uvicorn's color auto-detect calls
+        # sys.stdout.isatty() during logging setup, which crashes boot.
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=PORT,
+            ws="wsproto",
+            reload=False,
+            log_level="info",
+            use_colors=False,
+        )
+    else:
+        uvicorn.run(
+            "backend.main:app",
+            host=HOST,
+            port=PORT,
+            ws="wsproto",
+            reload=False,
+            log_level="info",
+        )

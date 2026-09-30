@@ -4,10 +4,13 @@
 #   bash scripts/build-sidecar.sh
 #
 # Steps: ensure .venv (Python 3.12) -> pip install pyinstaller ->
-# pyinstaller transfera-engine.spec -> stage the one-dir binary as
-# frontend/src-tauri/binaries/transfera-engine-<triple> (Tauri externalBin
-# layout; triple matches the Rust target so `cargo check` and `tauri build`
-# resolve the binary; no .exe suffix off Windows).
+# pyinstaller transfera-engine.spec -> mirror the whole one-dir folder
+# (transfera-engine + _internal/ runtime) into
+# frontend/src-tauri/resources/transfera-engine/ (Tauri *resources* layout).
+#
+# The one-dir folder must ship whole: Tauri externalBin only supports single
+# files, so staging just the binary leaves its _internal/ runtime behind and
+# the installed engine dies on launch with "Failed to load Python DLL".
 #
 # Windows users: use scripts/build-sidecar.ps1 instead (same contract).
 set -euo pipefail
@@ -19,10 +22,9 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PY="$ROOT/.venv/bin/python"
-OUT_DIR="$ROOT/frontend/src-tauri/binaries"
+RES_DIR="$ROOT/frontend/src-tauri/resources/transfera-engine"
 
 [ -x "$VENV_PY" ] || { echo "Missing .venv Python at $VENV_PY — run 'bash scripts/install.sh' once first." >&2; exit 1; }
-command -v rustc >/dev/null 2>&1 || { echo "rustc not on PATH — install Rust via https://rustup.rs first." >&2; exit 1; }
 
 "$VENV_PY" -m pip install --upgrade pyinstaller
 
@@ -30,15 +32,16 @@ pushd "$ROOT" >/dev/null
 "$VENV_PY" -m PyInstaller --noconfirm transfera-engine.spec
 popd >/dev/null
 
-BUILT="$ROOT/dist/transfera-engine/transfera-engine"
+BUILT_DIR="$ROOT/dist/transfera-engine"
+BUILT="$BUILT_DIR/transfera-engine"
 [ -f "$BUILT" ] || { echo "Expected output missing: $BUILT" >&2; exit 1; }
 
-TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
-[ -n "$TRIPLE" ] || { echo "Could not determine Rust host triple from 'rustc -vV'." >&2; exit 1; }
-
-mkdir -p "$OUT_DIR"
-DEST="$OUT_DIR/transfera-engine-$TRIPLE"
-cp -f "$BUILT" "$DEST"
-chmod +x "$DEST"
-echo "Sidecar staged: $DEST"
-du -h "$DEST" | cut -f1 | xargs echo "binary size:"
+# Mirror the whole one-dir folder into Tauri resources (see header comment).
+mkdir -p "$RES_DIR"
+find "$RES_DIR" -mindepth 1 -maxdepth 1 ! -name '.gitkeep' -exec rm -rf {} +
+cp -rf "$BUILT_DIR"/. "$RES_DIR"/
+[ -f "$RES_DIR/transfera-engine" ] || { echo "Staging failed: transfera-engine binary missing" >&2; exit 1; }
+[ -d "$RES_DIR/_internal" ] || { echo "Staging failed: _internal runtime missing" >&2; exit 1; }
+chmod +x "$RES_DIR/transfera-engine"
+echo "Sidecar staged: $RES_DIR"
+du -sh "$RES_DIR" | cut -f1 | xargs echo "one-dir total:"

@@ -227,10 +227,10 @@ $SKIP_NATIVE \
   && warn "C++ WPD helper skipped (--skip-native). Windows-only feature; irrelevant on $PLATFORM." \
   || warn "WPD helper is Windows-only. iPhone access on $PLATFORM uses libimobiledevice."
 
-# Frozen Python sidecar -> frontend/src-tauri/binaries/transfera-engine-<triple>.
-# Without this, `tauri build` compiles Rust for minutes and then fails at
-# bundle time with "resource path binaries/transfera-engine-<triple>
-# doesn't exist" (fail fast here instead).
+# Frozen Python sidecar -> frontend/src-tauri/resources/transfera-engine/
+# (whole one-dir folder: binary + _internal/ runtime, shipped as a Tauri
+# resource). Without this, `tauri build` compiles Rust for minutes and the
+# preflight gate fails the bundle (fail fast here instead).
 step "Building frozen sidecar (PyInstaller — takes a few minutes)..."
 bash "$ROOT/scripts/build-sidecar.sh"
 ok "Sidecar staged."

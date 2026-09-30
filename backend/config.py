@@ -29,11 +29,12 @@ TEMP_SUFFIX: str = ".tmp"
 # ---------------------------------------------------------------------------
 # Frozen-sidecar support (Tauri `transfera-engine` via PyInstaller one-dir):
 # when frozen, `__file__` points inside the bundle temp dir, so backend code
-# and data files resolve through sys._MEIPASS. Tauri ships helper binaries
+# and data files resolve through sys._MEIPASS. Tauri ships the whole one-dir
+# bundle (transfera-engine.exe + _internal/) plus helper binaries
 # (wpd_helper.exe, exiftool.exe + exiftool_files/ Perl runtime tree) in its
-# `resources/` dir next to the sidecar — located via TRANSFERA_RESOURCE_DIR
-# (set by the Tauri shell and release packaging) with a sibling-of-executable
-# fallback.
+# `resources/` dir — located via TRANSFERA_RESOURCE_DIR (exported by the
+# Tauri shell, which knows its own resource dir) with an
+# executable-relative fallback.
 import sys as _sys
 
 _FROZEN: bool = getattr(_sys, "frozen", False)
@@ -45,10 +46,10 @@ _env_resource_dir = os.environ.get("TRANSFERA_RESOURCE_DIR")
 if _env_resource_dir:
     SIDECAR_RESOURCE_DIR: Path = Path(_env_resource_dir)
 elif _FROZEN:
-    # PyInstaller one-dir: sys.executable is
-    # .../binaries/transfera-engine/transfera-engine.exe; Tauri resources
-    # land in .../resources/.
-    SIDECAR_RESOURCE_DIR = Path(_sys.executable).resolve().parent.parent / "resources"
+    # One-dir bundle ships as a Tauri resource: the exe lives at
+    # <resource_dir>/transfera-engine/transfera-engine.exe, with helper
+    # binaries directly in <resource_dir> alongside the bundle folder.
+    SIDECAR_RESOURCE_DIR = Path(_sys.executable).resolve().parent.parent
 else:
     # Dev: Tauri staging dir doubles as the resource dir so
     # `python run.py --tauri` resolves helpers without packaging.

@@ -217,7 +217,17 @@ def _cleanup_session_state(session_id: int) -> None:
 @router.get("/health")
 async def health_check() -> dict:
     """Return service health status for frontend polling and startup detection."""
-    return {"status": "ok", "version": "2.6.0"}
+    return {"status": "ok", "version": "2.6.0", "active_transfers": len(_active_tasks)}
+
+
+@router.get("/transfers/active")
+async def get_active_transfers() -> dict:
+    """Return whether any transfer sessions or background tasks are actively running."""
+    return {
+        "active": len(_active_tasks) > 0,
+        "count": len(_active_tasks),
+        "session_ids": list(_active_tasks.keys()),
+    }
 
 
 # ---------------------------------------------------------------------------

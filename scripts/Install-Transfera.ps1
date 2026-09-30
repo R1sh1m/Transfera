@@ -198,16 +198,18 @@ StepBox "🐍" "6/9" "Python backend (venv + all features, AI runtime & models i
 # ---------------------------------------------------------------------------
 Push-Location $Root
 try {
-  & py -3.12 -m venv .venv
-  .\.venv\Scripts\python -m pip install --upgrade pip
-  .\.venv\Scripts\python -m pip install -r backend\requirements.txt
+  & py -3.12 -m venv .venv 2>&1 | Out-Null
+  Step "Upgrading pip..."
+  .\.venv\Scripts\python -m pip install --upgrade pip -q 2>&1 | Out-Null
+  Step "Installing Python dependencies (fastapi, sqlalchemy, pillow, blake3 + device stack)..."
+  .\.venv\Scripts\python -m pip install -r backend\requirements.txt -q
   if ($LASTEXITCODE -ne 0) { Fail "Backend pip install failed." }
 
   if ($SkipAI) {
     Warn "Skipped (-SkipAI). Semantic search runtime and models not downloaded."
   } else {
-    Step "Installing on-board AI stack (onnxruntime + tokenizers)..."
-    .\.venv\Scripts\python -m pip install -r backend\requirements-ai.txt
+    Step "Installing AI runtime (onnxruntime + tokenizers)..."
+    .\.venv\Scripts\python -m pip install -r backend\requirements-ai.txt -q
     if ($LASTEXITCODE -ne 0) { Warn "AI dependencies install reported issues — continuing." }
 
     Step "Downloading MobileCLIP AI models (~207 MB) for Day-1 semantic search..."
@@ -221,9 +223,11 @@ StepBox "⚛️ " "7/9" "Frontend (npm ci + production build)"
 # ---------------------------------------------------------------------------
 Push-Location (Join-Path $Root "frontend")
 try {
-  npm ci
+  Step "Installing npm packages..."
+  npm ci --silent 2>&1 | Where-Object { $_ -match "(error|ERR!|warn)" } | ForEach-Object { Write-Host "  $_" }
   if ($LASTEXITCODE -ne 0) { Fail "npm ci failed." }
-  npm run build
+  Step "Building React frontend (tsc + vite)..."
+  npm run build 2>&1 | Where-Object { $_ -match "(error|ERR!|FAIL|built in)" } | ForEach-Object { Write-Host "  $_" }
   if ($LASTEXITCODE -ne 0) { Fail "Frontend build failed." }
   if (-not (Test-Path "dist\index.html")) { Fail "dist\index.html missing after build." }
 } finally { Pop-Location }
@@ -234,11 +238,28 @@ StepBox "🔍" "8/9" "Native helper + ExifTool + frozen sidecar"
 # ---------------------------------------------------------------------------
 Push-Location (Join-Path $Root "frontend")
 try {
-  npm run build:native
+  Step "Building C++ WPD helper (MSVC)..."
+  npm run build:native 2>&1 | Where-Object { $_ -match "(BUILD SUCCESSFUL|BUILD FAILED|error|up to date)" } | ForEach-Object { Write-Host "  $_" }
   if (-not (Test-Path "..\backend\bin\wpd_helper.exe")) {
     Warn "wpd_helper.exe not produced (MSVC missing?) — continuing without it."
   }
 } finally { Pop-Location }
+
+# Generate NSIS branding images (idempotent — skipped if already present)
+$nsisHeader  = Join-Path $Root "frontend\src-tauri\icons\nsis-header.bmp"
+$nsisSidebar = Join-Path $Root "frontend\src-tauri\icons\nsis-sidebar.bmp"
+if (-not (Test-Path $nsisHeader) -or -not (Test-Path $nsisSidebar)) {
+  Step "Generating NSIS installer branding images..."
+  .\.venv\Scripts\python -m scripts.generate-nsis-images 2>&1 | Out-Null
+  # Fallback: call the script file directly
+  if (-not (Test-Path $nsisHeader)) {
+    .\.venv\Scripts\python (Join-Path $Root "scripts\generate-nsis-images.py") 2>&1 | Out-Null
+  }
+  if (Test-Path $nsisHeader) { Ok "NSIS branding images generated" }
+  else { Warn "Could not generate NSIS branding images — installer will use default logo." }
+} else {
+  Ok "NSIS branding images already present"
+}
 Push-Location $Root
 try {
   # Idempotent pre-seed: re-downloading an 11 MB zip from SourceForge on
@@ -255,10 +276,20 @@ try {
     .\.venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); sys.exit(0 if p and p.is_file() else 1)"
   }
   if (-not (Test-Path "backend\bin\exiftool\exiftool.exe")) { Fail "ExifTool pre-seed failed (SourceForge mirrors unreachable?). Manual fix: download exiftool-13.59_64.zip from https://exiftool.org, extract exiftool.exe + exiftool_files/ into backend\bin\exiftool\, then re-run this script." }
-  .\.venv\Scripts\python -m pip install --upgrade pyinstaller
-  powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1
-  $staged = Get-ChildItem -Path frontend\src-tauri\binaries -Filter "transfera-engine-*.exe" -File -ErrorAction SilentlyContinue
-  if (-not $staged) { Fail "Sidecar staging failed." }
+  Step "Installing PyInstaller..."
+  .\.venv\Scripts\python -m pip install --upgrade pyinstaller -q 2>&1 | Out-Null
+  Step "Freezing Python backend into sidecar (~200 MB, one-time)..."
+  powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1 2>&1 | Where-Object { $_ -match "(INFO: Build complete|WARNING|ERROR|Sidecar staged|exe:|Smoke-testing|smoke test)" } | ForEach-Object { Write-Host "  $_" }
+  # build-sidecar.ps1 relays its own failures via exit code — but only the
+  # filtered stream is shown above, so check explicitly: the staging files
+  # below EXIST even when the smoke gate fails (staging precedes probing).
+  if ($LASTEXITCODE -ne 0) { Fail "Sidecar build or frozen-engine smoke test failed (see output above)." }
+  # The one-dir bundle must be staged whole (exe + _internal/ runtime) —
+  # the exe alone cannot start the installed engine.
+  $engineExe = "frontend\src-tauri\resources\transfera-engine\transfera-engine.exe"
+  $engineInternal = "frontend\src-tauri\resources\transfera-engine\_internal"
+  $engineFiles = @(Get-ChildItem -Path $engineInternal -Recurse -File -ErrorAction SilentlyContinue).Count
+  if (-not (Test-Path $engineExe) -or $engineFiles -lt 10) { Fail "Sidecar staging failed (engine exe or _internal runtime missing)." }
   Copy-Item backend\bin\wpd_helper.exe frontend\src-tauri\resources\wpd_helper.exe -Force -ErrorAction SilentlyContinue
   Copy-Item backend\bin\exiftool\exiftool.exe frontend\src-tauri\resources\exiftool.exe -Force
   # ExifTool v13.59+ ships as a stub exe + exiftool_files/ Perl runtime tree.
@@ -286,7 +317,8 @@ StepBox "🦀" "9/9" "Building + installing the Tauri app" "Grab a coffee ☕ �
 # ---------------------------------------------------------------------------
 Push-Location (Join-Path $Root "frontend")
 try {
-  npm run tauri:build
+  Step "Compiling Rust shell + bundling NSIS installer (this takes ~5 min)..."
+  npm run tauri:build 2>&1 | Where-Object { $_ -match "(Compiling transfera |Finished |Built application|Running makensis|Finished \d|error\[|^error:)" } | ForEach-Object { Write-Host "  $_" }
   if ($LASTEXITCODE -ne 0) { Fail "Tauri build failed. See the Rust/NSIS output above." }
 } finally { Pop-Location }
 $installer = Get-ChildItem -Path (Join-Path $Root "frontend\src-tauri\target\release\bundle\nsis") -Filter "*.exe" -File -ErrorAction SilentlyContinue |

@@ -4,8 +4,11 @@ Transfera v2 — PyInstaller spec for the Tauri sidecar (`transfera-engine`).
 
 One-dir (not one-file): faster cold start and smaller delta updates, since
 only changed files re-download on update. Built by scripts/build-sidecar.ps1
-(CI release job runs it before `tauri build`); output is staged into
-frontend/src-tauri/binaries/transfera-engine-<target-triple>.exe.
+(CI release job runs it before `tauri build`); the whole one-dir folder is
+mirrored into frontend/src-tauri/resources/transfera-engine/ and shipped as
+a Tauri *resource* (externalBin only supports single files, so shipping just
+the exe leaves its _internal/ runtime behind and the engine dies on launch
+with "Failed to load Python DLL ... python312.dll").
 
 Size discipline: base requirements only (requirements.txt — which now
 includes the AI runtime from day one; ~120 MB accepted per product call).
@@ -118,6 +121,10 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    # System runtimes must never be UPX-packed: a packed python312.dll can
+    # fail LoadLibrary on launch with the bootloader's "Failed to load
+    # Python DLL" fatal dialog. (UPX isn't installed in CI today, so this
+    # is insurance for future environments where it is.)
+    upx_exclude=["python*.dll", "vcruntime*.dll", "msvcp*.dll", "ucrtbase.dll"],
     name="transfera-engine",
 )

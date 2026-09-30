@@ -79,7 +79,14 @@ frontend/src-tauri/resources/*
 !frontend/src-tauri/resources/exiftool_files/
 frontend/src-tauri/resources/exiftool_files/*
 !frontend/src-tauri/resources/exiftool_files/.gitkeep
-# PyInstaller one-dir output (staged into src-tauri/binaries/ by scripts/build-sidecar.ps1)
+# Ignore the frozen sidecar one-dir *contents* (~200 MB, staged at build
+# time by scripts/build-sidecar.*) but keep the directory itself tracked via
+# .gitkeep so the Tauri resources glob resolves on fresh checkouts (the
+# preflight gate fails fast there instead of 9 min into the Rust build).
+!frontend/src-tauri/resources/transfera-engine/
+frontend/src-tauri/resources/transfera-engine/*
+!frontend/src-tauri/resources/transfera-engine/.gitkeep
+# PyInstaller one-dir output (mirrored into src-tauri/resources/transfera-engine/ by scripts/build-sidecar.ps1)
 dist/transfera-engine/
 
 # --- Packaged installer output (Tauri NSIS bundle + checksums) ---

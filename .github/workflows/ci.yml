@@ -170,7 +170,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path binaries, resources, ../dist -Force | Out-Null
           if (-not (Test-Path ../dist/index.html)) { New-Item -ItemType File -Path ../dist/index.html -Force | Out-Null }
-          foreach ($f in @("binaries/transfera-engine-x86_64-pc-windows-msvc.exe", "resources/wpd_helper.exe", "resources/exiftool.exe")) {
+          # Resource placeholders only (the sidecar ships as a resources/
+          # folder now, and resource globs are validated at bundle time, not
+          # compile time — nothing sidecar-shaped is needed for cargo check).
+          foreach ($f in @("resources/wpd_helper.exe", "resources/exiftool.exe")) {
             if (-not (Test-Path $f)) { New-Item -ItemType File -Path $f -Force | Out-Null }
           }
 

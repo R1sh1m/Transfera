@@ -1,0 +1,4 @@
+Placeholder keeping resources/transfera-engine/ tracked so the Tauri
+resources entry resolves on fresh checkouts. The frozen PyInstaller one-dir
+bundle (transfera-engine.exe + _internal/ runtime) is mirrored here at build
+time by scripts/build-sidecar.ps1 (.sh on macOS/Linux) and is gitignored.

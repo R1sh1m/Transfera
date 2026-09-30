@@ -42,6 +42,7 @@ const DeviceSetupPage = lazy(() => import("@/pages/DeviceSetupPage"));
 const TransferPage = lazy(() => import("@/pages/TransferPage"));
 const LibraryPage = lazy(() => import("@/pages/LibraryPage"));
 import DuplicateModal from "@/components/DuplicateModal";
+import CloseGuardModal from "@/components/CloseGuardModal";
 import ThemeToggle from "@/components/ThemeToggle";
 import PageErrorBoundary from "@/components/PageErrorBoundary";
 
@@ -481,6 +482,7 @@ export default function App() {
       <PageErrorBoundary pageName="DuplicateModal">
         <DuplicateModal />
       </PageErrorBoundary>
+      <CloseGuardModal />
       <NotificationToast />
       <BackendDownScreen />
       <BackendRecoveryWatcher />

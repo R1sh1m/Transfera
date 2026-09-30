@@ -274,3 +274,18 @@ export async function setTrayProgress(value: number | null): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("set_progress", { value });
 }
+
+// -- App exit / close guard -------------------------------------------------
+
+export async function forceExit(): Promise<void> {
+  if (isTauri) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("force_exit");
+    return;
+  }
+  window.close();
+}
+
+export function onRequestClose(cb: () => void): () => void {
+  return onTauriEvent("app:request-close", cb);
+}

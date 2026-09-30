@@ -117,14 +117,20 @@ jobs:
           fi
 
       - name: Freeze Python Sidecar (Tauri backend)
-        # PyInstaller one-dir → staged as
-        # frontend/src-tauri/binaries/transfera-engine-<triple>.exe
-        # (Tauri externalBin layout). Fail-closed: no sidecar, no Tauri build.
+        # PyInstaller one-dir → mirrored as
+        # frontend/src-tauri/resources/transfera-engine/ (Tauri *resources*
+        # layout). The bundle must ship whole (exe + _internal/): externalBin
+        # only supports single files, and an exe without its runtime dies on
+        # launch with "Failed to load Python DLL". Fail-closed: no sidecar,
+        # no Tauri build.
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1
-          $staged = Get-ChildItem -Path frontend/src-tauri/binaries -Filter "transfera-engine-*.exe" -File
-          if ($staged.Count -eq 0) { Write-Error "Sidecar staging missing!"; exit 1 }
-          $staged | ForEach-Object { Write-Host "Sidecar staged: $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
+          $engineExe = "frontend/src-tauri/resources/transfera-engine/transfera-engine.exe"
+          $engineInternal = "frontend/src-tauri/resources/transfera-engine/_internal"
+          if (-not (Test-Path $engineExe)) { Write-Error "Sidecar engine missing!"; exit 1 }
+          $stagedCount = @(Get-ChildItem -Path $engineInternal -Recurse -File -ErrorAction SilentlyContinue).Count
+          if ($stagedCount -lt 10) { Write-Error "Sidecar _internal runtime incomplete ($stagedCount files)!"; exit 1 }
+          Write-Host "Sidecar staged: $engineExe ($([math]::Round((Get-Item $engineExe).Length/1MB,1)) MB exe, $stagedCount runtime files)"
 
       - name: Stage Tauri Resources (wpd_helper + ExifTool runtime)
         # resources/ holds the runtime helper binaries the frozen sidecar

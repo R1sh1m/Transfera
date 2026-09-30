@@ -17,7 +17,8 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -26,7 +27,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, RunEvent, WindowEvent,
 };
-use tauri_plugin_shell::ShellExt;
 
 const BACKEND_PORT: u16 = 47821;
 const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -44,7 +44,19 @@ struct BackendState {
     /// True when we adopted an externally-managed backend (dev server /
     /// run.py) instead of spawning our own sidecar.
     external: Mutex<bool>,
+    /// Local secret token read from data_dir/local_secret.json at startup.
+    /// Sent as the X-Local-Token header to POST /api/shutdown so the
+    /// graceful shutdown endpoint does not return 403 (GAP-3 fix).
+    local_token: Mutex<Option<String>>,
 }
+
+/// Shared flag passed to start_drive_watcher so the background thread
+/// can exit cleanly when the app quits (GAP-1 fix).
+struct DriveShutdown(Arc<AtomicBool>);
+
+/// Guard flag: when false, window close requests are intercepted so the
+/// frontend can prompt if a transfer is actively in progress (ROUGH-3).
+struct CloseGuardState(Arc<AtomicBool>);
 
 // ---------------------------------------------------------------------------
 // Health probing (plain TCP + minimal HTTP so no extra HTTP crate is needed)
@@ -82,17 +94,6 @@ fn backend_healthy() -> bool {
     matches!(http_get("/api/health"), Some((200, _)))
 }
 
-fn wait_for_backend(timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if backend_healthy() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    backend_healthy()
-}
-
 // ---------------------------------------------------------------------------
 // Sidecar lifecycle
 // ---------------------------------------------------------------------------
@@ -104,36 +105,56 @@ fn sidecar_data_dir(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("backend-data"))
 }
 
-fn spawn_sidecar(app: &AppHandle) -> Result<(), String> {
+/// Absolute path of the frozen engine inside the bundled resources.
+///
+/// The PyInstaller one-dir bundle (transfera-engine.exe + _internal/
+/// runtime) ships as a Tauri *resource* — externalBin only supports single
+/// files, so the exe must stay next to its _internal/ folder. Whatever the
+/// platform's resource-dir convention is, both land together.
+fn sidecar_exe_path(app: &AppHandle) -> Option<PathBuf> {
+    let exe = if cfg!(target_os = "windows") {
+        "transfera-engine.exe"
+    } else {
+        "transfera-engine"
+    };
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|d| d.join("transfera-engine").join(exe))
+}
+
+fn spawn_sidecar(app: &AppHandle) -> Result<std::process::Child, String> {
     let data_dir = sidecar_data_dir(app);
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
 
-    let sidecar = app
-        .shell()
-        .sidecar("transfera-engine")
-        .map_err(|e| format!("sidecar resolve failed: {e}"))?;
-    let (_rx, _child) = sidecar
-        .args([
-            "-m",
-            "uvicorn",
-            "backend.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &BACKEND_PORT.to_string(),
-        ])
-        .env("TRANSFERA_DATA_DIR", data_dir)
+    let exe = sidecar_exe_path(app).ok_or_else(|| "sidecar path unresolved".to_string())?;
+    if !exe.is_file() {
+        return Err(format!("sidecar missing at {}", exe.display()));
+    }
+    // Helper binaries (wpd_helper.exe, exiftool.exe) sit directly in the
+    // resource dir, one level above the one-dir bundle folder.
+    let resource_dir = exe
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.clone());
+    // The frozen entry point (backend/main.py __main__) boots uvicorn
+    // itself from backend.config defaults, so no CLI args are passed.
+    // Detached stdio: the windowed bootloader shows its own fatal dialog
+    // on startup failure, which is the diagnosable path for bad bundles.
+    std::process::Command::new(&exe)
+        .env("TRANSFERA_DATA_DIR", &data_dir)
+        .env("TRANSFERA_RESOURCE_DIR", &resource_dir)
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("sidecar spawn failed: {e}"))?;
-    // The child is intentionally detached: it outlives this scope and is
-    // reaped on shutdown via POST /api/shutdown + taskkill fallback below.
-    // (The unused receiver would only matter for stdout streaming.)
-    Ok(())
+        .map_err(|e| format!("sidecar spawn failed ({}): {e}", exe.display()))
 }
 
-fn post_shutdown_signal() -> bool {
+fn post_shutdown_signal(token: Option<&str>) -> bool {
     let mut stream = match TcpStream::connect(format!("127.0.0.1:{BACKEND_PORT}")) {
         Ok(s) => s,
         Err(_) => return false,
@@ -141,8 +162,13 @@ fn post_shutdown_signal() -> bool {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
     let body = "{}";
+    // Include the local secret token so require_local_token() passes (GAP-3 fix).
+    let token_header = token
+        .map(|t| format!("X-Local-Token: {}\r\n", t))
+        .unwrap_or_default();
     let req = format!(
-        "POST /api/shutdown HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /api/shutdown HTTP/1.0\r\nHost: 127.0.0.1\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        token_header,
         body.len(),
         body
     );
@@ -158,16 +184,13 @@ fn post_shutdown_signal() -> bool {
 
 /// Full shutdown: graceful POST, wait, then force-kill the port owner tree.
 fn shutdown_backend(app: &AppHandle) {
-    let external = app
-        .state::<BackendState>()
-        .external
-        .lock()
-        .map(|g| *g)
-        .unwrap_or(true);
+    let state = app.state::<BackendState>();
+    let external = state.external.lock().map(|g| *g).unwrap_or(true);
     if external {
         return;
     }
-    if post_shutdown_signal() {
+    let token: Option<String> = state.local_token.lock().ok().and_then(|g| g.clone());
+    if post_shutdown_signal(token.as_deref()) {
         let start = Instant::now();
         while start.elapsed() < GRACEFUL_SHUTDOWN_WAIT {
             if !port_open() {
@@ -211,28 +234,77 @@ fn ensure_backend(app: &AppHandle) {
     if let Some(w) = &window {
         let _ = w.emit("backend:starting", ());
     }
-    match spawn_sidecar(app) {
-        Ok(()) => {
-            if wait_for_backend(BACKEND_STARTUP_TIMEOUT) {
-                if let Some(w) = window {
-                    let _ = w.emit("backend:ready", ());
-                }
-            } else if let Some(w) = window {
-                let _ = w.emit("backend:down", ());
-            }
-        }
+    let mut child = match spawn_sidecar(app) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("[lifecycle] backend start failed: {e}");
             if let Some(w) = window {
                 let _ = w.emit("backend:down", ());
             }
+            return;
         }
+    };
+    // Wait for health, but surface an early sidecar death immediately: the
+    // frozen engine exits on its own on a bad bundle (missing _internal/,
+    // blocked DLL) and making the UI sit out the full 60s timeout first
+    // looks like a hang on the splash screen.
+    let start = Instant::now();
+    let mut ready = false;
+    while start.elapsed() < BACKEND_STARTUP_TIMEOUT {
+        if backend_healthy() {
+            ready = true;
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!("[lifecycle] sidecar exited during startup: {status}");
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[lifecycle] sidecar wait failed: {e}");
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Detached by design: a healthy engine outlives this scope and is
+    // reaped on shutdown via POST /api/shutdown + taskkill fallback below.
+    drop(child);
+    if ready {
+        // Token file is written by the backend on first boot; read it now
+        // that we know the process is healthy (GAP-3 fix).
+        load_local_token(app);
+    }
+    if let Some(w) = window {
+        let _ = w.emit(
+            if ready {
+                "backend:ready"
+            } else {
+                "backend:down"
+            },
+            (),
+        );
     }
 }
 
 fn set_external(app: &AppHandle, value: bool) {
     if let Ok(mut g) = app.state::<BackendState>().external.lock() {
         *g = value;
+    }
+}
+
+/// Read local_secret.json from the sidecar data dir and cache the token.
+/// Called once after spawn_sidecar succeeds so every graceful-shutdown
+/// attempt can present the token (GAP-3 fix).
+fn load_local_token(app: &AppHandle) {
+    let secret_path = sidecar_data_dir(app).join("local_secret.json");
+    let token = std::fs::read_to_string(&secret_path).ok().and_then(|s| {
+        let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+        v["token"].as_str().map(String::from)
+    });
+    if let Ok(mut g) = app.state::<BackendState>().local_token.lock() {
+        *g = token;
     }
 }
 
@@ -439,6 +511,12 @@ fn set_progress(window: tauri::Window, value: Option<f64>) -> Result<(), String>
     window.set_progress_bar(state).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn force_exit(app: AppHandle, state: tauri::State<CloseGuardState>) {
+    state.0.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
 #[derive(Serialize)]
 struct VirtualizationStatus {
     available: bool,
@@ -488,37 +566,68 @@ fn check_virtualization() -> VirtualizationStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Removable-drive watcher (wmic poll, same semantics as Electron main)
+// Removable-drive watcher (native Win32 API, ROUGH-2 fix replacing deprecated wmic)
 // ---------------------------------------------------------------------------
 
 /// Platform removable-drive poll: returns (id, volume_name) pairs, where id
 /// is a drive letter on Windows and a mount path elsewhere.
 #[cfg(target_os = "windows")]
 fn poll_removable_drives() -> Vec<(String, Option<String>)> {
-    let out = std::process::Command::new("wmic")
-        .args([
-            "logicaldisk",
-            "where",
-            "drivetype=2",
-            "get",
-            "caption,volumename",
-            "/format:csv",
-        ])
-        .output();
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLogicalDrives() -> u32;
+        fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
+        fn GetVolumeInformationW(
+            lpRootPathName: *const u16,
+            lpVolumeNameBuffer: *mut u16,
+            nVolumeNameSize: u32,
+            lpVolumeSerialNumber: *mut u32,
+            lpMaximumComponentLength: *mut u32,
+            lpFileSystemFlags: *mut u32,
+            lpFileSystemNameBuffer: *mut u16,
+            nFileSystemNameSize: u32,
+        ) -> i32;
+    }
+
+    const DRIVE_REMOVABLE: u32 = 2;
     let mut drives = Vec::new();
-    if let Ok(o) = out {
-        let text = String::from_utf8_lossy(&o.stdout).into_owned();
-        for (i, line) in text.trim().lines().enumerate() {
-            if i == 0 {
-                continue;
-            }
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 2 {
-                let caption = parts[1].trim().to_string();
-                let volume = parts.get(2).map(|s| s.trim().to_string());
-                if !caption.is_empty() {
-                    drives.push((caption, volume));
-                }
+
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0..26 {
+        if (mask & (1 << i)) != 0 {
+            let letter = (b'A' + i) as char;
+            let root: [u16; 4] = [letter as u16, b':' as u16, b'\\' as u16, 0];
+            let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+            if drive_type == DRIVE_REMOVABLE {
+                let id = format!("{}:", letter);
+                let mut vol_buf = [0u16; 260];
+                let res = unsafe {
+                    GetVolumeInformationW(
+                        root.as_ptr(),
+                        vol_buf.as_mut_ptr(),
+                        vol_buf.len() as u32,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+                let volume_name = if res != 0 {
+                    let len = vol_buf
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(vol_buf.len());
+                    let name = String::from_utf16_lossy(&vol_buf[..len]).trim().to_string();
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name)
+                    }
+                } else {
+                    None
+                };
+                drives.push((id, volume_name));
             }
         }
     }
@@ -555,10 +664,12 @@ fn poll_removable_drives() -> Vec<(String, Option<String>)> {
     drives
 }
 
-fn start_drive_watcher(app: AppHandle) {
+fn start_drive_watcher(app: AppHandle, shutdown: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut known: HashSet<String> = HashSet::new();
-        loop {
+        // GAP-1 fix: check shutdown flag so this thread exits cleanly on quit
+        // instead of looping forever and delaying process exit.
+        while !shutdown.load(Ordering::Relaxed) {
             let mut current = HashSet::new();
             for (id, volume) in poll_removable_drives() {
                 current.insert(id.clone());
@@ -602,7 +713,16 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = w.set_focus();
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                    let _ = w.emit("app:request-close", ());
+                } else {
+                    app.exit(0);
+                }
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -632,6 +752,7 @@ fn main() {
     tauri::Builder::default()
         .manage(BackendState {
             external: Mutex::new(false),
+            local_token: Mutex::new(None),
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
@@ -649,14 +770,22 @@ fn main() {
             show_item_in_folder,
             open_path,
             set_progress,
-            check_virtualization
+            check_virtualization,
+            force_exit
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             if let Err(e) = build_tray(&handle) {
                 eprintln!("[lifecycle] tray init failed: {e}");
             }
-            start_drive_watcher(handle.clone());
+            // Shared shutdown flag: set by the exit handler to stop the
+            // drive-watcher thread cleanly (GAP-1 fix).
+            let drive_shutdown = Arc::new(AtomicBool::new(false));
+            app.manage(DriveShutdown(drive_shutdown.clone()));
+            start_drive_watcher(handle.clone(), drive_shutdown);
+            // Close guard state: allows frontend to intercept close requests (ROUGH-3).
+            let allow_close = Arc::new(AtomicBool::new(false));
+            app.manage(CloseGuardState(allow_close.clone()));
             // Backend boot must not block window creation — the frontend
             // shows its starting state from the `backend:starting` event.
             std::thread::spawn(move || ensure_backend(&handle));
@@ -670,25 +799,45 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { .. } = event {
-                // Quit semantics (same as Electron): closing the last window
-                // shuts down the backend instead of hiding to tray.
-                window.app_handle().exit(0);
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let allow = window
+                    .app_handle()
+                    .try_state::<CloseGuardState>()
+                    .map(|s| s.0.load(Ordering::SeqCst))
+                    .unwrap_or(true);
+                if allow {
+                    window.app_handle().exit(0);
+                } else {
+                    api.prevent_close();
+                    let _ = window.emit("app:request-close", ());
+                }
             }
         })
         .build(tauri::generate_context!())
         .expect("failed to build Transfera Tauri app")
-        .run(|app, event| {
-            if let RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
-                let handle = app.clone();
-                // Graceful, synchronous-ish: shutdown is fast (local POST +
-                // bounded wait), so block this handler briefly rather than
-                // risking process teardown mid-cleanup.
-                std::thread::spawn(move || {
-                    shutdown_backend(&handle);
-                    handle.exit(0);
-                });
+        .run({
+            // GAP-2 fix: guard against a double ExitRequested when tray Quit
+            // calls app.exit(0), the shutdown thread runs, then calls
+            // handle.exit(0) again — which fires a second ExitRequested.
+            let shutdown_started = Arc::new(AtomicBool::new(false));
+            move |app, event| {
+                if let RunEvent::ExitRequested { api, .. } = event {
+                    if shutdown_started.swap(true, Ordering::SeqCst) {
+                        // Second ExitRequested: backend already shutting down,
+                        // do NOT prevent_exit again or spawn another thread.
+                        return;
+                    }
+                    // Signal the drive-watcher thread to exit (GAP-1 fix).
+                    if let Some(ds) = app.try_state::<DriveShutdown>() {
+                        ds.0.store(true, Ordering::Relaxed);
+                    }
+                    api.prevent_exit();
+                    let handle = app.clone();
+                    std::thread::spawn(move || {
+                        shutdown_backend(&handle);
+                        handle.exit(0);
+                    });
+                }
             }
         });
 }
