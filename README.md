@@ -117,7 +117,7 @@ First run takes 5–15 minutes (downloads + build). Every subsequent launch star
 
 ---
 
-### How it works (60 seconds)
+### How it works
 
 Every file travels two verified hops:
 
@@ -128,7 +128,7 @@ Source ──[stream + BLAKE3 hash]──► .partial in cache
 Archive ◄──[re-verify + atomic move]── YYYY/MM/DD/filename.jpg
 ```
 
-Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. On-board AI (MobileCLIP, ONNX, CPU-only) ships in the base install — only the model *weights* (~207 MB) download once, when you first press **Get AI models**.
+Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. 
 
 ---
 
