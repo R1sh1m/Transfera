@@ -6,9 +6,9 @@ The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml`
 
 ## Pre-flight
 
-- [ ] `frontend/package.json`, `pyproject.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` versions all equal the tag (without the leading `v`).
+- [x] `frontend/package.json`, `pyproject.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` versions all equal the tag (without the leading `v`).
 - [ ] `python run.py` boots clean on a dev machine (backend `:47821` healthy, Tauri window opens).
-- [ ] `SHA256SUMS.txt` generated and verified in CI for the shipped Tauri installer.
+- [x] `SHA256SUMS.txt` generated and verified in CI for the shipped Tauri installer.
 
 ## Test matrix
 
@@ -27,7 +27,21 @@ The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml`
 | 11 | Second launch while running | Launch Tauri app twice | Single-instance focuses existing window; no second backend on `:47821` |
 | 12 | 10k-file scroll (perf) | 10k-file library, scroll vault + resize window | No visible jank; columns update without full-grid flash (memoized cards, bucketed masonry, queued thumbnails) |
 
+## v2.7.0 verification (2026-09-30)
+
+E2E run by the agent before tagging (see release job for v2.7.0):
+
+- [x] Versions match tag (CI version gate passed)
+- [x] `SHA256SUMS.txt` generated + verified in CI; `Transfera_2.7.0_x64-setup.exe` published
+- [x] Backend: 185 pytest passed, ruff clean; frontend typecheck clean; Rust fmt + clippy clean
+- [x] Frozen engine rebuilt + `/api/health` smoke passed (ExifTool Tier-0, Tier 1 init, migrations 19–47)
+- [x] Full `tauri:build` → NSIS installed to a clean dir → launched → engine spawned from bundle resources → `/api/health 200`
+- [x] #6 port occupied: gate exits 1 with remediation text
+- [x] #9 Tauri fresh install: covered by the install + launch probe above
+- [ ] `python run.py` full-stack boot with visible Tauri window (backend proven separately; window not observed headless)
+- [ ] #2 upgrade, #3 offline first launch, #4/#12 10k-file perf, #5 iPhone without driver, #7 AV lock, #8 notification click, #10 mid-transfer kill screen, #11 second launch — need hardware/manual runs
+
 ## Sign-off
 
 - [ ] All matrix rows pass (or failures filed as issues with scenario # referenced).
-- [ ] Release notes generated; `Transfera-Setup-*`, `Transfera-Portable-*`, `SHA256SUMS.txt` attached.
+- [x] Release notes generated; `Transfera-Setup-*`, `Transfera-Portable-*`, `SHA256SUMS.txt` attached.
