@@ -47,6 +47,7 @@ _PACKAGED_EXIFTOOL: Path = PACKAGED_EXIFTOOL_DIR / _EXIFTOOL_EXE_NAME
 
 # Official ExifTool Windows zip download page
 _EXIFTOOL_HOME = "https://exiftool.org"
+_EXIFTOOL_VER_URL = "https://exiftool.org/ver.txt"
 _EXIFTOOL_ZIP_PATTERN = "exiftool-{ver}_?\\.zip"
 
 # Network protections
@@ -269,11 +270,19 @@ def _normalise_candidate_version(zip_name_or_url: str) -> str | None:
 
     ``.../exiftool-13.59_64.zip/download`` -> ``13.59`` (trailing _32/_64
     is the CPU arch); ``exiftool-12_97.zip`` -> ``12.97``
-    (legacy underscore-as-dot).
+    (legacy underscore-as-dot). The trailing SourceForge ``/download``
+    suffix (and any query/fragment) is stripped before parsing.
     """
     import re
 
-    base = zip_name_or_url.rsplit("/", 1)[-1]
+    s = zip_name_or_url.strip()
+    # Strip SourceForge /download suffix, query strings, and fragments
+    # before taking the basename — otherwise base is "download" and the
+    # match below always fails.
+    if s.lower().endswith("/download"):
+        s = s[: -len("/download")]
+    s = s.split("?", 1)[0].split("#", 1)[0]
+    base = s.rsplit("/", 1)[-1]
     m = re.match(r"exiftool[_-]([\d._]+)\.zip$", base, re.IGNORECASE)
     if not m:
         return None
@@ -293,6 +302,34 @@ def _fetch_latest_version() -> str | None:
     if not candidates:
         return None
     return _normalise_candidate_version(candidates[0])
+
+
+def _candidates_from_version_txt() -> list[str]:
+    """Build SourceForge download URLs from the ``ver.txt`` endpoint.
+
+    ``https://exiftool.org/ver.txt`` returns a bare version string
+    (e.g. ``13.59``). The Windows zips are named
+    ``exiftool-<ver>_64.zip`` / ``exiftool-<ver>_32.zip`` on SourceForge,
+    so this reconstructs both URLs (64-bit first) without parsing HTML.
+    Returns [] on any network/parse failure.
+    """
+    import re
+
+    try:
+        req = Request(
+            _EXIFTOOL_VER_URL,
+            headers={"User-Agent": "Transfera/2.0"},
+        )
+        with urlopen(req, timeout=_CONNECT_TIMEOUT) as resp:
+            ver = resp.read().decode("utf-8", errors="replace").strip()
+        if not re.fullmatch(r"\d+\.\d+", ver):
+            return []
+        return [
+            f"https://sourceforge.net/projects/exiftool/files/exiftool-{ver}_64.zip/download",
+            f"https://sourceforge.net/projects/exiftool/files/exiftool-{ver}_32.zip/download",
+        ]
+    except (URLError, OSError, ValueError):
+        return []
 
 
 def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
@@ -322,6 +359,11 @@ def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
         return None
 
     candidates = _fetch_zip_candidates()
+    if not candidates:
+        # Homepage scrape failed (DreamHost throttling / markup change).
+        # Fall back to the tiny ver.txt endpoint ("13.59") and construct
+        # the canonical SourceForge URLs directly — 64-bit first.
+        candidates = _candidates_from_version_txt()
     if not candidates:
         logger.warning("Could not determine latest ExifTool version from homepage")
         return None
