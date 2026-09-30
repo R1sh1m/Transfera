@@ -446,6 +446,11 @@ function BackendRecoveryWatcher() {
   useEffect(() => {
     if (isError) {
       setWasDown(true);
+      // Mid-run engine death (kill -9, crash, port stolen): the shell only
+      // emits backend:down for startup failures, so flip into the Engine
+      // Unavailable screen from here. useHealth retries 3x with backoff
+      // before isError, so this is a genuine outage, not a blip.
+      useTransferStore.getState().setServerDown(true);
     } else if (wasDown && health?.status === "ok") {
       // Backend just came back — refetch everything
       qc.invalidateQueries();

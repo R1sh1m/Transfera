@@ -109,18 +109,20 @@ fn sidecar_data_dir(app: &AppHandle) -> PathBuf {
 ///
 /// The PyInstaller one-dir bundle (transfera-engine.exe + _internal/
 /// runtime) ships as a Tauri *resource* — externalBin only supports single
-/// files, so the exe must stay next to its _internal/ folder. Whatever the
-/// platform's resource-dir convention is, both land together.
+/// files, so the exe must stay next to its _internal/ folder. The path is
+/// resolved with the same config-relative syntax as tauri.conf.json's
+/// `bundle.resources` entry: on Windows resource_dir() is the exe's own
+/// folder and resources live under a `resources/` subdir there, so the
+/// `resources/` prefix is load-bearing (resolving bare
+/// `transfera-engine/...` misses and the engine never spawns).
 fn sidecar_exe_path(app: &AppHandle) -> Option<PathBuf> {
-    let exe = if cfg!(target_os = "windows") {
-        "transfera-engine.exe"
+    use tauri::path::BaseDirectory;
+    let rel = if cfg!(target_os = "windows") {
+        "resources/transfera-engine/transfera-engine.exe"
     } else {
-        "transfera-engine"
+        "resources/transfera-engine/transfera-engine"
     };
-    app.path()
-        .resource_dir()
-        .ok()
-        .map(|d| d.join("transfera-engine").join(exe))
+    app.path().resolve(rel, BaseDirectory::Resource).ok()
 }
 
 fn spawn_sidecar(app: &AppHandle) -> Result<std::process::Child, String> {
