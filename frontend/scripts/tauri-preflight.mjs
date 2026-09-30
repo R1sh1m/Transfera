@@ -113,7 +113,7 @@ if (exifCount < 0) {
   if (IS_WIN) {
     fail(
       "resources/exiftool_files/ missing — Tauri build-script will fail.",
-      "Copy-Item backend/bin/exiftool/exiftool_files frontend/src-tauri/resources/exiftool_files -Recurse -Force",
+      "New-Item -ItemType Directory -Path frontend/src-tauri/resources/exiftool_files -Force | Out-Null; Copy-Item backend/bin/exiftool/exiftool_files/* frontend/src-tauri/resources/exiftool_files -Recurse -Force",
     );
   } else {
     mkdirSync(exifDir, { recursive: true });
@@ -125,7 +125,7 @@ if (exifCount < 0) {
   // Only .gitkeep (or empty): the stub exe cannot run without its Perl tree.
   fail(
     `resources/exiftool_files/ has no runtime tree (${exifCount} entries) — ExifTool would be broken in the installer.`,
-    "Copy-Item backend/bin/exiftool/exiftool_files frontend/src-tauri/resources/exiftool_files -Recurse -Force",
+    "Copy-Item backend/bin/exiftool/exiftool_files/* frontend/src-tauri/resources/exiftool_files -Recurse -Force",
   );
 } else {
   ok(`resources/exiftool_files/ (${exifCount} entries).`);

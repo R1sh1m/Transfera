@@ -251,11 +251,21 @@ try {
   Copy-Item backend\bin\exiftool\exiftool.exe frontend\src-tauri\resources\exiftool.exe -Force
   # ExifTool v13.59+ ships as a stub exe + exiftool_files/ Perl runtime tree.
   # Copy the whole tree so the launcher can resolve its runtime.
+  # NOTE: the trailing \* copies the tree *contents* into the destination.
+  # Without it, Copy-Item nests the container when the dest dir already
+  # exists (fresh clones carry it with .gitkeep), producing
+  # resources\exiftool_files\exiftool_files\... and the stub fails with
+  # "Could not find ...\exiftool_files\perl5*.dll".
   if (Test-Path "backend\bin\exiftool\exiftool_files") {
-    Copy-Item backend\bin\exiftool\exiftool_files frontend\src-tauri\resources\exiftool_files -Recurse -Force
+    New-Item -ItemType Directory -Path frontend\src-tauri\resources\exiftool_files -Force | Out-Null
+    Copy-Item backend\bin\exiftool\exiftool_files\* frontend\src-tauri\resources\exiftool_files -Recurse -Force
   }
   & frontend\src-tauri\resources\exiftool.exe -ver | Out-Null
-  if ($LASTEXITCODE -ne 0) { Fail "ExifTool smoke test failed." }
+  if ($LASTEXITCODE -ne 0) {
+    Warn "Staged ExifTool tree (frontend\src-tauri\resources\exiftool_files):"
+    Get-ChildItem frontend\src-tauri\resources\exiftool_files -ErrorAction SilentlyContinue | ForEach-Object { Warn "  $($_.Name)" }
+    Fail "ExifTool smoke test failed."
+  }
 } finally { Pop-Location }
 Ok "Sidecar frozen, helpers staged"
 

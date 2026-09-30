@@ -138,9 +138,14 @@ jobs:
           New-Item -ItemType Directory -Path frontend/src-tauri/resources -Force | Out-Null
           Copy-Item backend/bin/wpd_helper.exe frontend/src-tauri/resources/wpd_helper.exe -Force
           Copy-Item backend/bin/exiftool/exiftool.exe frontend/src-tauri/resources/exiftool.exe -Force
-          if (Test-Path backend/bin/exiftool/exiftool_files) {
-            Copy-Item backend/bin/exiftool/exiftool_files frontend/src-tauri/resources/exiftool_files -Recurse -Force
-          }
+           if (Test-Path backend/bin/exiftool/exiftool_files) {
+             # Trailing /* copies the tree *contents*: without it Copy-Item
+             # nests the container when the dest dir already exists
+             # (fresh clones carry it with .gitkeep), breaking the stub's
+             # perl5*.dll lookup.
+             New-Item -ItemType Directory -Path frontend/src-tauri/resources/exiftool_files -Force | Out-Null
+             Copy-Item backend/bin/exiftool/exiftool_files/* frontend/src-tauri/resources/exiftool_files -Recurse -Force
+           }
           & frontend/src-tauri/resources/exiftool.exe -ver
           if ($LASTEXITCODE -ne 0) { Write-Error "ExifTool smoke test failed!"; exit 1 }
           if ((Get-Item frontend/src-tauri/resources/wpd_helper.exe).Length -eq 0) { Write-Error "wpd_helper.exe staging is empty!"; exit 1 }
