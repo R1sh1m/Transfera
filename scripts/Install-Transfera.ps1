@@ -241,8 +241,20 @@ try {
 } finally { Pop-Location }
 Push-Location $Root
 try {
-  .\.venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); sys.exit(0 if p and p.is_file() else 1)"
-  if (-not (Test-Path "backend\bin\exiftool\exiftool.exe")) { Fail "ExifTool pre-seed failed." }
+  # Idempotent pre-seed: re-downloading an 11 MB zip from SourceForge on
+  # every run wastes time and fails the whole install when mirrors stall.
+  # If the staged tree already runs, keep it.
+  $exifOk = $false
+  if ((Test-Path "backend\bin\exiftool\exiftool.exe") -and (Test-Path "backend\bin\exiftool\exiftool_files")) {
+    $verOut = & backend\bin\exiftool\exiftool.exe -ver 2>$null
+    if ($LASTEXITCODE -eq 0 -and $verOut) { $exifOk = $true }
+  }
+  if ($exifOk) {
+    Ok "ExifTool already staged ($($verOut.Trim())) — skipping download"
+  } else {
+    .\.venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); sys.exit(0 if p and p.is_file() else 1)"
+  }
+  if (-not (Test-Path "backend\bin\exiftool\exiftool.exe")) { Fail "ExifTool pre-seed failed (SourceForge mirrors unreachable?). Manual fix: download exiftool-13.59_64.zip from https://exiftool.org, extract exiftool.exe + exiftool_files/ into backend\bin\exiftool\, then re-run this script." }
   .\.venv\Scripts\python -m pip install --upgrade pyinstaller
   powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1
   $staged = Get-ChildItem -Path frontend\src-tauri\binaries -Filter "transfera-engine-*.exe" -File -ErrorAction SilentlyContinue

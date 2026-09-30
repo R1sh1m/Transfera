@@ -331,6 +331,111 @@ def test_download_url_construction() -> None:
 
 
 # ======================================================================
+# 8b. Mirror variants prepend direct-mirror URLs (no /download stall)
+# ======================================================================
+def test_mirror_variants_prepended() -> None:
+    print("\n=== Mirror Variants ===")
+
+    _reset_state()
+
+    cands = [
+        "https://sourceforge.net/projects/exiftool/files/exiftool-13.59_64.zip/download",
+        "https://sourceforge.net/projects/exiftool/files/exiftool-13.59_32.zip/download",
+    ]
+    out = me._with_mirror_variants(cands)
+    _check(
+        "Direct-mirror URLs come first",
+        out[0].startswith("https://downloads.sourceforge.net/"),
+        f"got: {out}",
+    )
+    _check(
+        "All candidates preserved (2 mirrors + 2 verbatim)",
+        len(out) == 4,
+        f"got: {out}",
+    )
+    _check(
+        "Mirror URL version parses to 13.59",
+        me._normalise_candidate_version(out[0]) == "13.59",
+        f"got: {me._normalise_candidate_version(out[0])}",
+    )
+    assert out[0].startswith("https://downloads.sourceforge.net/")
+    assert len(out) == 4
+    assert me._normalise_candidate_version(out[0]) == "13.59"
+    _reset_state()
+
+
+# ======================================================================
+# 8c. Flaky mirror is retried, then succeeds
+# ======================================================================
+class _FakeDownloadResp:
+    """Minimal urlopen response double: headers + chunked reads."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self.headers = {"Content-Length": str(len(payload))}
+        self._pos = 0
+
+    def read(self, n: int = -1) -> bytes:
+        if self._pos >= len(self._payload):
+            return b""
+        end = len(self._payload) if not n or n < 0 else self._pos + n
+        chunk = self._payload[self._pos : end]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def test_download_retries_flaky_mirror() -> None:
+    print("\n=== Download Retries ===")
+
+    _reset_state()
+
+    from urllib.error import URLError
+
+    calls = {"n": 0}
+
+    def flaky_urlopen(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise URLError("Simulated mirror stall")
+        return _FakeDownloadResp(b"x" * 100)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_exe = Path(tmp) / "exiftool.exe"
+        fake_exe.write_bytes(b"fake-exiftool-binary")
+        with (
+            patch("sys.platform", "win32"),
+            patch.object(
+                me,
+                "_fetch_zip_candidates",
+                return_value=["https://downloads.sourceforge.net/project/exiftool/exiftool-13.59_64.zip"],
+            ),
+            patch("backend.engines.metadata_extractor.urlopen", flaky_urlopen),
+            patch.object(me, "_extract_from_zip", return_value=fake_exe),
+            patch("time.sleep", return_value=None),
+        ):
+            result = me._download_exiftool(tmp)
+    _check(
+        "Succeeds after transient failures",
+        result == fake_exe,
+        f"got: {result}",
+    )
+    _check(
+        "Retried exactly twice before success",
+        calls["n"] == 3,
+        f"calls: {calls['n']}",
+    )
+    assert result == fake_exe
+    assert calls["n"] == 3
+    _reset_state()
+
+
+# ======================================================================
 # 9. Platform detection
 # ======================================================================
 def test_platform_detection() -> None:
@@ -447,6 +552,8 @@ def main() -> None:
     test_version_scrape_failure()
     test_zip_extraction()
     test_download_url_construction()
+    test_mirror_variants_prepended()
+    test_download_retries_flaky_mirror()
     test_platform_detection()
     test_bootstrap_idempotent()
     test_zero_byte_placeholder_skipped()

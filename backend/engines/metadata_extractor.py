@@ -11,6 +11,7 @@ Bootstrapper priority:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
@@ -50,10 +51,20 @@ _EXIFTOOL_HOME = "https://exiftool.org"
 _EXIFTOOL_VER_URL = "https://exiftool.org/ver.txt"
 _EXIFTOOL_ZIP_PATTERN = "exiftool-{ver}_?\\.zip"
 
+# Direct-mirror form: redirects straight to a file mirror, skipping the
+# /files/.../download mirror-selection negotiation that frequently stalls
+# (WinError 10060 / read timeouts). Measured ~3.6s vs ~17s to first byte.
+_SF_MIRROR_URL = "https://downloads.sourceforge.net/project/exiftool/{zip}"
+
 # Network protections
 _CONNECT_TIMEOUT = 10  # seconds
 _READ_TIMEOUT = 60  # seconds
 _DOWNLOAD_CHUNK = 8192  # bytes
+
+# Per-URL download retries (SourceForge mirrors are flaky; each attempt
+# re-rolls mirror selection server-side).
+_MAX_DOWNLOAD_ATTEMPTS = 3
+_RETRY_BACKOFF_S = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +343,31 @@ def _candidates_from_version_txt() -> list[str]:
         return []
 
 
+def _with_mirror_variants(candidates: list[str]) -> list[str]:
+    """Prepend direct-mirror URLs for each scraped SourceForge link.
+
+    The ``.../files/<zip>/download`` page negotiates mirror selection
+    before redirecting, and that negotiation is what stalls out
+    (``WinError 10060`` / read timeouts). The
+    ``downloads.sourceforge.net`` form redirects straight to a mirror,
+    so try those first and keep the verbatim homepage links as fallback.
+    Dedupes while preserving order.
+    """
+    out: list[str] = []
+    for url in candidates:
+        s = url.strip()
+        if s.lower().endswith("/download"):
+            s = s[: -len("/download")]
+        s = s.split("?", 1)[0].split("#", 1)[0]
+        zip_name = s.rsplit("/", 1)[-1]
+        if zip_name.lower().endswith(".zip"):
+            mirror = _SF_MIRROR_URL.format(zip=zip_name)
+            if mirror not in candidates and mirror not in out:
+                out.append(mirror)
+    out.extend(u for u in candidates if u not in out)
+    return out
+
+
 def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
     """
     Download the official ExifTool Windows zip, extract exiftool.exe,
@@ -349,6 +385,7 @@ def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
     system binary, so refuse immediately.
     """
     import tempfile
+    import time
 
     if sys.platform != "win32":
         logger.warning(
@@ -367,51 +404,76 @@ def _download_exiftool(dest_dir: Path | str | None = None) -> Path | None:
     if not candidates:
         logger.warning("Could not determine latest ExifTool version from homepage")
         return None
+    # Direct-mirror URLs first: they skip the stall-prone /files/
+    # mirror-selection negotiation (see _with_mirror_variants).
+    candidates = _with_mirror_variants(candidates)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="exiftool_dl_"))
     last_error: Exception | None = None
     try:
-        # Try each verbatim download URL from the homepage in order —
-        # older entries may have been removed upstream (404), so fall
-        # through. SourceForge /download links redirect to a mirror;
-        # urlopen follows redirects automatically.
+        # Try each download URL in order — older entries may have been
+        # removed upstream (404), so fall through. Each URL gets several
+        # attempts because SourceForge mirrors stall transiently and each
+        # attempt re-rolls server-side mirror selection.
         for url in candidates:
             version = _normalise_candidate_version(url) or "unknown"
             zip_name = url.rsplit("/", 1)[-1]
             if zip_name.lower() == "download":
                 zip_name = f"exiftool-{version.replace('.', '_')}.zip"
+            zip_name = zip_name.split("?", 1)[0].split("#", 1)[0]
             logger.info("Downloading ExifTool %s from %s", version, url)
             zip_path = tmp_dir / zip_name
-            try:
-                req = Request(url, headers={"User-Agent": "Transfera/2.0"})
-                with urlopen(req, timeout=_READ_TIMEOUT) as resp:
-                    total = int(resp.headers.get("Content-Length", 0))
-                    downloaded = 0
-                    with open(zip_path, "wb") as fh:
-                        while True:
-                            chunk = resp.read(_DOWNLOAD_CHUNK)
-                            if not chunk:
-                                break
-                            fh.write(chunk)
-                            downloaded += len(chunk)
-                            if total and downloaded % (1024 * 1024) == 0:
-                                pct = (downloaded / total) * 100 if total else 0
-                                logger.debug(
-                                    "Download progress: %d/%d bytes (%.0f%%)",
-                                    downloaded,
-                                    total,
-                                    pct,
-                                )
+            for attempt in range(1, _MAX_DOWNLOAD_ATTEMPTS + 1):
+                try:
+                    req = Request(url, headers={"User-Agent": "Transfera/2.0"})
+                    with urlopen(req, timeout=_READ_TIMEOUT) as resp:
+                        total = int(resp.headers.get("Content-Length", 0))
+                        downloaded = 0
+                        with open(zip_path, "wb") as fh:
+                            while True:
+                                chunk = resp.read(_DOWNLOAD_CHUNK)
+                                if not chunk:
+                                    break
+                                fh.write(chunk)
+                                downloaded += len(chunk)
+                                if total and downloaded % (1024 * 1024) == 0:
+                                    pct = (downloaded / total) * 100 if total else 0
+                                    logger.debug(
+                                        "Download progress: %d/%d bytes (%.0f%%)",
+                                        downloaded,
+                                        total,
+                                        pct,
+                                    )
 
-                logger.info("Download complete: %d bytes -- extracting", zip_path.stat().st_size)
+                    logger.info("Download complete: %d bytes -- extracting", zip_path.stat().st_size)
 
-                extracted = _extract_from_zip(zip_path, dest_dir)
-                if extracted and extracted.is_file():
-                    return extracted
-            except (URLError, OSError, TimeoutError) as exc:
-                logger.warning("ExifTool download failed for %s: %s", url, exc)
-                last_error = exc
-                continue
+                    extracted = _extract_from_zip(zip_path, dest_dir)
+                    if extracted and extracted.is_file():
+                        return extracted
+                    # Zip downloaded but extraction found no binary — the
+                    # archive itself is bad, so retrying the same URL is
+                    # pointless; move on to the next candidate.
+                    logger.warning("ExifTool archive from %s contained no binary -- trying next source", url)
+                    break
+                except (URLError, OSError, TimeoutError) as exc:
+                    last_error = exc
+                    # Stale partial file must not poison the next attempt.
+                    with contextlib.suppress(OSError):
+                        zip_path.unlink(missing_ok=True)
+                    if attempt < _MAX_DOWNLOAD_ATTEMPTS:
+                        wait = _RETRY_BACKOFF_S * attempt
+                        logger.warning(
+                            "ExifTool download failed for %s (attempt %d/%d): %s -- retrying in %.0fs",
+                            url,
+                            attempt,
+                            _MAX_DOWNLOAD_ATTEMPTS,
+                            exc,
+                            wait,
+                        )
+                        time.sleep(wait)
+                    else:
+                        logger.warning("ExifTool download failed for %s: %s", url, exc)
+                    continue
 
         logger.warning("All ExifTool download candidates failed (last: %s)", last_error)
         return None
