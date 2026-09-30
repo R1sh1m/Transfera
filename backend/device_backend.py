@@ -703,7 +703,16 @@ class DeviceBackendManager:
                                 exc,
                             )
 
-                    _asyncio.ensure_future(_self_install_pm3())
+                    # Frozen builds skip the self-install: sys.executable is the
+                    # engine exe (not Python), so spawning it with `-m pip`
+                    # would boot a duplicate engine instead of installing
+                    # anything. The manual prompt remains available.
+                    if getattr(_sys, "frozen", False):
+                        logger.info(
+                            "DeviceBackend: skipping background pymobiledevice3 install (frozen build is immutable)"
+                        )
+                    else:
+                        _asyncio.ensure_future(_self_install_pm3())
 
             # Self-healing: the Apple service may be installed but stopped.
             # Try to restart it before giving up on Tier 1 entirely.

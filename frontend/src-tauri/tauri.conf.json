@@ -39,7 +39,8 @@
       "resources/wpd_helper.exe",
       "resources/exiftool.exe",
       "resources/exiftool_files",
-      "resources/transfera-engine"
+      "resources/transfera-engine",
+      "resources/VC_redist.x64.exe"
     ],
     "windows": {
       "nsis": {
@@ -47,7 +48,8 @@
         "uninstallerIcon": "icons/icon.ico",
         "headerImage": "icons/nsis-header.bmp",
         "uninstallerHeaderImage": "icons/nsis-header.bmp",
-        "sidebarImage": "icons/nsis-sidebar.bmp"
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "installerHooks": "./windows/hooks.nsh"
       }
     }
   }

@@ -162,6 +162,14 @@ def ensure_ai_packages(timeout: int = 600) -> bool:
     import subprocess
     import sys
 
+    if getattr(sys, "frozen", False):
+        # The frozen bundle is immutable: sys.executable is the engine exe,
+        # not a Python interpreter, so `exe -m pip install` would reboot a
+        # duplicate engine instead of installing anything. The AI runtime
+        # ships inside the bundle; if the import still fails, AI search
+        # stays unavailable with keyword fallback intact.
+        logger.warning("AI packages missing in frozen build -- skipping pip install (bundle is immutable)")
+        return False
     logger.info("Installing on-board AI packages from %s", req)
     try:
         with _download_lock:

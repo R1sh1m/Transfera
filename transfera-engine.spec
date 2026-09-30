@@ -28,6 +28,11 @@ a = Analysis(
         # via BACKEND_ROOT (MEIPASS when frozen). The AI wheels themselves
         # stay on-demand — never frozen in.
         ("backend/requirements-ai.txt", "backend"),
+        # WSL bridge script: the Tier 2 orchestrator copies this file into
+        # the WSL distro at setup time (resolved via BACKEND_ROOT, which
+        # points at MEIPASS when frozen — __file__-relative paths do not
+        # exist on disk inside the bundle).
+        ("backend/wsl_bridge.py", "backend"),
     ],
     hiddenimports=[
         # uvicorn dynamic imports (protocols/loops/lifespan selected by string)

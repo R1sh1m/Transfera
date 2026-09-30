@@ -113,6 +113,8 @@ First run takes 5–15 minutes (downloads + build). Every subsequent launch star
 | "duplicates found" paused | Open the popup → **Skip**, **Keep both**, or **Overwrite** → Resume. |
 | Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait, press **Index library**, search again. |
 | Antivirus flags a file | Add the Transfera folder to your AV exclusions — freshly compiled helpers sometimes trip heuristics. |
+| Engine error on launch ("Failed to load Python DLL") | Install the VC++ runtime (the installer does this automatically) or reinstall the app. If the app lives under a OneDrive-synced folder, right-click it → **Always keep on this device** (on-demand stubs break native DLL loading). |
+| Stuck on "Starting Transfera" | The engine crashed on boot — wait ~60 s for the Engine Unavailable screen, then Retry. Still failing? Reinstall, and attach `%APPDATA%\Transfera\data\logs\transfera.log` when asking for help. |
 | Something looks broken | Attach `backend/data/logs/transfera.log` when asking for help. |
 
 ---

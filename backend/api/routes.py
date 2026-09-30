@@ -120,7 +120,7 @@ from backend.device_backend import (
     get_device_backend_manager,
 )
 from backend.engines.batch_manager import create_batches
-from backend.engines.cache_manager import cache_batch
+from backend.engines.cache_manager import DeviceDisconnectedError, cache_batch
 from backend.engines.capture_time import extract_capture_datetime
 from backend.engines.device_import_state import (
     clear_device_state,
@@ -146,6 +146,7 @@ from backend.engines.thumbnail_ops import (
     resolve_thumbnail_source_path,
 )
 from backend.engines.thumbnailer import generate_thumbnail_bytes
+from backend.utils.durability import check_free_space
 
 # Cancellation flag for regenerate_thumbnails background thread.
 # Set by clear_library or a new regeneration request to abort the prior run.
@@ -757,6 +758,19 @@ async def install_pymobiledevice3(_: None = Depends(require_local_token)) -> dic
     ``/device-backend/status`` after this returns to refresh the
     ``pymobiledevice3_installable`` flag.
     """
+    if getattr(sys, "frozen", False):
+        # The frozen bundle is immutable and sys.executable is the engine
+        # exe, not a Python interpreter — spawning `exe -m pip install`
+        # would boot a duplicate engine instead of installing anything.
+        return {
+            "success": False,
+            "message": (
+                "pip install is unavailable in the packaged app. "
+                "pymobiledevice3 ships inside the installer; if Tier 1 is "
+                "still unavailable, install Apple Mobile Device Support "
+                "or use Tier 2 (WSL bridge)."
+            ),
+        }
     try:
         creationflags = 0x08000000 if sys.platform == "win32" else 0
         proc = await asyncio.create_subprocess_exec(
@@ -1706,13 +1720,26 @@ async def _phase_execute_batches(
         async def _hop1_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
             await ws_events.emit_hop1_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
 
-        cached = await cache_batch(
-            batch.id,
-            cache_dir=CACHE_DIR,
-            on_file_progress=_hop1_progress_cb,
-            cancel_event=cancel_event,
-            session_id=session_id,
-        )
+        try:
+            cached = await cache_batch(
+                batch.id,
+                cache_dir=CACHE_DIR,
+                on_file_progress=_hop1_progress_cb,
+                cancel_event=cancel_event,
+                session_id=session_id,
+            )
+        except DeviceDisconnectedError as exc:
+            logger.warning("Session %d paused: device disconnected (%s)", session_id, exc)
+            async with session_scope() as session:
+                ts = await session.get(TransferSession, session_id)
+                if ts:
+                    ts.status = SessionStatus.PAUSED.value
+                    ts.error_message = "Paused: Device was disconnected. Reconnect device and resume."
+                    ts.touch()
+            await ws_events.emit_session_paused(session_id)
+            await ws_events.emit_error(session_id, "Device was disconnected. Reconnect and resume.")
+            return False
+
         await ws_events.emit_hop1_complete(session_id, batch.id, cached)
 
         # --- Hop 2: Cache -> Destination ---
@@ -1720,6 +1747,31 @@ async def _phase_execute_batches(
             ts = await session.get(TransferSession, session_id)
             dest_root = Path(ts.dest_root) if ts else CACHE_DIR
             move_mode = (ts.transfer_mode == "move") if ts else False
+
+        # In-flight disk exhaustion guard: ensure destination drive has >= 500 MB free
+        is_ok, free_bytes, _ = check_free_space(dest_root, needed_bytes=500 * 1024 * 1024, min_margin_bytes=0)
+        if not is_ok:
+            free_mb = free_bytes // (1024 * 1024)
+            logger.warning(
+                "Destination drive low on space (%d MB free) for session %d — pausing to prevent disk full crash",
+                free_mb,
+                session_id,
+            )
+            async with session_scope() as session:
+                ts = await session.get(TransferSession, session_id)
+                if ts:
+                    ts.status = SessionStatus.PAUSED.value
+                    ts.error_message = (
+                        f"Paused: Destination drive is critically low on space ({free_mb} MB free). "
+                        "Free up disk space and resume."
+                    )
+                    ts.touch()
+            await ws_events.emit_session_paused(session_id)
+            await ws_events.emit_error(
+                session_id,
+                f"Destination drive low on space ({free_mb} MB free). Transfer paused.",
+            )
+            return False
 
         async def _hop2_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
             await ws_events.emit_hop2_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)

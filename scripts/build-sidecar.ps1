@@ -31,6 +31,32 @@ if (-not (Test-Path $VenvPython)) {
     exit 1
 }
 
+# One-time VC++ redistributable for the NSIS post-install hook
+# (python312.dll links VCRUNTIME140.dll, which is not inbox on Windows —
+# without it the installed engine dies with "Failed to load Python DLL").
+$VcRedist = Join-Path $Root "frontend\src-tauri\resources\VC_redist.x64.exe"
+$VcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+if (-not (Test-Path $VcRedist) -or (Get-Item $VcRedist).Length -eq 0) {
+    Write-Host "  Downloading VC++ redistributable (~25 MB)..." -ForegroundColor DarkCyan
+    $vcOk = $false
+    for ($i = 1; $i -le 3 -and -not $vcOk; $i++) {
+        try {
+            Invoke-WebRequest -Uri $VcUrl -OutFile $VcRedist -UseBasicParsing -TimeoutSec 120
+            if ((Get-Item $VcRedist).Length -gt 0) { $vcOk = $true }
+        } catch {
+            Write-Host "    attempt $i failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Start-Sleep -Seconds ($i * 2)
+        }
+    }
+    if (-not $vcOk) {
+        Write-Error "VC++ redistributable download failed ($VcUrl). Download VC_redist.x64.exe manually into frontend\src-tauri\resources\ and re-run."
+        exit 1
+    }
+    Write-Host "  VC++ redistributable ready"
+} else {
+    Write-Host "  VC++ redistributable already staged"
+}
+
 Write-Host "  Ensuring PyInstaller is up to date..." -ForegroundColor DarkCyan
 # Native commands log progress to stderr. Under `$ErrorActionPreference =
 # "Stop", Windows PowerShell 5.1 turns those 2>&1-merged stderr lines into

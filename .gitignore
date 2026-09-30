@@ -86,6 +86,10 @@ frontend/src-tauri/resources/exiftool_files/*
 !frontend/src-tauri/resources/transfera-engine/
 frontend/src-tauri/resources/transfera-engine/*
 !frontend/src-tauri/resources/transfera-engine/.gitkeep
+# VC++ redistributable (~25 MB, fetched at build time by
+# scripts/build-sidecar.ps1 for the NSIS post-install hook). Never commit
+# the binary; Unix builds carry a 0-byte placeholder instead.
+frontend/src-tauri/resources/VC_redist*.exe
 # PyInstaller one-dir output (mirrored into src-tauri/resources/transfera-engine/ by scripts/build-sidecar.ps1)
 dist/transfera-engine/
 

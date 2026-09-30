@@ -238,8 +238,10 @@ ok "Sidecar staged."
 # Windows-only Tauri resources must still EXIST or the Rust build-script
 # fails on its resources list. They ship as 0-byte placeholders here; the
 # backend ignores empty files and uses the system ExifTool / skips WPD.
+# (VC_redist.x64.exe is Windows/NSIS-only — the hook that consumes it never
+# runs on dmg/deb installers.)
 mkdir -p "$ROOT/frontend/src-tauri/resources/exiftool_files"
-for _ph in wpd_helper.exe exiftool.exe; do
+for _ph in wpd_helper.exe exiftool.exe VC_redist.x64.exe; do
   [ -f "$ROOT/frontend/src-tauri/resources/$_ph" ] || : > "$ROOT/frontend/src-tauri/resources/$_ph"
 done
 ok "Tauri resource placeholders ensured."

@@ -39,7 +39,11 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 _log_level = getattr(logging, _LOG_LEVEL.upper(), logging.INFO)
-_log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+# Under the windowed frozen bootloader stdio is detached (sys.stdout is
+# None): a StreamHandler bound to None raises on every emit (silently
+# swallowed, but wasted work) — so only attach it when stdout exists.
+# The rotating file handler below is the real record in packaged builds.
+_log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)] if sys.stdout is not None else []
 try:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _file = RotatingFileHandler(

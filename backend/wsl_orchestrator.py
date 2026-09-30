@@ -22,7 +22,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from backend.config import DATA_DIR
+from backend.config import BACKEND_ROOT, DATA_DIR
 
 creationflags = 0x08000000 if sys.platform == "win32" else 0
 
@@ -912,7 +912,10 @@ class WSLOrchestrator:
 
         try:
             await _run_cmd("wsl", "-d", d, "-u", "root", "--", "mkdir", "-p", BRIDGE_INSTALL_PATH, timeout=10)
-            backend_dir = Path(__file__).resolve().parent
+            # BACKEND_ROOT (MEIPASS-aware) — not __file__.parent: frozen
+            # modules have no on-disk source file, so __file__-relative
+            # lookups silently miss and Tier 2 setup would skip the copy.
+            backend_dir = Path(BACKEND_ROOT)
             bridge_src = backend_dir / BRIDGE_SCRIPT_NAME
             if bridge_src.exists():
                 wsl_backend = await _run_cmd_ok("wsl", "-d", d, "--", "wslpath", "-u", str(backend_dir), timeout=10)

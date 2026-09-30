@@ -94,6 +94,39 @@ for (const name of ["wpd_helper.exe", "exiftool.exe"]) {
   }
 }
 
+// -- 2b. VC++ redistributable (Windows/NSIS only) ------------------------------
+// Without it, machines lacking any VS/redist software show the bootloader's
+// "Failed to load Python DLL" dialog on first launch. The NSIS post-install
+// hook consumes it; dmg/deb installers ignore it (0-byte placeholder here
+// is fine — same policy as the helpers above).
+{
+  const vcName = "VC_redist.x64.exe";
+  const p = join(RES, vcName);
+  const size = sizeOf(p);
+  const vcFix =
+    "powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1  (from repo root; downloads it) or https://aka.ms/vs/17/release/vc_redist.x64.exe";
+  if (size < 0) {
+    if (IS_WIN) {
+      fail(
+        `resources/${vcName} missing — end-user machines without the VC++ runtime would hit "Failed to load Python DLL".`,
+        vcFix,
+      );
+    } else {
+      writeFileSync(p, "");
+      warn(
+        `resources/${vcName} missing — created 0-byte placeholder (NSIS-only; ignored on this OS).`,
+      );
+    }
+  } else if (size === 0 && IS_WIN) {
+    fail(
+      `resources/${vcName} is a 0-byte placeholder — run the build-sidecar download so the NSIS hook has a real runtime to install.`,
+      vcFix,
+    );
+  } else {
+    ok(`resources/${vcName} (${size} bytes).`);
+  }
+}
+
 const exifDir = join(RES, "exiftool_files");
 let exifCount = -1;
 try {
