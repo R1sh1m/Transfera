@@ -158,7 +158,11 @@ async def lifespan(app: FastAPI):
     logger.info("Asyncio executor expanded to %d threads (%d CPUs)", _pool_size, _cpu)
 
     if not FRONTEND_DIST.is_dir():
-        logger.warning("Frontend dist not found at %s — API-only mode", FRONTEND_DIST)
+        logger.warning(
+            "Frontend dist not found at %s — API-only mode (expected for the frozen sidecar: "
+            "Tauri serves its own bundled frontend, the engine only needs the API)",
+            FRONTEND_DIST,
+        )
     else:
         logger.info("Serving frontend from %s", FRONTEND_DIST)
 

@@ -114,8 +114,9 @@ First run takes 5–15 minutes (downloads + build). Every subsequent launch star
 | Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait, press **Index library**, search again. |
 | Antivirus flags a file | Add the Transfera folder to your AV exclusions — freshly compiled helpers sometimes trip heuristics. |
 | Engine error on launch ("Failed to load Python DLL") | Install the VC++ runtime (the installer does this automatically) or reinstall the app. If the app lives under a OneDrive-synced folder, right-click it → **Always keep on this device** (on-demand stubs break native DLL loading). |
-| Stuck on "Starting Transfera" | The engine crashed on boot — wait ~60 s for the Engine Unavailable screen, then Retry. Still failing? Reinstall, and attach `%APPDATA%\Transfera\data\logs\transfera.log` when asking for help. |
+| Stuck on "Starting Transfera" | The engine crashed on boot — wait ~60 s for the Engine Unavailable screen, then Retry. Still failing? Reinstall, and attach `%APPDATA%\com.transfera.app\data\logs\transfera.log` when asking for help. |
 | Something looks broken | Attach `backend/data/logs/transfera.log` when asking for help. |
+| Garbled text (boxes, `?`) in the installer terminal | Cosmetic: legacy conhost raster fonts can't render the checkmarks/emoji. Use Windows Terminal, or run `chcp 65001` first (the installer also sets UTF-8 itself when it can). |
 
 ---
 

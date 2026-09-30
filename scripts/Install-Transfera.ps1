@@ -124,6 +124,13 @@ Write-Host ""
 Write-Host "  Your photos & videos. Your machine. Your rules." -ForegroundColor White
 Write-Host "  Windows installer — building everything locally from source" -ForegroundColor DarkCyan
 Write-Host ""
+# Prefer UTF-8 console output so box-drawing, checkmarks and emoji render
+# instead of mojibake. Best-effort: legacy raster-font consoles still show
+# boxes for emoji (cosmetic only — Windows Terminal renders everything).
+try {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  chcp 65001 | Out-Null
+} catch { }
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +199,26 @@ if ($RepoDir -eq "" -and $PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 
 if ($RepoDir -ne "" -and (Test-Path (Join-Path $RepoDir "run.py"))) {
   $Root = (Resolve-Path $RepoDir).Path
   Ok "Using existing checkout: $Root"
+  # Staleness guard: installing from an outdated checkout silently ships old
+  # code. Offline-safe checks only (local refs, no fetch).
+  try {
+    Push-Location $Root
+    try {
+      $headDate = git log -1 --format=%ci 2>$null
+      if ($headDate) { Write-Host "  Checkout commit date: $($headDate.Trim())" }
+      $upstream = git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null
+      if ($upstream) {
+        $behind = git rev-list --count "HEAD..$($upstream.Trim())" 2>$null
+        if ($behind -match '^\d+$' -and [int]$behind.Trim() -gt 0) {
+          Warn "Checkout is $($behind.Trim()) commit(s) behind $upstream - consider 'git pull' before installing."
+        }
+      }
+      $dirtyCount = @(git status --porcelain 2>$null).Count
+      if ($dirtyCount -gt 0) {
+        Warn "Working tree has $dirtyCount uncommitted change(s) - the installer will ship them as-is."
+      }
+    } finally { Pop-Location }
+  } catch { }
 } else {
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
   if (Test-Path (Join-Path $InstallDir "run.py")) {
@@ -220,7 +247,7 @@ try {
   $code = Invoke-Native { & py -3.12 -m venv .venv } "(?!)"
   if ($code -ne 0) { Fail "Python venv creation failed." }
   Step "Upgrading pip..."
-  Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pip -q } "(?!)"
+  $null = Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pip -q } "(?!)"
   Step "Installing Python dependencies (fastapi, sqlalchemy, pillow, blake3 + device stack)..."
   .\.venv\Scripts\python -m pip install -r backend\requirements.txt -q
   if ($LASTEXITCODE -ne 0) { Fail "Backend pip install failed." }
@@ -259,7 +286,7 @@ StepBox "🔍" "8/9" "Native helper + ExifTool + frozen sidecar"
 Push-Location (Join-Path $Root "frontend")
 try {
   Step "Building C++ WPD helper (MSVC)..."
-  Invoke-Native { npm run build:native } "(BUILD SUCCESSFUL|BUILD FAILED|error|up to date)"
+  $null = Invoke-Native { npm run build:native } "(BUILD SUCCESSFUL|BUILD FAILED|error|up to date)"
   if (-not (Test-Path "..\backend\bin\wpd_helper.exe")) {
     Warn "wpd_helper.exe not produced (MSVC missing?) — continuing without it."
   }
@@ -270,10 +297,10 @@ $nsisHeader  = Join-Path $Root "frontend\src-tauri\icons\nsis-header.bmp"
 $nsisSidebar = Join-Path $Root "frontend\src-tauri\icons\nsis-sidebar.bmp"
 if (-not (Test-Path $nsisHeader) -or -not (Test-Path $nsisSidebar)) {
   Step "Generating NSIS installer branding images..."
-  Invoke-Native { .\.venv\Scripts\python -m scripts.generate-nsis-images } "(?!)"
+  $null = Invoke-Native { .\.venv\Scripts\python -m scripts.generate-nsis-images } "(?!)"
   # Fallback: call the script file directly
   if (-not (Test-Path $nsisHeader)) {
-    Invoke-Native { .\.venv\Scripts\python (Join-Path $Root "scripts\generate-nsis-images.py") } "(?!)"
+    $null = Invoke-Native { .\.venv\Scripts\python (Join-Path $Root "scripts\generate-nsis-images.py") } "(?!)"
   }
   if (Test-Path $nsisHeader) { Ok "NSIS branding images generated" }
   else { Warn "Could not generate NSIS branding images — installer will use default logo." }
@@ -296,20 +323,10 @@ try {
     .\.venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); sys.exit(0 if p and p.is_file() else 1)"
   }
   if (-not (Test-Path "backend\bin\exiftool\exiftool.exe")) { Fail "ExifTool pre-seed failed (SourceForge mirrors unreachable?). Manual fix: download exiftool-13.59_64.zip from https://exiftool.org, extract exiftool.exe + exiftool_files/ into backend\bin\exiftool\, then re-run this script." }
-  Step "Installing PyInstaller..."
-  Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pyinstaller -q } "(?!)"
-  Step "Freezing Python backend into sidecar (~200 MB, one-time)..."
-  $code = Invoke-Native { powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1 } "(INFO: Build complete|WARNING|ERROR|Sidecar staged|exe:|Smoke-testing|smoke test)"
-  # build-sidecar.ps1 relays its own failures via exit code — but only the
-  # filtered stream is shown above, so check explicitly: the staging files
-  # below EXIST even when the smoke gate fails (staging precedes probing).
-  if ($LASTEXITCODE -ne 0) { Fail "Sidecar build or frozen-engine smoke test failed (see output above)." }
-  # The one-dir bundle must be staged whole (exe + _internal/ runtime) —
-  # the exe alone cannot start the installed engine.
-  $engineExe = "frontend\src-tauri\resources\transfera-engine\transfera-engine.exe"
-  $engineInternal = "frontend\src-tauri\resources\transfera-engine\_internal"
-  $engineFiles = @(Get-ChildItem -Path $engineInternal -Recurse -File -ErrorAction SilentlyContinue).Count
-  if (-not (Test-Path $engineExe) -or $engineFiles -lt 10) { Fail "Sidecar staging failed (engine exe or _internal runtime missing)." }
+  # Stage helpers into Tauri resources BEFORE build-sidecar: the frozen
+  # smoke probe resolves ExifTool via Tier-0 (resources/), exactly like the
+  # installed app — staging afterwards left the probe downloading (or
+  # degraded) on a path production never takes.
   Copy-Item backend\bin\wpd_helper.exe frontend\src-tauri\resources\wpd_helper.exe -Force -ErrorAction SilentlyContinue
   Copy-Item backend\bin\exiftool\exiftool.exe frontend\src-tauri\resources\exiftool.exe -Force
   # ExifTool v13.59+ ships as a stub exe + exiftool_files/ Perl runtime tree.
@@ -329,6 +346,20 @@ try {
     Get-ChildItem frontend\src-tauri\resources\exiftool_files -ErrorAction SilentlyContinue | ForEach-Object { Warn "  $($_.Name)" }
     Fail "ExifTool smoke test failed."
   }
+  Step "Installing PyInstaller..."
+  $null = Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pyinstaller -q } "(?!)"
+  Step "Freezing Python backend into sidecar (~200 MB, one-time)..."
+  $code = Invoke-Native { powershell -ExecutionPolicy Bypass -File scripts\build-sidecar.ps1 } "(INFO: Build complete|WARNING|ERROR|Sidecar staged|exe:|Smoke-testing|smoke test)"
+  # build-sidecar.ps1 relays its own failures via exit code — but only the
+  # filtered stream is shown above, so check explicitly: the staging files
+  # below EXIST even when the smoke gate fails (staging precedes probing).
+  if ($LASTEXITCODE -ne 0) { Fail "Sidecar build or frozen-engine smoke test failed (see output above)." }
+  # The one-dir bundle must be staged whole (exe + _internal/ runtime) —
+  # the exe alone cannot start the installed engine.
+  $engineExe = "frontend\src-tauri\resources\transfera-engine\transfera-engine.exe"
+  $engineInternal = "frontend\src-tauri\resources\transfera-engine\_internal"
+  $engineFiles = @(Get-ChildItem -Path $engineInternal -Recurse -File -ErrorAction SilentlyContinue).Count
+  if (-not (Test-Path $engineExe) -or $engineFiles -lt 10) { Fail "Sidecar staging failed (engine exe or _internal runtime missing)." }
 } finally { Pop-Location }
 Ok "Sidecar frozen, helpers staged"
 
@@ -351,7 +382,11 @@ if ($Silent) {
   Start-Process $installer.FullName -ArgumentList "/S" -Wait
 } else {
   Step "Launching the installer (one click-through, no SmartScreen)..."
-  Start-Process $installer.FullName -Wait
+  Write-Host "  Complete the installer window to continue (check the taskbar if it opened behind this window)..." -ForegroundColor DarkCyan
+  $installProc = Start-Process $installer.FullName -PassThru -Wait
+  if ($installProc.ExitCode -ne 0) {
+    Fail "Installer exited with code $($installProc.ExitCode) (cancelled?). Re-run this script to retry."
+  }
 }
 Write-Host ""
 Write-Host "  ══════════════════════════════════════════════════════════════" -ForegroundColor Green
@@ -365,7 +400,7 @@ Write-Host "  ║     🔍  ExifTool metadata extraction                       �
 Write-Host "  ║     📱  Apple driver: $(if ($SkipDriver) { 'skipped (fallback active)' } else { 'installed          ' })          ║" -ForegroundColor Green
 Write-Host "  ║     🔧  iPhone WPD helper: $(if ((Test-Path (Join-Path $Root 'backend\bin\wpd_helper.exe'))) { 'built              ' } else { 'skipped (folder OK)' })       ║" -ForegroundColor Green
 Write-Host "  ║                                                            ║" -ForegroundColor Green
-Write-Host "  ║   App data lives in:  %APPDATA%\Transfera                  ║" -ForegroundColor Green
+Write-Host "  ║   App data lives in:  %APPDATA%\com.transfera.app          ║" -ForegroundColor Green
 Write-Host "  ║   Launch it from the Start Menu  🚀                        ║" -ForegroundColor Green
 Write-Host "  ║                                                            ║" -ForegroundColor Green
 Write-Host "  ══════════════════════════════════════════════════════════════" -ForegroundColor Green

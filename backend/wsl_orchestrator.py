@@ -1034,6 +1034,57 @@ class WSLOrchestrator:
             logger.warning("WSL network not ready after 20s — starting bridge anyway")
 
         bridge_path = f"{BRIDGE_INSTALL_PATH}/{BRIDGE_SCRIPT_NAME}"
+        # Pre-flight: confirm the distro can actually run the bridge, so a
+        # missing python3/fastapi surfaces as an actionable message instead
+        # of a bare exit code with undecodable output. Probe failures of the
+        # probe itself (transient wsl.exe hiccups) never block the spawn
+        # attempt, which may still succeed.
+        try:
+            py_rc, py_out, _ = await _run_cmd(
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "python3",
+                "-c",
+                "import sys; print(sys.version.split()[0])",
+                timeout=15,
+            )
+            if py_rc != 0:
+                status.error = (
+                    f"Python 3 is not available in the WSL distro '{d}'. "
+                    "Install it inside WSL (`sudo apt update && sudo apt install -y python3`) "
+                    "and retry Tier 2 setup."
+                )
+                status.error_code = "WSL_NO_PYTHON"
+                logger.error("start_bridge: %s", status.error)
+                return status
+            logger.info("start_bridge: distro python3 %s", py_out.strip())
+            dep_rc, _, _ = await _run_cmd(
+                "wsl",
+                "-d",
+                d,
+                "-u",
+                "root",
+                "--",
+                "python3",
+                "-c",
+                "import fastapi, uvicorn",
+                timeout=15,
+            )
+            if dep_rc != 0:
+                status.error = (
+                    "The WSL distro is missing the bridge packages. Install them inside WSL with "
+                    "`pip3 install fastapi 'uvicorn[standard]'` and retry Tier 2 setup. "
+                    "(pymobiledevice3 is optional — the bridge degrades without it.)"
+                )
+                status.error_code = "WSL_DEPS_MISSING"
+                logger.error("start_bridge: %s", status.error)
+                return status
+        except Exception as exc:
+            logger.debug("start_bridge: distro pre-flight probe failed, proceeding anyway: %s", exc)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "wsl",
@@ -1053,19 +1104,20 @@ class WSLOrchestrator:
             for _ in range(120):
                 await asyncio.sleep(0.5)
                 if proc.returncode is not None:
-                    # Process exited — capture output before continuing
+                    # Process exited — capture output before continuing.
+                    # Decode with the module helper (BOM/pattern-sniffed):
+                    # the previous inline loop tried utf-16-le FIRST, which
+                    # never raises on even-length bytes and turned Linux
+                    # UTF-8 output into unreadable CJK — permanently hiding
+                    # the real cause of bridge failures.
                     captured_stdout, captured_stderr = await proc.communicate()
-                    raw_stderr = captured_stderr if captured_stderr else b""
-                    for enc in ("utf-16-le", "utf-8", "cp1252"):
-                        try:
-                            stderr_text = raw_stderr.decode(enc).replace("\x00", "").strip()
-                            break
-                        except (UnicodeDecodeError, ValueError):
-                            continue
-                    else:
-                        stderr_text = raw_stderr.decode("utf-8", errors="replace").strip()
+                    stderr_text = _decode_wsl_output(captured_stderr or b"").replace("\x00", "").strip()
                     stderr_text = re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", stderr_text)
-                    stdout_text = captured_stdout.decode("utf-8", errors="replace").strip() if captured_stdout else ""
+                    stdout_text = (
+                        _decode_wsl_output(captured_stdout or b"").replace("\x00", "").strip()
+                        if captured_stdout
+                        else ""
+                    )
                     body = stderr_text or stdout_text
                     msg = body or f"Bridge exited with code {proc.returncode}"
                     logger.error(

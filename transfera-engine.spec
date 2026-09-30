@@ -133,3 +133,10 @@ coll = COLLECT(
     upx_exclude=["python*.dll", "vcruntime*.dll", "msvcp*.dll", "ucrtbase.dll"],
     name="transfera-engine",
 )
+
+# Known-benign PyInstaller warnings (do not "fix" — they are the
+# dependencies probing for optional components):
+#   Hidden import "pysqlite2"/"MySQLdb" not found  — sqlalchemy DBAPI probes;
+#     we use sqlite3/aiosqlite.  coredll.lib via ctypes not found — WinCE
+#     artifact.  Suppressing warnings globally would also hide real bundle
+#     gaps (e.g. a missing hidden import that breaks a frozen feature).

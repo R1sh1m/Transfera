@@ -46,6 +46,18 @@ E2E run by the agent before tagging (see release job for v2.7.0):
 - [x] `Install-Transfera.ps1` aborted Step 7 on the first vite/rustc/npm stderr warning: with `$ErrorActionPreference = "Stop"`, PS 5.1 turns `2>&1`-merged native stderr into terminating errors. All native pipelines now go through `Invoke-Native` (scoped Continue + explicit exit-code gates); mechanism proven under both 5.1 and 7.x.
 - [ ] Re-run the full installer from the main repo checkout (the failing run used the stale `test\Transfera` checkout, which predates the sidecar/resources fixes — always install from the repo with the fixes).
 
+## Post-2.7.0 findings, second pass (unreleased)
+
+- [x] Tier 2 bridge died with rc=2 and unreadable stderr: the bridge-output decoder tried utf-16-le first (never raises on even-length bytes, produced CJK garbage). Now uses the BOM/pattern-sniffing `_decode_wsl_output` helper, plus a distro pre-flight probe (python3 + fastapi/uvicorn) that names the real cause with an actionable message.
+- [x] Frozen smoke probe could download ExifTool instead of using Tier-0: helper staging moved before `build-sidecar`, so the gate exercises the exact production resolution path.
+- [x] Bare `0` lines in installer output: `Invoke-Native` return values leaked to output on fire-and-forget calls; now `$null =`-assigned.
+- [x] Installer mojibake on legacy conhost: UTF-8 output encoding + `chcp 65001` at startup (best-effort); README troubleshooting row added.
+- [x] Wrong app-data path in docs/banner (`%APPDATA%\Transfera`): Tauri uses the app identifier — corrected to `%APPDATA%\com.transfera.app` in README + installer banner.
+- [x] PyInstaller `pysqlite2`/`MySQLdb`/`coredll.lib` warnings documented as known-benign in the spec (suppressing them would blind us to real bundle gaps).
+- [x] Step 5 staleness guard: warns on dirty tree / behind-upstream checkouts (offline-safe, local refs only).
+- [x] Installer wizard hang: explicit "complete the installer window" guidance + exit-code check (cancel detected instead of a false ALL DONE).
+- [ ] Re-run the full installer from the main repo checkout (above) and confirm the NSIS wizard completes.
+
 ## Sign-off
 
 - [ ] All matrix rows pass (or failures filed as issues with scenario # referenced).
