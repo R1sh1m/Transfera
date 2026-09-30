@@ -5,6 +5,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { isDesktop, isWindowFocused, showNotification } from "@/lib/desktop";
 import { queryClient } from "@/lib/query-client";
 import { clearThumbFailCache } from "@/lib/thumbnail-fetch";
 import type {
@@ -894,8 +895,6 @@ export const useTransferStore = create<TransferStore>()(
           if (typeof window !== "undefined") {
             void (async () => {
               try {
-                const { isDesktop, isWindowFocused, showNotification } =
-                  await import("@/lib/desktop");
                 if (!isDesktop) return;
                 const focused = await isWindowFocused();
                 if (focused) return; // Don't bother the user if they're looking at the app
