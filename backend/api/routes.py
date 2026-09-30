@@ -2706,7 +2706,7 @@ async def execute_document_migration(
     errors: list[str] = []
 
     async with session_scope() as session:
-        moves, _ = await _collect_document_moves(session, item_ids=wanted)
+        moves, _truncated = await _collect_document_moves(session, item_ids=wanted)
         if wanted is not None:
             # IDs that produced no move are already migrated or unlocatable.
             wanted_ids = {m.item_id for m in moves}
