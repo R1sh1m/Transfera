@@ -794,6 +794,47 @@ export default function LibraryPage() {
     [],
   );
 
+  // Quick Look & Keyboard Navigation
+  const selectedIndex = useMemo(() => {
+    if (!selectedItem) return -1;
+    return libraryItems.findIndex((it) => it.id === selectedItem.id);
+  }, [libraryItems, selectedItem]);
+
+  const hasNext = selectedIndex >= 0 && selectedIndex < libraryItems.length - 1;
+  const hasPrev = selectedIndex > 0;
+
+  const handleNextItem = useCallback(() => {
+    if (selectedIndex >= 0 && selectedIndex < libraryItems.length - 1) {
+      const next = libraryItems[selectedIndex + 1];
+      if (next) setSelectedItem(next);
+    }
+  }, [selectedIndex, libraryItems]);
+
+  const handlePrevItem = useCallback(() => {
+    if (selectedIndex > 0) {
+      const prev = libraryItems[selectedIndex - 1];
+      if (prev) setSelectedItem(prev);
+    }
+  }, [selectedIndex, libraryItems]);
+
+  // Spacebar Quick Look shortcut to open first/active item
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isInput =
+        document.activeElement?.tagName === "INPUT" ||
+        document.activeElement?.tagName === "TEXTAREA";
+      if (isInput) return;
+
+      if (e.key === " " && !selectedItem && libraryItems.length > 0) {
+        e.preventDefault();
+        const first = libraryItems[0];
+        if (first) setSelectedItem(first);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedItem, libraryItems]);
+
   // Infinite scroll observer
   const loadMore = useCallback(() => {
     if (libraryIsLoadingMore || isFetching) return;
@@ -1311,6 +1352,10 @@ export default function LibraryPage() {
       <MediaDetailModal
         item={selectedItem}
         onClose={() => setSelectedItem(null)}
+        onNext={handleNextItem}
+        onPrev={handlePrevItem}
+        hasNext={hasNext}
+        hasPrev={hasPrev}
       />
     </div>
   );

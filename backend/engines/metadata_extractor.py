@@ -661,12 +661,14 @@ class _ExifToolSession:
     """
 
     _SENTINEL = "{ready}"
+    _MAX_ITEMS_BEFORE_RECYCLE = 1000
 
     def __init__(self) -> None:
         self._lock = _threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._stdout_queue: _queue.Queue[bytes] = _queue.Queue()
         self._reader_thread: _threading.Thread | None = None
+        self._items_processed: int = 0
 
     def _read_stdout_loop(self, stdout: _io.BufferedReader, q: _queue.Queue[bytes]) -> None:
         """Daemon thread reading lines from stdout and putting them in the queue."""
@@ -706,6 +708,7 @@ class _ExifToolSession:
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            self._items_processed = 0
             logger.info("ExifTool stay_open session started (PID %d)", self._proc.pid)
 
             # Start the reader thread
@@ -722,6 +725,7 @@ class _ExifToolSession:
         except OSError as exc:
             logger.warning("ExifTool stay_open failed to start: %s", exc)
             self._proc = None
+            self._items_processed = 0
             return False
 
     def _ensure_running(self) -> bool:
@@ -757,6 +761,7 @@ class _ExifToolSession:
                 except Exception:
                     pass
                 self._proc = None
+                self._items_processed = 0
                 return None
 
             if not line:
@@ -785,7 +790,16 @@ class _ExifToolSession:
             if raw is None:
                 logger.warning("ExifTool stay_open died mid-batch; will restart on next call")
                 self._proc = None
+                self._items_processed = 0
                 return {str(p.resolve()): _extract_via_filesystem(p) for p in paths}
+
+            self._items_processed += len(paths)
+            if self._items_processed >= self._MAX_ITEMS_BEFORE_RECYCLE:
+                logger.info(
+                    "ExifTool session processed %d items; recycling process to prevent memory bloat",
+                    self._items_processed,
+                )
+                self._close_process_locked()
 
         # Parse JSON outside the lock
         try:
@@ -835,22 +849,28 @@ class _ExifToolSession:
 
         return results
 
-    def close(self) -> None:
-        """Gracefully shut down the persistent ExifTool process."""
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
+    def _close_process_locked(self) -> None:
+        """Gracefully shut down the persistent ExifTool process. Assumes self._lock held."""
+        if self._proc is not None:
+            if self._proc.poll() is None:
                 try:
                     if self._proc.stdin:
                         self._proc.stdin.write(b"-stay_open\nFalse\n")
                         self._proc.stdin.flush()
                         self._proc.stdin.close()
-                    self._proc.wait(timeout=5)
+                    self._proc.wait(timeout=2.0)
                 except Exception:
                     try:
                         self._proc.kill()
                     except Exception:
                         pass
             self._proc = None
+        self._items_processed = 0
+
+    def close(self) -> None:
+        """Gracefully shut down the persistent ExifTool process."""
+        with self._lock:
+            self._close_process_locked()
             logger.info("ExifTool stay_open session closed")
 
 

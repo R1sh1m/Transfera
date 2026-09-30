@@ -12,7 +12,6 @@ import {
   ExternalLink,
   Copy,
   Check,
-  ShieldCheck,
   Calendar,
   Camera,
   HardDrive,
@@ -21,16 +20,23 @@ import {
   Loader2,
   Clock,
   Sparkles,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useMediaItem } from "@/lib/queries";
 import { fetchThumbnail } from "@/lib/thumbnail-fetch";
 import { parseBackendDate } from "@/lib/utils";
 import { isDesktop, showItemInFolder, openPath } from "@/lib/desktop";
+import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
 import type { MediaItemInfo } from "@/types/api";
 
 interface MediaDetailModalProps {
   item: MediaItemInfo | null;
   onClose: () => void;
+  onNext?: () => void;
+  onPrev?: () => void;
+  hasNext?: boolean;
+  hasPrev?: boolean;
 }
 
 function formatSize(bytes: number): string {
@@ -60,6 +66,10 @@ function formatDate(iso: string | null | undefined): string {
 export default function MediaDetailModal({
   item,
   onClose,
+  onNext,
+  onPrev,
+  hasNext,
+  hasPrev,
 }: MediaDetailModalProps) {
   const [copied, setCopied] = useState(false);
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
@@ -96,14 +106,28 @@ export default function MediaDetailModal({
     };
   }, [thumbUrl]);
 
-  // Keyboard shortcut: Escape to close
+  // Keyboard shortcut: Escape or Space to close; Arrow keys to navigate
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      const isInput =
+        document.activeElement?.tagName === "INPUT" ||
+        document.activeElement?.tagName === "TEXTAREA";
+      if (isInput) return;
+
+      if (e.key === "Escape" || e.key === " ") {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === "ArrowLeft" && onPrev && hasPrev) {
+        e.preventDefault();
+        onPrev();
+      } else if (e.key === "ArrowRight" && onNext && hasNext) {
+        e.preventDefault();
+        onNext();
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [onClose, onPrev, onNext, hasPrev, hasNext]);
 
   if (!item) return null;
 
@@ -172,13 +196,36 @@ export default function MediaDetailModal({
                 </span>
               )}
             </div>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-              aria-label="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              {hasPrev && (
+                <button
+                  onClick={onPrev}
+                  className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  aria-label="Previous item (Left Arrow)"
+                  title="Previous item (Left Arrow)"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+              )}
+              {hasNext && (
+                <button
+                  onClick={onNext}
+                  className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  aria-label="Next item (Right Arrow)"
+                  title="Next item (Right Arrow)"
+                >
+                  <ChevronRight className="w-5 h-5" />
+                </button>
+              )}
+              <button
+                onClick={onClose}
+                className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors ml-1"
+                aria-label="Close (Escape or Space)"
+                title="Close (Escape or Space)"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {/* Modal Body */}
@@ -207,10 +254,12 @@ export default function MediaDetailModal({
                   </span>
                 )}
                 {activeItem.final_status === "completed" && (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-pill bg-green-600 text-white text-[11px] font-normal shadow-sm">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    Checksum Verified
-                  </span>
+                  <VerifiedCheckBadge
+                    size="sm"
+                    showLabel
+                    labelText="BLAKE3 Verified"
+                    className="shadow-sm"
+                  />
                 )}
               </div>
             </div>
@@ -300,9 +349,9 @@ export default function MediaDetailModal({
 
               <div className="p-3 bg-muted/30 border border-border/60 rounded-xl">
                 <p className="text-[11px] text-muted-foreground">Protection</p>
-                <p className="text-sm font-semibold text-foreground mt-1 flex items-center gap-1 text-green-600 dark:text-green-400">
-                  <ShieldCheck className="w-4 h-4" />
-                  BLAKE3 Safe
+                <p className="text-sm font-semibold text-foreground mt-1 flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                  <VerifiedCheckBadge size="sm" />
+                  BLAKE3 Verified
                 </p>
               </div>
             </div>

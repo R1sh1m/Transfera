@@ -269,10 +269,13 @@ export async function restartApp(): Promise<void> {
 
 // -- Taskbar progress --------------------------------------------------------
 
-export async function setTrayProgress(value: number | null): Promise<void> {
+export async function setTrayProgress(
+  value: number | null,
+  status?: "normal" | "paused" | "error",
+): Promise<void> {
   if (!isTauri) return;
   const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("set_progress", { value });
+  await invoke("set_progress", { value, status });
 }
 
 // -- App exit / close guard -------------------------------------------------

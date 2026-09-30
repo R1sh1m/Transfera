@@ -75,6 +75,8 @@ function timeAgo(dateStr: string): string {
 // ---------------------------------------------------------------------------
 // Status Badge
 // ---------------------------------------------------------------------------
+import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
+
 const fallbackBadge = {
   color: "text-muted-foreground",
   bg: "bg-muted",
@@ -101,9 +103,9 @@ const statusConfig: Record<
     icon: <AlertTriangle className="w-3.5 h-3.5" />,
   },
   completed: {
-    color: "text-green-600 dark:text-green-400",
-    bg: "bg-green-50 dark:bg-green-950",
-    icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+    color: "text-emerald-700 dark:text-emerald-400",
+    bg: "bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/70 dark:border-emerald-800/70",
+    icon: <VerifiedCheckBadge size="sm" />,
   },
   completed_with_errors: {
     color: "text-amber-600 dark:text-amber-400",
@@ -127,13 +129,20 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-normal",
+        "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-normal",
         c.bg,
         c.color,
       )}
+      title={
+        status === "completed"
+          ? "All hashes verified (BLAKE3 cryptographic integrity confirmed)"
+          : undefined
+      }
     >
       {c.icon}
-      {status.charAt(0).toUpperCase() + status.slice(1)}
+      {status === "completed"
+        ? "Completed"
+        : status.charAt(0).toUpperCase() + status.slice(1)}
     </span>
   );
 }

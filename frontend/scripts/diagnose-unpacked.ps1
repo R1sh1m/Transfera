@@ -1,12 +1,17 @@
-﻿$env:ELECTRON_ENABLE_LOGGING = "1"
 $stdoutLog = "unpacked-stdout.log"
 $stderrLog = "unpacked-stderr.log"
 
 if (Test-Path $stdoutLog) { Remove-Item $stdoutLog }
 if (Test-Path $stderrLog) { Remove-Item $stderrLog }
 
-Write-Host "Launching Unpacked Transfera..."
-$p = Start-Process -FilePath "frontend\release\win-unpacked\Transfera.exe" -NoNewWindow -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+$appPath = "frontend\src-tauri\target\release\Transfera.exe"
+if (-not (Test-Path $appPath)) {
+    Write-Host "Tauri release binary not found at $appPath. Run 'npm run tauri:build' first." -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host "Launching Unpacked Transfera (Tauri)..."
+$p = Start-Process -FilePath $appPath -NoNewWindow -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 Start-Sleep -Seconds 10
 
 Write-Host "Stopping processes..."

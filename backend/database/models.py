@@ -164,6 +164,8 @@ class MediaItem(Base):
         Index("ix_media_items_trashed", "trashed"),
         Index("ix_media_items_date_taken", "date_taken"),
         Index("ix_media_items_camera", "camera_make", "camera_model"),
+        Index("ix_media_items_session_hop1", "session_id", "hop1_status"),
+        Index("ix_media_items_session_hop2", "session_id", "hop2_status"),
     )
 
     def __init__(self, **kwargs: object) -> None:

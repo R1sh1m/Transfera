@@ -40,6 +40,7 @@ import { useTransferStore } from "@/store/transfer";
 import { useTransferWs } from "@/hooks/use-transfer-ws";
 import { cn } from "@/lib/utils";
 import { isDesktop, openPath, setTrayProgress } from "@/lib/desktop";
+import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
 import type { SessionProgress, RecentItemProgress } from "@/types/api";
 
 // Keep track of session IDs that have already been started to prevent double-triggering
@@ -461,12 +462,20 @@ function TransferCompleteSummary({
     <div className="p-3 bg-muted/50 rounded-md space-y-2">
       {hasSuccess ? (
         <div className="flex items-start gap-2.5">
-          <CheckCircle2 className="w-5 h-5 text-green-500 mt-0.5 shrink-0" />
-          <div>
-            <p className="text-sm font-semibold text-foreground">
-              {completedItems} file{completedItems !== 1 ? "s" : ""}
-              {sizeText} safely backed up and verified
-            </p>
+          <VerifiedCheckBadge size="lg" className="mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-sm font-semibold text-foreground">
+                {completedItems} file{completedItems !== 1 ? "s" : ""}
+                {sizeText} safely backed up and verified
+              </p>
+              <VerifiedCheckBadge
+                size="sm"
+                showLabel
+                labelText="BLAKE3 Verified"
+                className="text-[10px]"
+              />
+            </div>
             {failedItems > 0 && (
               <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 {failedItems} file{failedItems !== 1 ? "s" : ""} could not be
@@ -565,15 +574,22 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   useEffect(() => {
     if (!isDesktop) return;
     if (isTerminal) {
-      setTrayProgress(null);
+      if (isFailed) {
+        setTrayProgress(1, "error");
+      } else {
+        setTrayProgress(null);
+      }
     } else if (transfer.status === "running" || transfer.status === "paused") {
       const fraction = Math.max(
         0,
         Math.min(1, (transfer.progressPercent ?? 0) / 100),
       );
-      setTrayProgress(fraction);
+      setTrayProgress(
+        fraction,
+        transfer.status === "paused" ? "paused" : "normal",
+      );
     }
-  }, [transfer.progressPercent, transfer.status, isTerminal]);
+  }, [transfer.progressPercent, transfer.status, isTerminal, isFailed]);
 
   return (
     <div className="w-80 bg-card border border-border rounded-lg flex flex-col">
@@ -1045,9 +1061,14 @@ export default function TransferPage() {
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
-            <h1 className="text-lg font-bold text-foreground">
-              {transfer.sessionName || "Transfer"}
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-bold text-foreground">
+                {transfer.sessionName || "Transfer"}
+              </h1>
+              {transfer.status === "completed" && (
+                <VerifiedCheckBadge size="sm" showLabel labelText="Verified" />
+              )}
+            </div>
             <div className="flex items-center gap-2 mt-0.5">
               <p className="text-xs text-muted-foreground">
                 {transfer.sourceRoot} {"->"} {transfer.destRoot}

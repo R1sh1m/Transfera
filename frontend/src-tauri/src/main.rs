@@ -493,13 +493,22 @@ fn open_path(full_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_progress(window: tauri::Window, value: Option<f64>) -> Result<(), String> {
+fn set_progress(
+    window: tauri::Window,
+    value: Option<f64>,
+    status: Option<String>,
+) -> Result<(), String> {
     use tauri::window::{ProgressBarState, ProgressBarStatus};
+    let bar_status = match status.as_deref() {
+        Some("paused") => ProgressBarStatus::Paused,
+        Some("error") => ProgressBarStatus::Error,
+        _ => ProgressBarStatus::Normal,
+    };
     let state = match value {
         Some(v) => {
             let pct = (v.clamp(0.0, 1.0) * 100.0).round() as u64;
             ProgressBarState {
-                status: Some(ProgressBarStatus::Normal),
+                status: Some(bar_status),
                 progress: Some(pct),
             }
         }

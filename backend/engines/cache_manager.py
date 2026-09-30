@@ -135,6 +135,11 @@ _TRANSIENT_EXC_NAMES: frozenset[str] = frozenset(
 )
 
 
+class DeviceDisconnectedError(RuntimeError):
+    """Raised when an external device or USB cable is disconnected mid-transfer."""
+    pass
+
+
 # Exception types (by name string) that indicate the device was disconnected
 # (as opposed to a transient USB blip that is safe to retry).
 _DISCONNECT_EXC_NAMES: frozenset[str] = frozenset(
@@ -420,6 +425,10 @@ async def cache_batch(
                 cached_count += 1
                 if cached_path is not None:
                     pending_thumbnails.append((item.id, cached_path))
+        except DeviceDisconnectedError:
+            cancelled = True
+            logger.warning("Device disconnected while caching batch %d at item %d/%d", batch_id, idx + 1, total)
+            raise
         except Exception as exc:
             logger.error("Cache failed for item %d (%s): %s", item.id, item.source_path, exc)
             await _mark_item_hop1(item, HopStatus.FAILED, str(exc))
@@ -628,6 +637,8 @@ async def _cache_single_item(
                 )
                 await asyncio.sleep(delay)
         if last_exc is not None:
+            if _looks_like_disconnect(last_exc):
+                raise DeviceDisconnectedError(f"Device disconnected during read: {last_exc}") from last_exc
             await _mark_item_hop1(item, HopStatus.FAILED, f"Read failed after all retries: {last_exc}")
             return (False, None)
 

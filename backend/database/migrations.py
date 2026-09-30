@@ -105,6 +105,8 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (43, "CREATE INDEX IF NOT EXISTS ix_faces_media_id ON faces (media_id)"),
     (44, "CREATE INDEX IF NOT EXISTS ix_faces_person_id ON faces (person_id)"),
     (45, "ALTER TABLE transfer_sessions ADD COLUMN is_prescan BOOLEAN NOT NULL DEFAULT 0"),
+    (46, "CREATE INDEX IF NOT EXISTS ix_media_items_session_hop1 ON media_items (session_id, hop1_status)"),
+    (47, "CREATE INDEX IF NOT EXISTS ix_media_items_session_hop2 ON media_items (session_id, hop2_status)"),
 ]
 
 
