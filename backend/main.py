@@ -242,59 +242,68 @@ async def lifespan(app: FastAPI):
     app.state.device_manager_init_task = asyncio.create_task(_init_device_manager_background(manager))
     yield
 
-    # Shutdown — drain in-flight transfers before disposing the engine.
+    # Shutdown — teardown runs concurrently where ordering allows. The
+    # transfer drain must precede engine disposal (it writes the DB), but
+    # the ExifTool session close and thumbnail flush are independent of
+    # it, so all three run together instead of sequentially (~15s worst
+    # case before). Blocking sync closes run in threads to avoid stalling
+    # the event loop.
     task = getattr(app.state, "device_manager_init_task", None)
     if task is not None and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    try:
-        from backend.api.routes import _active_tasks, _cancellation_events
+    async def _drain_transfer_tasks() -> None:
+        try:
+            from backend.api.routes import _active_tasks, _cancellation_events
 
-        for sid in list(_active_tasks.keys()):
-            try:
-                ev = _cancellation_events.get(sid)
-                if ev is not None:
-                    ev.set()
-            except Exception:
-                pass
-        if _active_tasks:
-            tasks = list(_active_tasks.values())
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=10.0,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "Shutdown timed out waiting for %d transfer task(s)",
-                    len(tasks),
-                )
-                for t in tasks:
-                    t.cancel()
-    except Exception as exc:
-        logger.debug("Transfer drain skipped: %s", exc)
+            for sid in list(_active_tasks.keys()):
+                try:
+                    ev = _cancellation_events.get(sid)
+                    if ev is not None:
+                        ev.set()
+                except Exception:
+                    pass
+            if _active_tasks:
+                tasks = list(_active_tasks.values())
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=10.0,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Shutdown timed out waiting for %d transfer task(s)",
+                        len(tasks),
+                    )
+                    for t in tasks:
+                        t.cancel()
+        except Exception as exc:
+            logger.debug("Transfer drain skipped: %s", exc)
 
-    # Close the persistent ExifTool session (if it was ever started)
-    try:
-        from backend.engines.metadata_extractor import _exiftool_session
+    async def _close_exiftool_session() -> None:
+        try:
+            from backend.engines.metadata_extractor import _exiftool_session
 
-        _exiftool_session.close()
-    except Exception:
-        pass
+            await asyncio.to_thread(_exiftool_session.close)
+        except Exception:
+            pass
 
-    # Drain the thumbnail DB worker queue (ROUGH-1 fix): send the None
-    # sentinel so the daemon thread flushes its last batch before the
-    # engine is disposed and DB connections are closed.
-    try:
-        from backend.engines.cache_manager import _thumb_update_queue, _thumb_worker_started
+    async def _flush_thumbnail_queue() -> None:
+        try:
+            from backend.engines.cache_manager import flush_thumb_worker
 
-        if _thumb_worker_started:
-            _thumb_update_queue.put(None)  # sentinel — worker exits after draining
-            await asyncio.sleep(0.2)  # brief yield to let the worker flush
-    except Exception:
-        pass
+            await asyncio.to_thread(flush_thumb_worker, 3.0)
+        except Exception:
+            pass
+
+    await asyncio.gather(
+        _drain_transfer_tasks(),
+        _close_exiftool_session(),
+        _flush_thumbnail_queue(),
+        return_exceptions=True,
+    )
 
     await dispose_engine()
     logger.info("Transfera v2 shutdown complete")

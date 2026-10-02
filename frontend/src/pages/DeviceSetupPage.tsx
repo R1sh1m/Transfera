@@ -619,13 +619,14 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                         const activeTier = tier2Status.data?.active_tier;
 
                         /* Some tier is actively working, just no devices
-                     connected right now — informational, not a warning */
+                      connected right now — amber empty-state so the lack
+                      of devices reads as "action needed", not neutral. */
                         if (activeTier && activeTier !== "none") {
                           return (
                             <div className="space-y-2.5">
-                              <div className="flex items-start justify-between gap-2 bg-muted/40 border border-border rounded-lg p-3">
+                              <div className="flex items-start justify-between gap-2 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
                                 <div className="flex items-start gap-2.5">
-                                  <Smartphone className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+                                  <Smartphone className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
                                   <div>
                                     <p className="text-xs font-semibold text-foreground">
                                       No devices detected yet
@@ -653,11 +654,11 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                 </button>
                               </div>
 
-                              <div className="p-3 bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-lg text-xs space-y-1.5">
-                                <p className="font-semibold text-blue-900 dark:text-blue-300 text-[11px] uppercase tracking-wider">
+                              <div className="p-3 bg-amber-500/10 dark:bg-amber-950/20 border border-amber-500/30 dark:border-amber-900/40 rounded-lg text-xs space-y-1.5">
+                                <p className="font-semibold text-amber-700 dark:text-amber-300 text-[11px] uppercase tracking-wider">
                                   Quick iPhone Connection Checklist
                                 </p>
-                                <ul className="space-y-1 text-[11px] text-blue-800 dark:text-blue-300/90 list-disc list-inside">
+                                <ul className="space-y-1 text-[11px] text-amber-800 dark:text-amber-300/90 list-disc list-inside">
                                   <li>
                                     <strong>Unlock device:</strong> Screen must
                                     be awake and unlocked with passcode

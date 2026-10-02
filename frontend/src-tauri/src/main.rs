@@ -16,6 +16,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,7 +36,11 @@ const BACKEND_PORT: u16 = 47821;
 // before reporting backend:down. The frontend self-heals anyway once
 // /api/health answers, so this only delays the error screen, never blocks.
 const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
-const GRACEFUL_SHUTDOWN_WAIT: Duration = Duration::from_secs(4);
+// Graceful shutdown budget: the backend drains in-flight transfers (up to
+// ~10s) before exiting. Generous on purpose — the window hides immediately
+// (see ExitRequested), so a slow-but-clean teardown is invisible, while a
+// short budget would taskkill mid-transfer and orphan work.
+const GRACEFUL_SHUTDOWN_WAIT: Duration = Duration::from_secs(12);
 
 /// IPC allowlist — renderer input must never reach process spawn unvalidated.
 /// Mirrors ALLOWED_ELEVATED_BINARIES in the old Electron main process.
@@ -210,7 +216,9 @@ fn shutdown_backend(app: &AppHandle) {
     // the graceful POST above is sufficient.
     #[cfg(target_os = "windows")]
     if port_open() {
+        // CREATE_NO_WINDOW: no console flash on the way out.
         let _ = std::process::Command::new("powershell")
+            .creation_flags(0x08000000)
             .args([
                 "-NoProfile",
                 "-Command",
@@ -847,6 +855,13 @@ fn main() {
                         ds.0.store(true, Ordering::Relaxed);
                     }
                     api.prevent_exit();
+                    // Perceived-instant close: hide the window FIRST, then
+                    // tear down headless. The user sees the app vanish
+                    // immediately; the backend drain + taskkill fallback
+                    // finish invisibly before process exit below.
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
                     let handle = app.clone();
                     std::thread::spawn(move || {
                         shutdown_backend(&handle);

@@ -102,7 +102,20 @@ function Invoke-Probe([ScriptBlock]$Command) {
 }
 function Confirm-Step([string]$msg) {
   if ($Yes) { return $true }
-  $ans = Read-Host "$msg [Y/n]"
+  # Headless runs (detached, stdin at EOF) make Read-Host throw or return
+  # $null — which is NOT the same as pressing Enter (""). Passing $null
+  # through would silently take the "no" path and misreport "skipped by
+  # user choice", so detect it and say so explicitly.
+  try {
+    $ans = Read-Host "$msg [Y/n]"
+  } catch {
+    Warn "Non-interactive session (no console input) - treating prompt as skipped (pass -Yes to auto-accept)."
+    return $false
+  }
+  if ($null -eq $ans) {
+    Warn "Non-interactive session (no console input) - treating prompt as skipped (pass -Yes to auto-accept)."
+    return $false
+  }
   return ($ans -eq "" -or $ans -match "^[Yy]")
 }
 function Refresh-Path {
@@ -123,20 +136,16 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
   Ok "$name installed"
 }
 
-# ── ASCII banner ──────────────────────────────────────────────────────────────
+# FIGlet Relief2 TRANSFERA banner (pure ASCII, PS 5.1-safe)
 cls 2>$null
 Write-Host ""
-Write-Host "█████████████████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Cyan
-Write-Host "█        ██       ██████  █████  ███████  ███      ███        ██        ██       ██████  ████" -ForegroundColor Cyan
-Write-Host "████  █████  ████  ████    ████   ██████  ██  ████  ██  ████████  ████████  ████  ████    ███" -ForegroundColor Cyan
-Write-Host "████  █████  ████  ███  ██  ███    █████  ██  ████  ██  ████████  ████████  ████  ███  ██  ██" -ForegroundColor Cyan
-Write-Host "████  █████  ███   ██  ████  ██  ██  ███  ███  ███████  ████████  ████████  ███   ██  ████  █" -ForegroundColor Cyan
-Write-Host "████  █████      ████  ████  ██  ███  ██  █████  █████      ████      ████      ████  ████  █" -ForegroundColor Cyan
-Write-Host "████  █████  ████  ██        ██  ████  █  ███████  ███  ████████  ████████  ████  ██        █" -ForegroundColor Cyan
-Write-Host "████  █████  ████  ██  ████  ██  █████    ██  ████  ██  ████████  ████████  ████  ██  ████  █" -ForegroundColor Cyan
-Write-Host "████  █████  ████  ██  ████  ██  ██████   ██  ████  ██  ████████  ████████  ████  ██  ████  █" -ForegroundColor Cyan
-Write-Host "████  █████  ████  ██  ████  ██  ███████  ███      ███  ████████        ██  ████  ██  ████  █" -ForegroundColor Cyan
-Write-Host "█████████████████████████████████████████████████████████████████████████████████████████████" -ForegroundColor Cyan
+Write-Host "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" -ForegroundColor Cyan
+Write-Host "///////// \//////// \\\/////// \\/// \\/// \\/////// \\///////// \///////// \//////// \\\/////// \\" -ForegroundColor Cyan
+Write-Host "\\\/// \\\\/// \\/// \/// \\/// \///// /// \/// \\\\\\\/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \" -ForegroundColor Cyan
+Write-Host "\\\/// \\\\//////// \\///////// \///////// \\/////// \\/////// \\\/////// \\\//////// \\///////// \" -ForegroundColor Cyan
+Write-Host "\\\/// \\\\/// \\/// \/// \\/// \/// ///// \\\\\\\/// \/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \" -ForegroundColor Cyan
+Write-Host "\\\/// \\\\/// \\/// \/// \\/// \/// \\/// \\/////// \\/// \\\\\\\///////// \/// \\/// \/// \\/// \" -ForegroundColor Cyan
+Write-Host "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Your photos & videos. Your machine. Your rules." -ForegroundColor White
 Write-Host "  Windows installer — building everything locally from source" -ForegroundColor DarkCyan

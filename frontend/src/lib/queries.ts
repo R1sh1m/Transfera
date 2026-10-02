@@ -1259,6 +1259,10 @@ export function useDownloadModels() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["intelligence-models-status"] });
+      // Capabilities gate the Get-AI-models button (semantic_mode flips to
+      // clip); without this it stays stale for 60s and the button wrongly
+      // reappears as if nothing downloaded.
+      qc.invalidateQueries({ queryKey: ["intelligence-capabilities"] });
     },
     onError: (error) => {
       useTransferStore

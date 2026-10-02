@@ -32,19 +32,36 @@ from backend.ios_device import is_ios_source, parse_ios_source
 _thumb_update_queue: _queue.Queue[tuple[int, str] | None] = _queue.Queue()
 _thumb_worker_started = False
 _thumb_worker_lock = _threading.Lock()
+_thumb_worker: _threading.Thread | None = None
 
 THUMB_CONCURRENCY = min(8, max(1, (os.cpu_count() or 2)))
 
 
 def _ensure_thumb_worker() -> None:
     """Start the singleton thumbnail DB update worker thread if not running."""
-    global _thumb_worker_started
+    global _thumb_worker_started, _thumb_worker
     with _thumb_worker_lock:
         if _thumb_worker_started:
             return
         _thumb_worker_started = True
         t = _threading.Thread(target=_thumb_worker_loop, daemon=True, name="thumb-db-worker")
+        _thumb_worker = t
         t.start()
+
+
+def flush_thumb_worker(timeout: float = 3.0) -> None:
+    """Send the stop sentinel and join the worker so its last batch lands.
+
+    Bounded by *timeout*: on expiry the daemon thread is left to finish in
+    the background rather than stalling shutdown. Safe to call when the
+    worker never started (no-op).
+    """
+    if not _thumb_worker_started:
+        return
+    _thumb_update_queue.put(None)  # sentinel — worker exits after draining
+    worker = _thumb_worker
+    if worker is not None:
+        worker.join(timeout=timeout)
 
 
 def _thumb_worker_loop() -> None:
@@ -137,6 +154,7 @@ _TRANSIENT_EXC_NAMES: frozenset[str] = frozenset(
 
 class DeviceDisconnectedError(RuntimeError):
     """Raised when an external device or USB cable is disconnected mid-transfer."""
+
     pass
 
 

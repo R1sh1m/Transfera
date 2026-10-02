@@ -88,7 +88,14 @@ export function CapabilitiesBadge() {
     modelStatus?.status === "installing-packages";
   const downloading = busy;
   const clipReady = data?.semantic_mode === "clip";
-  const showGetModels = !!data && !clipReady && !downloading;
+  // Explicit success reply: between download completion and the
+  // capabilities refetch landing, show a disabled confirmation instead
+  // of flashing the Get button again as if nothing happened.
+  const [justFinished, setJustFinished] = useState(false);
+  useEffect(() => {
+    if (clipReady) setJustFinished(false);
+  }, [clipReady]);
+  const showGetModels = !!data && !clipReady && !downloading && !justFinished;
   const mb = modelStatus
     ? (modelStatus.downloaded_bytes / 1e6).toFixed(0)
     : "0";
@@ -116,7 +123,9 @@ export function CapabilitiesBadge() {
         <button
           onClick={() => {
             setWantModels(true);
-            download.mutate();
+            download.mutate(undefined, {
+              onSuccess: () => setJustFinished(true),
+            });
           }}
           disabled={download.isPending}
           className="px-3 py-1 rounded-pill border border-border text-xs hover:bg-muted active:scale-[0.95] disabled:opacity-40"
@@ -124,6 +133,14 @@ export function CapabilitiesBadge() {
         >
           Get AI models
         </button>
+      )}
+      {justFinished && !clipReady && (
+        <span
+          className="px-3 py-1 rounded-pill border border-border text-xs text-muted-foreground opacity-60 cursor-default"
+          title="Models downloaded — enabling semantic search…"
+        >
+          ✓ AI models ready
+        </span>
       )}
       {downloading && (
         <span

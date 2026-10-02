@@ -29,6 +29,7 @@ import {
   RefreshCw,
   Trash2,
   AlertTriangle,
+  ChevronDown,
 } from "lucide-react";
 import {
   useMediaList,
@@ -548,6 +549,9 @@ export default function LibraryPage() {
   const [migrateRunning, setMigrateRunning] = useState(false);
   const [migrateDismissed, setMigrateDismissed] = useState(false);
   const [migrateResult, setMigrateResult] = useState<string | null>(null);
+  // Collapsed "nothing to move" state: the filing card shrinks to a single
+  // button; expanding reveals the explainer + Check again/Dismiss actions.
+  const [docsExpanded, setDocsExpanded] = useState(false);
   const [viewMode, setViewMode] = useState<"masonry" | "list" | "history">(
     "masonry",
   );
@@ -959,61 +963,82 @@ export default function LibraryPage() {
       )}
 
       {/* Documents migration card — manual move from the legacy unified
-          tree into Documents/<Kind>/ date folders */}
-      {section === "vault" && !migrateDismissed && (
-        <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
-          <div className="shrink-0 w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-            <FileText className="w-4 h-4 text-primary" />
+          tree into Documents/<Kind>/ date folders. When a check finds
+          nothing to move, the card collapses to a single disclosure
+          button so a settled state doesn't consume a full card. */}
+      {section === "vault" &&
+        !migrateDismissed &&
+        (!migrateLoading &&
+        migratePreview &&
+        migratePreview.total === 0 &&
+        !migrateResult &&
+        !docsExpanded ? (
+          <div>
+            <button
+              type="button"
+              onClick={() => setDocsExpanded(true)}
+              className="flex items-center gap-2 px-3 py-1.5 text-xs rounded-pill border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors active:scale-[0.95]"
+              title="How document filing works"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              Document filing
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
           </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-foreground">
-              Documents now file separately
-            </p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {migrateLoading
-                ? "Checking for documents in the old shared folders…"
-                : migratePreview && migratePreview.total > 0
-                  ? `${migratePreview.total} document(s) are still in the shared date folders. Move them into Documents/<Kind>/ date folders.`
-                  : "New documents land in Documents/<Kind>/ date folders. Nothing left to move."}
-            </p>
-            {migrateResult && (
-              <p className="text-xs text-muted-foreground mt-1">
-                {migrateResult}
+        ) : (
+          <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
+            <div className="shrink-0 w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+              <FileText className="w-4 h-4 text-primary" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-foreground">
+                File documents separately
               </p>
-            )}
-            <div className="flex items-center gap-2 mt-2">
-              {migratePreview && migratePreview.total > 0 ? (
-                <button
-                  type="button"
-                  onClick={handleMigrateDocuments}
-                  disabled={migrateRunning}
-                  className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {migrateRunning
-                    ? "Moving…"
-                    : `Move ${migratePreview.total} into Documents/`}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={fetchMigratePreview}
-                  disabled={migrateLoading}
-                  className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
-                >
-                  {migrateLoading ? "Checking…" : "Check again"}
-                </button>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {migrateLoading
+                  ? "Checking for documents in the old shared folders…"
+                  : migratePreview && migratePreview.total > 0
+                    ? `${migratePreview.total} document(s) are still in the shared date folders. Move them into Documents/<Kind>/ date folders.`
+                    : "New documents land in Documents/<Kind>/ date folders. Nothing left to move."}
+              </p>
+              {migrateResult && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {migrateResult}
+                </p>
               )}
-              <button
-                type="button"
-                onClick={() => setMigrateDismissed(true)}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
-                Dismiss
-              </button>
+              <div className="flex items-center gap-2 mt-2">
+                {migratePreview && migratePreview.total > 0 ? (
+                  <button
+                    type="button"
+                    onClick={handleMigrateDocuments}
+                    disabled={migrateRunning}
+                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {migrateRunning
+                      ? "Moving…"
+                      : `Move ${migratePreview.total} into Documents/`}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={fetchMigratePreview}
+                    disabled={migrateLoading}
+                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
+                  >
+                    {migrateLoading ? "Checking…" : "Check again"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setMigrateDismissed(true)}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        ))}
 
       {/* Toolbar */}
       <div className="flex items-center gap-3">
