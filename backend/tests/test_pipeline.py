@@ -103,6 +103,19 @@ async def _reset_db() -> None:
     await create_all_tables()
 
 
+@pytest.fixture(autouse=True)
+async def _ensure_tables_exist() -> None:
+    """Create tables in the guard database when missing.
+
+    The session-wide ``_guard_real_database`` fixture redirects the global
+    engine at a throwaway file but creates no tables, so tests that touch
+    the DB without calling ``_reset_db()`` first fail with "no such table".
+    ``create_all_tables`` is idempotent, making this a safe no-op for
+    tests that reset explicitly.
+    """
+    await create_all_tables()
+
+
 # ======================================================================
 # 1. Batch creation and chunking
 # ======================================================================
