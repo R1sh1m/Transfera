@@ -83,6 +83,23 @@ function Invoke-Native([ScriptBlock]$Command, [string]$ShowPattern) {
   }
   return $LASTEXITCODE
 }
+function Invoke-Probe([ScriptBlock]$Command) {
+  # Run a probe command that is ALLOWED to fail (version checks, feature
+  # detection). Returns @{ Output = <stdout lines>; Code = <exit code> }.
+  # Scoped Continue is load-bearing here too: even 2>$null-redirected
+  # native stderr is terminating under Stop/5.1, so an unguarded probe
+  # (e.g. an import check traceback) aborts the whole installer instead
+  # of taking the fallback path. Use Invoke-Native + Fail for required
+  # steps; Invoke-Probe for detection.
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $out = & $Command 2>$null
+    return @{ Output = $out; Code = $LASTEXITCODE }
+  } finally {
+    $ErrorActionPreference = $prevEAP
+  }
+}
 function Confirm-Step([string]$msg) {
   if ($Yes) { return $true }
   $ans = Read-Host "$msg [Y/n]"
@@ -172,7 +189,11 @@ if ($SkipDriver) {
 StepBox "🔧" "4/9" "MSVC Build Tools (C++ iPhone helper)" "~2-5 GB download, only needed once"
 # ---------------------------------------------------------------------------
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$hasMsvc = (Test-Path $vswhere) -and (& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null)
+$hasMsvc = $false
+if (Test-Path $vswhere) {
+  $vsProbe = Invoke-Probe { & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath }
+  if ($vsProbe.Code -eq 0 -and "$($vsProbe.Output)".Trim() -ne "") { $hasMsvc = $true }
+}
 if ($SkipNative) {
   Warn "Skipped (-SkipNative). The WPD helper won't build; folder backup still works fully."
 } elseif (-not $hasMsvc) {
@@ -244,8 +265,33 @@ StepBox "🐍" "6/9" "Python backend (venv + all features, AI runtime & models i
 # ---------------------------------------------------------------------------
 Push-Location $Root
 try {
-  $code = Invoke-Native { & py -3.12 -m venv .venv } "(?!)"
-  if ($code -ne 0) { Fail "Python venv creation failed." }
+  # Reuse a healthy 3.12 venv (fast re-runs, and avoids clobbering an
+  # interpreter another program has open — e.g. an IDE language server
+  # locking .venv\Scripts\python.exe, which fails recreation with
+  # Errno 13). Recreate only when missing, wrong version, or broken deps.
+  $venvPy = Join-Path $Root ".venv\Scripts\python.exe"
+  $venvOk = $false
+  if (Test-Path $venvPy) {
+    $ver = Invoke-Probe { & $venvPy -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" }
+    if ($ver.Code -eq 0 -and "$($ver.Output)".Trim() -eq "3.12") {
+      $imp = Invoke-Probe { & $venvPy -c "import fastapi, uvicorn, sqlalchemy, aiosqlite, blake3, PIL" }
+      if ($imp.Code -eq 0) { $venvOk = $true }
+    }
+  }
+  if ($venvOk) {
+    Ok "Backend venv already healthy (Python 3.12, deps present) - skipping recreate"
+  } else {
+    if (Test-Path (Join-Path $Root ".venv")) {
+      Step "Removing stale venv (missing, wrong Python, or broken deps)..."
+      try {
+        Remove-Item -Recurse -Force (Join-Path $Root ".venv") -ErrorAction Stop
+      } catch {
+        Fail "Cannot remove stale .venv (locked by another process?). Close programs using it - e.g. an IDE language server on .venv\Scripts\python.exe - and re-run. Details: $($_.Exception.Message)"
+      }
+    }
+    $code = Invoke-Native { & py -3.12 -m venv .venv } "(?!)"
+    if ($code -ne 0) { Fail "Python venv creation failed. If another program (e.g. an IDE language server) is using .venv\Scripts\python.exe, close it and re-run." }
+  }
   Step "Upgrading pip..."
   $null = Invoke-Native { .\.venv\Scripts\python -m pip install --upgrade pip -q } "(?!)"
   Step "Installing Python dependencies (fastapi, sqlalchemy, pillow, blake3 + device stack)..."
@@ -314,11 +360,11 @@ try {
   # If the staged tree already runs, keep it.
   $exifOk = $false
   if ((Test-Path "backend\bin\exiftool\exiftool.exe") -and (Test-Path "backend\bin\exiftool\exiftool_files")) {
-    $verOut = & backend\bin\exiftool\exiftool.exe -ver 2>$null
-    if ($LASTEXITCODE -eq 0 -and $verOut) { $exifOk = $true }
+    $exifVer = Invoke-Probe { & backend\bin\exiftool\exiftool.exe -ver }
+    if ($exifVer.Code -eq 0 -and $exifVer.Output) { $exifOk = $true }
   }
   if ($exifOk) {
-    Ok "ExifTool already staged ($($verOut.Trim())) — skipping download"
+    Ok "ExifTool already staged ($("$($exifVer.Output)".Trim())) — skipping download"
   } else {
     .\.venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); sys.exit(0 if p and p.is_file() else 1)"
   }
