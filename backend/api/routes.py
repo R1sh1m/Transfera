@@ -1720,6 +1720,7 @@ async def _phase_execute_batches(
         async def _hop1_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
             await ws_events.emit_hop1_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
 
+        t_hop = time.monotonic()  # BENCH (temporary)
         try:
             cached = await cache_batch(
                 batch.id,
@@ -1728,6 +1729,7 @@ async def _phase_execute_batches(
                 cancel_event=cancel_event,
                 session_id=session_id,
             )
+            _bench_add(session_id, "hop1", time.monotonic() - t_hop)  # BENCH (temporary)
         except DeviceDisconnectedError as exc:
             logger.warning("Session %d paused: device disconnected (%s)", session_id, exc)
             async with session_scope() as session:
@@ -1776,6 +1778,7 @@ async def _phase_execute_batches(
         async def _hop2_progress_cb(processed: int, total: int, file_name: str, item_id: int) -> None:
             await ws_events.emit_hop2_progress(session_id, batch.id, processed, total, file_name, item_id=item_id)
 
+        t_hop = time.monotonic()  # BENCH (temporary)
         imported = await import_batch(
             batch.id,
             dest_root=dest_root,
@@ -1785,6 +1788,7 @@ async def _phase_execute_batches(
             cancel_event=cancel_event,
             session_id=session_id,
         )
+        _bench_add(session_id, "hop2", time.monotonic() - t_hop)  # BENCH (temporary)
         await ws_events.emit_hop2_complete(session_id, batch.id, imported)
         # BUG-7 fix: only emit batch_complete when the batch actually finished.
         # If cancel_event fired mid-batch, import_batch returns early — we should
@@ -1958,6 +1962,60 @@ async def _phase_finalize(session_id: int) -> None:
         logger.error("Failed to generate report for session %d: %s", session_id, report_exc)
 
 
+# ---------------------------------------------------------------------------
+# TEMPORARY benchmark instrumentation — REMOVE after the pendrive analysis.
+# Per-session phase timings (scan / Hop-1 / Hop-2 / finalize), emitted as a
+# single BENCH log block per completed session. Deliberately totals-only
+# (no per-file/per-batch spam), no schema/API/behavior changes. Buckets for
+# sessions that never complete are dropped with the process. Delete this
+# whole section plus the lines tagged `# BENCH (temporary)` when done.
+# ---------------------------------------------------------------------------
+_bench_times: dict[int, dict[str, float]] = {}
+
+
+def _bench_start(session_id: int) -> None:
+    _bench_times[session_id] = {"scan": 0.0, "hop1": 0.0, "hop2": 0.0, "finalize": 0.0}
+
+
+def _bench_add(session_id: int, phase: str, seconds: float) -> None:
+    bucket = _bench_times.get(session_id)
+    if bucket is not None:
+        bucket[phase] = bucket.get(phase, 0.0) + seconds
+
+
+async def _bench_report(session_id: int) -> None:
+    """Log one BENCH summary block and drop the session bucket."""
+    bucket = _bench_times.pop(session_id, None)
+    if bucket is None:
+        return
+    items = 0
+    total_bytes = 0
+    try:
+        async with session_scope() as session:
+            ts = await session.get(TransferSession, session_id)
+            if ts is not None:
+                items = ts.completed_items or 0
+                total_bytes = ts.total_bytes_volume or 0
+    except Exception:
+        pass
+    scan = bucket.get("scan", 0.0)
+    hop1 = bucket.get("hop1", 0.0)
+    hop2 = bucket.get("hop2", 0.0)
+    finalize = bucket.get("finalize", 0.0)
+    total = scan + hop1 + hop2 + finalize
+    logger.info(
+        "BENCH session=%d files=%d bytes=%d scan=%.1fs hop1=%.1fs hop2=%.1fs finalize=%.1fs total=%.1fs",
+        session_id,
+        items,
+        total_bytes,
+        scan,
+        hop1,
+        hop2,
+        finalize,
+        total,
+    )
+
+
 async def _run_transfer_background(session_id: int) -> None:
     """Background task: process all batches through Hop 1 then Hop 2."""
     # Register this task so it can be cancelled if the session is paused/cancelled
@@ -1977,7 +2035,10 @@ async def _run_transfer_background(session_id: int) -> None:
                 ts.started_at = datetime.now(UTC)
                 ts.touch()
 
+        _bench_start(session_id)  # BENCH (temporary)
+        t_phase = time.monotonic()  # BENCH (temporary)
         batches = await _phase_scan_and_create_batches(session_id, cancel_event)
+        _bench_add(session_id, "scan", time.monotonic() - t_phase)  # BENCH (temporary)
         if batches is None:
             _active_tasks.pop(session_id, None)
             _cleanup_session_state(session_id)
@@ -1989,7 +2050,10 @@ async def _run_transfer_background(session_id: int) -> None:
             _cleanup_session_state(session_id)
             return
 
+        t_phase = time.monotonic()  # BENCH (temporary)
         await _phase_finalize(session_id)
+        _bench_add(session_id, "finalize", time.monotonic() - t_phase)  # BENCH (temporary)
+        await _bench_report(session_id)  # BENCH (temporary)
         _active_tasks.pop(session_id, None)
         _cleanup_session_state(session_id)
 
@@ -2015,6 +2079,7 @@ async def _run_transfer_background(session_id: int) -> None:
     except Exception as exc:
         _active_tasks.pop(session_id, None)
         _cleanup_session_state(session_id)
+        await _bench_report(session_id)  # BENCH (temporary): partial timings still inform
         logger.error("Transfer background failed for session %d: %s", session_id, exc)
         await ws_events.emit_error(session_id, str(exc))
         async with session_scope() as session:
