@@ -311,7 +311,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS for Electron renderer and same-origin dev
+    # CORS for Electron renderer and same-origin dev.
+    # http(s)://tauri.localhost is REQUIRED: the packaged app's page runs
+    # there (see frontend/src/lib/api-client.ts), and axios sends
+    # Content-Type: application/json on every request, which forces a CORS
+    # preflight. Without this entry all installed-app API calls are blocked
+    # by the browser (permanent Engine Unavailable with a healthy engine).
+    # Keep the list tight (loopback + Tauri only): an open allowlist would
+    # expose the local engine to DNS-rebinding sites.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -319,6 +326,8 @@ def create_app() -> FastAPI:
             "http://localhost:5173",
             f"http://127.0.0.1:{PORT}",
             f"http://localhost:{PORT}",
+            "http://tauri.localhost",  # Tauri production shell
+            "https://tauri.localhost",  # future-proof secure variant
         ],
         allow_credentials=True,
         allow_methods=["*"],

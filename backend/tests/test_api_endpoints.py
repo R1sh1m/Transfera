@@ -45,6 +45,35 @@ class TestHealth:
         assert data["session_ids"] == []
 
 
+class TestCORS:
+    def test_tauri_origin_preflight_allowed(self, client: TestClient):
+        # The packaged app runs at http://tauri.localhost and axios sends
+        # Content-Type: application/json on every request, which forces a
+        # CORS preflight. A 400 here means a permanent Engine Unavailable
+        # screen with a perfectly healthy engine.
+        resp = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://tauri.localhost",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "http://tauri.localhost"
+
+    def test_unlisted_origin_preflight_rejected(self, client: TestClient):
+        # DNS-rebinding guard: arbitrary sites must stay blocked from the
+        # loopback engine.
+        resp = client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.headers.get("access-control-allow-origin") is None
+
+
 class TestConfig:
     def test_config_returns_settings(self, client: TestClient):
         resp = client.get("/api/config")
