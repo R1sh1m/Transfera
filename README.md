@@ -14,9 +14,9 @@
 █████████████████████████████████████████████████████████████████████████████████████████████
 ```
 
-**Backup and Move files and photos easily.**
+**Your photos & videos. Your machine. Your rules.**
 
-Transfera is a simple utility to transfer files and photos from your phone, camera, or USB drive to your computer.
+Transfera moves photos and videos off your phone, camera, or USB drive into a verified local archive — hashed on the way in, re-verified before anything lands, filed by date automatically. No cloud, no account, no subscription. Your media never leaves your machine.
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -28,14 +28,14 @@ Transfera is a simple utility to transfer files and photos from your phone, came
 
 ---
 
-## Features
+## Why Transfera
 
-- **Two-hop verification** — every file is hashed while copying, then re-hashed before landing in your archive. Corruption is impossible.
-- **Smart deduplication** — already have it? Transfera skips it.
-- **Auto-organizes** by date → `Photos/2026/09-September/IMG_1234.jpg`
-- **iPhone & iPad** — plug in, trust, done. No need for iTunes.
-- **AI search** — find "sunset beach" or "birthday cake" across your whole library (completely local).
-- **Zero cloud** — internet access needed only for downloading helper tools, once.
+- **Verified end to end** — every file is hashed while copying, then hashed again before it enters your archive. Anything that fails verification never lands.
+- **Organized automatically** — photos file into `2026/09-September/`, documents into `Documents/<Kind>/` date folders. No renaming chores.
+- **iPhone & iPad, no iTunes** — plug in, unlock, tap Trust. Tiered access (direct, helper, bridge) degrades gracefully instead of failing outright.
+- **Find anything instantly** — on-device AI search ("sunset beach") with keyword fallback, plus duplicates, faces, trash, and timeline.
+- **Survives crashes and restarts** — interrupted transfers resume where they stopped; partial files never pollute your archive. If the engine ever fails to start, the app tells you and recovers on its own once it's back.
+- **Private by architecture** — everything runs on localhost. The network is used once, to fetch helper tools — never for your media.
 
 ---
 
@@ -62,16 +62,12 @@ cd Transfera
 bash scripts/install.sh
 ```
 
-Detects macOS or Linux, installs system deps via Homebrew / apt / dnf / pacman, sets up the Python venv, builds the frontend, installs **libimobiledevice** for iPhone support, and produces a DMG (macOS) or .deb / .AppImage (Linux).
-
 </td>
 <td>
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-Transfera.ps1
 ```
-
-Installs Python, Node, Rust, and Git via winget, pulls **Apple Mobile Device Support**, builds the C++ iPhone helper, freezes the backend sidecar, and produces a locally-compiled installer. (Make sure you ran `cd Transfera` first).
 
 </td>
 </tr>
@@ -91,7 +87,7 @@ First run takes 5–15 minutes (downloads + build). Every subsequent launch star
 
 ---
 
-## 📸 Your first backup 
+## 📸 Your first backup
 
 1. **Open Transfera** — you land on the **Dashboard**.
 2. Hit **Start New Backup** (or **Setup** in the sidebar).
@@ -106,32 +102,20 @@ First run takes 5–15 minutes (downloads + build). Every subsequent launch star
 
 ## 🔧 Troubleshooting
 
+Most engine problems resolve themselves: the app detects a dead engine, shows it plainly, and reconnects automatically once it's back. What's left is below.
+
 | What you see | What to do |
 |---|---|
-| App window is blank | Close fully, wait 10 s, reopen. Still broken? Delete app data (`%APPDATA%\Transfera` / `~/.local/share/transfera` / `~/Library/Application Support/transfera`) and relaunch. |
-| iPhone not listed | Use a data cable (not charge-only), unlock, tap **Trust**, unplug and replug. Check the Dashboard driver card. |
+| Engine Unavailable | Usually transient — the screen clears on its own once the engine answers. If it persists, click **Retry**; still stuck? Reinstall, and attach the engine log when asking for help (`%APPDATA%\com.transfera.app\data\logs\transfera.log` on Windows). |
+| Stuck on "Starting Transfera" | First launch can take up to two minutes (antivirus scanning the engine). It resolves on its own; only Retry if the error screen appears. |
+| "Failed to load Python DLL" on launch | Missing VC++ runtime — the installer installs it automatically, so reinstall from the latest build. Don't run the app from a OneDrive on-demand folder (right-click it → **Always keep on this device**). |
+| App window is blank | Close fully, wait 10 s, reopen. Still broken? Delete app data (`%APPDATA%\com.transfera.app` on Windows, the `com.transfera.app` folder under `~/Library/Application Support` / `~/.local/share` on macOS/Linux) and relaunch. |
+| iPhone not listed | Use a data cable (not charge-only), unlock, tap **Trust**, unplug and replug. The Device Setup page walks through driver states. |
 | "duplicates found" paused | Open the popup → **Skip**, **Keep both**, or **Overwrite** → Resume. |
-| Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait, press **Index library**, search again. |
-| Antivirus flags a file | Add the Transfera folder to your AV exclusions — freshly compiled helpers sometimes trip heuristics. |
-| Engine error on launch ("Failed to load Python DLL") | Install the VC++ runtime (the installer does this automatically) or reinstall the app. If the app lives under a OneDrive-synced folder, right-click it → **Always keep on this device** (on-demand stubs break native DLL loading). |
-| Stuck on "Starting Transfera" | The engine crashed on boot — wait ~60 s for the Engine Unavailable screen, then Retry. Still failing? Reinstall, and attach `%APPDATA%\com.transfera.app\data\logs\transfera.log` when asking for help. |
-| Something looks broken | Attach `backend/data/logs/transfera.log` when asking for help. |
+| Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait for the ready state, press **Index library**, search again. |
+| Antivirus flags a file | Add the Transfera folder to your AV exclusions — locally compiled helpers sometimes trip heuristics. |
 | Garbled text (boxes, `?`) in the installer terminal | Cosmetic: legacy conhost raster fonts can't render the checkmarks/emoji. Use Windows Terminal, or run `chcp 65001` first (the installer also sets UTF-8 itself when it can). |
-
----
-
-### How it works
-
-Every file travels two verified hops:
-
-```
-Source ──[stream + BLAKE3 hash]──► .partial in cache
-                                        │  hash match?
-                                        ▼
-Archive ◄──[re-verify + atomic move]── YYYY/MM/DD/filename.jpg
-```
-
-Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off that pipeline. 
+| Something looks broken | Attach the engine log above when asking for help. |
 
 ---
 
@@ -139,5 +123,3 @@ Thumbnails, EXIF dates, duplicate detection, and crash recovery all hang off tha
 
 **AGPL-3.0-or-later** — see [LICENSE](LICENSE).  
 Free for personal, academic, and commercial *use*. If you modify or re-host Transfera (including as a network service), keep the copyright notice, state your changes, and share modified source under the same terms. The "Transfera" name and artwork are reserved.
-
-Copyright © 2026 Rishi Misra
