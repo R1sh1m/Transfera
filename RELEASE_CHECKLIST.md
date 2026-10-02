@@ -56,7 +56,15 @@ E2E run by the agent before tagging (see release job for v2.7.0):
 - [x] PyInstaller `pysqlite2`/`MySQLdb`/`coredll.lib` warnings documented as known-benign in the spec (suppressing them would blind us to real bundle gaps).
 - [x] Step 5 staleness guard: warns on dirty tree / behind-upstream checkouts (offline-safe, local refs only).
 - [x] Installer wizard hang: explicit "complete the installer window" guidance + exit-code check (cancel detected instead of a false ALL DONE).
-- [ ] Re-run the full installer from the main repo checkout (above) and confirm the NSIS wizard completes.
+- [x] Re-run the full installer from the main repo checkout (above) and confirm the NSIS wizard completes.
+
+## Fresh-install verification (main repo, post-ae27fb7)
+
+- [x] Old install uninstalled, `test\Transfera` clone + temp artifacts removed (user DB kept)
+- [x] Full 9-step installer from main repo completed (venv reuse skipped recreate; pip/npm/vite/PyInstaller/smoke/Rust/NSIS all green)
+- [x] Silent NSIS install to `Desktop\Software\Transfera`, launched → engine spawned from bundle resources → `/api/health` 200
+- [x] CORS preflight from `http://tauri.localhost` against the installed engine: 200 + ACAO header (the Engine Unavailable root cause, fixed)
+- [ ] Confirm the app window itself leaves the error screen for the dashboard (backend proven; UI state needs eyes)
 
 ## Sign-off
 
