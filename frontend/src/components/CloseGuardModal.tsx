@@ -2,7 +2,7 @@
 // Transfera v2 — Close Guard Modal (ROUGH-3)
 // Warns the user when closing the window while a media transfer or scan is
 // actively running, preventing accidental cancellation and hard kills.
-// Adheres strictly to DESIGN.md tokens: rounded-pill CTAs, 44px touch targets,
+// Adheres strictly to .agents/DESIGN.md tokens: rounded-pill CTAs, 44px touch targets,
 // active:scale-[0.95], 600-weight headline with negative tracking, 400-weight body.
 // ---------------------------------------------------------------------------
 

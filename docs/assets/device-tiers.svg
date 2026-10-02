@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f1118"/>
+      <stop offset="100%" stop-color="#161824"/>
+    </linearGradient>
+    <linearGradient id="tierCard" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e2230"/>
+      <stop offset="100%" stop-color="#151722"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="960" height="300" rx="16" fill="url(#bg3)"/>
+  <rect width="958" height="298" x="1" y="1" rx="15" fill="none" stroke="#282d3d" stroke-width="1.5"/>
+
+  <!-- Title -->
+  <rect x="32" y="22" width="230" height="26" rx="13" fill="#1d2436" stroke="#313d59" stroke-width="1"/>
+  <circle cx="46" cy="35" r="4.5" fill="#f68059"/>
+  <text x="58" y="39" fill="#e1e6f0" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="600" letter-spacing="0.4">DEVICE ACQUISITION TIERS</text>
+
+  <text x="32" y="74" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="18" font-weight="700">Resilient 3-Tier Hardware Fallback Strategy</text>
+  <text x="32" y="94" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">If one communication layer is unavailable or lacks drivers, Transfera gracefully degrades to the next tier.</text>
+
+  <!-- Tier 0 Card -->
+  <g transform="translate(32, 116)">
+    <rect width="206" height="154" rx="10" fill="url(#tierCard)" stroke="#2b3347" stroke-width="1.2"/>
+    <rect x="14" y="14" width="60" height="18" rx="9" fill="#1b2842"/>
+    <text x="22" y="27" fill="#58a6ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">TIER 0</text>
+    <text x="14" y="52" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="15" font-weight="700">C++ WPD Helper</text>
+    <text x="14" y="70" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Windows Portable Device</text>
+
+    <text x="14" y="98" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• Native Win32 COM API</text>
+    <text x="14" y="116" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• Zero drivers required</text>
+    <text x="14" y="134" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">✓ Built-in Windows support</text>
+  </g>
+
+  <!-- Tier 1 Card -->
+  <g transform="translate(254, 116)">
+    <rect width="206" height="154" rx="10" fill="url(#tierCard)" stroke="#3d2a20" stroke-width="1.2"/>
+    <rect x="14" y="14" width="60" height="18" rx="9" fill="#382115"/>
+    <text x="22" y="27" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">TIER 1</text>
+    <text x="14" y="52" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="15" font-weight="700">usbmuxd / AFC</text>
+    <text x="14" y="70" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Apple Mobile Device</text>
+
+    <text x="14" y="98" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• pymobiledevice3 stack</text>
+    <text x="14" y="116" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• High-speed direct tunnel</text>
+    <text x="14" y="134" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">✓ Full DCIM + live previews</text>
+  </g>
+
+  <!-- Tier 2 Card -->
+  <g transform="translate(476, 116)">
+    <rect width="206" height="154" rx="10" fill="url(#tierCard)" stroke="#2b3347" stroke-width="1.2"/>
+    <rect x="14" y="14" width="60" height="18" rx="9" fill="#202236"/>
+    <text x="22" y="27" fill="#a371f7" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">TIER 2</text>
+    <text x="14" y="52" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="15" font-weight="700">WSL2 Bridge</text>
+    <text x="14" y="70" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">usbipd-win passthrough</text>
+
+    <text x="14" y="98" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• Linux usbmuxd in WSL</text>
+    <text x="14" y="116" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• Driverless fallback</text>
+    <text x="14" y="134" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">✓ Automated USB attach</text>
+  </g>
+
+  <!-- Local Folder Card -->
+  <g transform="translate(698, 116)">
+    <rect width="230" height="154" rx="10" fill="url(#tierCard)" stroke="#1d4229" stroke-width="1.2"/>
+    <rect x="14" y="14" width="90" height="18" rx="9" fill="#132e1d"/>
+    <text x="22" y="27" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">DIRECT FS</text>
+    <text x="14" y="52" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="15" font-weight="700">Storage &amp; Drives</text>
+    <text x="14" y="70" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Local Folders &amp; External USB</text>
+
+    <text x="14" y="98" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• High-throughput file walk</text>
+    <text x="14" y="116" fill="#c9d1d9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">• WM_DEVICECHANGE watcher</text>
+    <text x="14" y="134" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">✓ Instant plug-and-play</text>
+  </g>
+</svg>

@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f1117"/>
+      <stop offset="100%" stop-color="#181a24"/>
+    </linearGradient>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1f2330"/>
+      <stop offset="100%" stop-color="#171924"/>
+    </linearGradient>
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0071e3"/>
+      <stop offset="100%" stop-color="#0051a8"/>
+    </linearGradient>
+    <linearGradient id="orangeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f68059"/>
+      <stop offset="100%" stop-color="#d65a32"/>
+    </linearGradient>
+    <linearGradient id="greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#30d158"/>
+      <stop offset="100%" stop-color="#24963e"/>
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2997ff"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f68059"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#30d158"/>
+    </marker>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="960" height="380" rx="16" fill="url(#bg)"/>
+  <rect width="958" height="378" x="1" y="1" rx="15" fill="none" stroke="#2d3345" stroke-width="1.5"/>
+
+  <!-- Title Badge -->
+  <rect x="32" y="24" width="220" height="28" rx="14" fill="#1e2433" stroke="#333d54" stroke-width="1"/>
+  <circle cx="46" cy="38" r="4.5" fill="#30d158"/>
+  <text x="58" y="43" fill="#e1e4ea" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600" letter-spacing="0.3">TWO-HOP VERIFIED PIPELINE</text>
+
+  <text x="32" y="78" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="19" font-weight="700">Zero-Corruption Atomic Vaulting</text>
+  <text x="32" y="98" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13">Every file is streamed, hashed on the fly, staged in cache, and re-verified before final placement.</text>
+
+  <!-- ================= STAGE 1: SOURCE ================= -->
+  <g filter="url(#shadow)">
+    <rect x="32" y="130" width="180" height="190" rx="14" fill="url(#cardGrad)" stroke="#2b3142" stroke-width="1.5"/>
+  </g>
+  <!-- Card Header -->
+  <rect x="44" y="142" width="70" height="22" rx="11" fill="#262d3d"/>
+  <text x="54" y="157" fill="#8ba2c4" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">ORIGIN</text>
+  <text x="44" y="185" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="700">Source Media</text>
+  <text x="44" y="205" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">iPhone, WPD, Camera,</text>
+  <text x="44" y="221" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">SD Card, or Local Folder</text>
+
+  <rect x="44" y="240" width="156" height="66" rx="8" fill="#13151f" stroke="#252a38" stroke-width="1"/>
+  <text x="54" y="259" fill="#2997ff" font-family="monospace" font-size="11">IMG_4821.DNG</text>
+  <text x="54" y="276" fill="#6e7681" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Pre-scan: 48.2 MB</text>
+  <text x="54" y="293" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">✓ Deduplication Check</text>
+
+  <!-- Connective Arrow 1 -->
+  <path d="M 214 225 L 268 225" fill="none" stroke="#2997ff" stroke-width="2.5" stroke-dasharray="4 4" marker-end="url(#arrowBlue)"/>
+  <rect x="220" y="196" width="46" height="18" rx="9" fill="#0c2340" stroke="#1d4e89" stroke-width="1"/>
+  <text x="227" y="209" fill="#58a6ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="9" font-weight="700">HOP 1</text>
+
+  <!-- ================= STAGE 2: HOP 1 CACHE ================= -->
+  <g filter="url(#shadow)">
+    <rect x="274" y="130" width="200" height="190" rx="14" fill="url(#cardGrad)" stroke="#2b3142" stroke-width="1.5"/>
+  </g>
+  <rect x="286" y="142" width="94" height="22" rx="11" fill="#1b2a47"/>
+  <text x="296" y="157" fill="#58a6ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">INGESTION</text>
+  <text x="286" y="185" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="700">Stream &amp; Hash</text>
+  <text x="286" y="205" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">BLAKE3 on-the-fly hash</text>
+  <text x="286" y="221" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">written to cache buffer</text>
+
+  <rect x="286" y="240" width="176" height="66" rx="8" fill="#13151f" stroke="#252a38" stroke-width="1"/>
+  <text x="296" y="259" fill="#f68059" font-family="monospace" font-size="11">cache/item_42.partial</text>
+  <text x="296" y="276" fill="#8b949e" font-family="monospace" font-size="10">hash: b3_98a7c2e1...</text>
+  <text x="296" y="293" fill="#2997ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">⚡ Verified Atomic Rename</text>
+
+  <!-- Connective Arrow 2 -->
+  <path d="M 476 225 L 526 225" fill="none" stroke="#f68059" stroke-width="2.5" stroke-dasharray="4 4" marker-end="url(#arrowOrange)"/>
+  <rect x="480" y="196" width="46" height="18" rx="9" fill="#3a1e16" stroke="#873e24" stroke-width="1"/>
+  <text x="487" y="209" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="9" font-weight="700">HOP 2</text>
+
+  <!-- ================= STAGE 3: METADATA & ORG ================= -->
+  <g filter="url(#shadow)">
+    <rect x="532" y="130" width="190" height="190" rx="14" fill="url(#cardGrad)" stroke="#2b3142" stroke-width="1.5"/>
+  </g>
+  <rect x="544" y="142" width="102" height="22" rx="11" fill="#36221d"/>
+  <text x="554" y="157" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">ORGANIZATION</text>
+  <text x="544" y="185" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="700">Metadata &amp; Date</text>
+  <text x="544" y="205" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Stay-open ExifTool parse</text>
+  <text x="544" y="221" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Capture date &amp; camera EXIF</text>
+
+  <rect x="544" y="240" width="166" height="66" rx="8" fill="#13151f" stroke="#252a38" stroke-width="1"/>
+  <text x="554" y="259" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">EXIF: 2026:09:14</text>
+  <text x="554" y="276" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Lens: 24mm f/1.78</text>
+  <text x="554" y="293" fill="#a371f7" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Target: 2026/09/14/</text>
+
+  <!-- Connective Arrow 3 -->
+  <path d="M 724 225 L 768 225" fill="none" stroke="#30d158" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+
+  <!-- ================= STAGE 4: VAULT DESTINATION ================= -->
+  <g filter="url(#shadow)">
+    <rect x="774" y="130" width="154" height="190" rx="14" fill="url(#cardGrad)" stroke="#1d4d29" stroke-width="1.5"/>
+  </g>
+  <rect x="786" y="142" width="70" height="22" rx="11" fill="#13331b"/>
+  <text x="796" y="157" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">VAULT</text>
+  <text x="786" y="185" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="700">Final Vault</text>
+  <text x="786" y="205" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Re-verified hash match</text>
+  <text x="786" y="221" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Atomic placement</text>
+
+  <rect x="786" y="240" width="130" height="66" rx="8" fill="#13151f" stroke="#1d4d29" stroke-width="1"/>
+  <text x="794" y="258" fill="#30d158" font-family="monospace" font-size="10">Photos/2026/</text>
+  <text x="794" y="273" fill="#30d158" font-family="monospace" font-size="10">09-September/</text>
+  <text x="794" y="289" fill="#ffffff" font-family="monospace" font-size="10">IMG_4821.DNG</text>
+
+  <!-- Bottom Guarantees Strip -->
+  <rect x="32" y="336" width="896" height="28" rx="6" fill="#12151e"/>
+  <text x="50" y="354" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="600">GUARANTEES:</text>
+  <text x="135" y="354" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">1. Byte-for-byte BLAKE3 verification</text>
+  <text x="360" y="354" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">2. Atomic renames (no incomplete files)</text>
+  <text x="615" y="354" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">3. Move mode deletes source ONLY after Hop 2 verifies</text>
+</svg>

@@ -152,7 +152,7 @@
 /* ---------------------------------------------------------------------------
    Liquid Glass (Apple 2025 material) — floating chrome only.
    Applied to: TitleBar, section-tabs pill container, floating action bars,
-   modals, toasts. NEVER on content tiles, cards, or buttons (DESIGN.md:
+   modals, toasts. NEVER on content tiles, cards, or buttons (.agents/DESIGN.md:
    single product shadow only; glass floaters are the one exception with a
    soft 0 8px 32px lift so the material reads above Mica/WebView2).
    Tokens only — no hex outside the palette.

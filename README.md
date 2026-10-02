@@ -99,6 +99,19 @@ First run takes 5–15 minutes (downloads + build). Every subsequent launch star
 6. Press **Start**. Watch live progress, speeds, and thumbnails on the **Transfer** page.
 7. Open **Library** — searchable by date, content (AI), duplicates, trash, and more.
 
+---
+
+## 🏛️ Architecture & Verification
+
+Every file transferred by Transfera travels through a two-stage verified vaulting pipeline. Streaming BLAKE3 hashes are calculated on-the-fly and validated at every hop before atomic placement into your archive, guaranteeing zero byte corruption and safe space-saver moves.
+
+<p align="center">
+  <img src="docs/assets/two-hop-pipeline.svg" alt="Two-Hop Verified Pipeline" width="100%">
+</p>
+
+For a deep dive into the native Tauri shell, multi-tier device fallback, stay-open ExifTool daemon, and crash recovery, see the full **[Architecture Specification](ARCHITECTURE.md)**.
+
+---
 
 ## 🔧 Troubleshooting
 

@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e1017"/>
+      <stop offset="100%" stop-color="#161822"/>
+    </linearGradient>
+    <linearGradient id="layerGrad1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1c2438"/>
+      <stop offset="100%" stop-color="#161e30"/>
+    </linearGradient>
+    <linearGradient id="layerGrad2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2a201c"/>
+      <stop offset="100%" stop-color="#1e1816"/>
+    </linearGradient>
+    <linearGradient id="layerGrad3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#172820"/>
+      <stop offset="100%" stop-color="#121e18"/>
+    </linearGradient>
+    <filter id="shadow2" x="-5%" y="-5%" width="110%" height="115%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="520" rx="16" fill="url(#bg2)"/>
+  <rect width="958" height="518" x="1" y="1" rx="15" fill="none" stroke="#282d3d" stroke-width="1.5"/>
+
+  <!-- Title & Header -->
+  <rect x="36" y="24" width="220" height="26" rx="13" fill="#1b2233" stroke="#2f3b57" stroke-width="1"/>
+  <circle cx="50" cy="37" r="4.5" fill="#2997ff"/>
+  <text x="62" y="41" fill="#d8e2f3" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="600" letter-spacing="0.4">SYSTEM TOPOLOGY</text>
+
+  <text x="36" y="76" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="20" font-weight="700">Transfera v2 Desktop Architecture</text>
+  <text x="36" y="96" fill="#8b949e" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13">High-performance native Rust Tauri shell orchestrating a local Python 3.12 FastAPI core engine.</text>
+
+  <!-- ================= LAYER 1: CLIENT SHELL ================= -->
+  <g filter="url(#shadow2)">
+    <rect x="36" y="120" width="888" height="96" rx="12" fill="url(#layerGrad1)" stroke="#2b3b5c" stroke-width="1.5"/>
+  </g>
+  <rect x="52" y="132" width="130" height="20" rx="10" fill="#0d1b30"/>
+  <text x="62" y="146" fill="#58a6ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">PRESENTATION LAYER</text>
+  <text x="52" y="172" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="700">Tauri 2 Desktop Shell (Rust)</text>
+  <text x="52" y="192" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Win32 Drive Watcher · Process Lifecycle · System Tray · NSIS Bundler</text>
+
+  <!-- Client components pills -->
+  <rect x="540" y="136" width="112" height="64" rx="8" fill="#111a2b" stroke="#253552" stroke-width="1"/>
+  <text x="552" y="158" fill="#2997ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">React 18 / Vite</text>
+  <text x="552" y="174" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">TypeScript Strict</text>
+  <text x="552" y="188" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Tailwind CSS 4</text>
+
+  <rect x="662" y="136" width="120" height="64" rx="8" fill="#111a2b" stroke="#253552" stroke-width="1"/>
+  <text x="674" y="158" fill="#2997ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">Zustand Store</text>
+  <text x="674" y="174" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">15-Event WS Reducer</text>
+  <text x="674" y="188" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Progressive Thumbnails</text>
+
+  <rect x="792" y="136" width="118" height="64" rx="8" fill="#111a2b" stroke="#253552" stroke-width="1"/>
+  <text x="804" y="158" fill="#2997ff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">TanStack Query</text>
+  <text x="804" y="174" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Server State Cache</text>
+  <text x="804" y="188" fill="#8b9cb8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Deduplicated Fetch</text>
+
+  <!-- IPC Bridge Channel -->
+  <g transform="translate(0, 222)">
+    <line x1="280" y1="0" x2="280" y2="28" stroke="#2997ff" stroke-width="2" stroke-dasharray="3 3"/>
+    <line x1="680" y1="0" x2="680" y2="28" stroke="#f68059" stroke-width="2" stroke-dasharray="3 3"/>
+    <rect x="360" y="4" width="240" height="20" rx="10" fill="#141824" stroke="#2c364f" stroke-width="1"/>
+    <text x="375" y="18" fill="#d2d9e8" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="600">REST API (47821) + 15-Event WebSocket</text>
+  </g>
+
+  <!-- ================= LAYER 2: BACKEND ENGINE ================= -->
+  <g filter="url(#shadow2)">
+    <rect x="36" y="254" width="888" height="152" rx="12" fill="url(#layerGrad2)" stroke="#523629" stroke-width="1.5"/>
+  </g>
+  <rect x="52" y="266" width="110" height="20" rx="10" fill="#261611"/>
+  <text x="62" y="280" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">CORE ENGINE</text>
+  <text x="52" y="306" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="16" font-weight="700">Transfera Engine (Python 3.12 / FastAPI)</text>
+  <text x="52" y="324" fill="#c49e91" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12">Packaged as PyInstaller one-dir sidecar · Guarded by X-Local-Token header</text>
+
+  <!-- Submodules Grid -->
+  <g transform="translate(52, 334)">
+    <rect x="0" y="0" width="194" height="60" rx="8" fill="#1b1412" stroke="#3d261e" stroke-width="1"/>
+    <text x="12" y="20" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">Vaulting Pipeline</text>
+    <text x="12" y="36" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Hop 1 Cache (BLAKE3)</text>
+    <text x="12" y="50" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Hop 2 Atomic Importer</text>
+
+    <rect x="206" y="0" width="194" height="60" rx="8" fill="#1b1412" stroke="#3d261e" stroke-width="1"/>
+    <text x="218" y="20" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">Device Abstraction</text>
+    <text x="218" y="36" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Tier 0: C++ WPD Helper</text>
+    <text x="218" y="50" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Tier 1: pymobiledevice3</text>
+
+    <rect x="412" y="0" width="216" height="60" rx="8" fill="#1b1412" stroke="#3d261e" stroke-width="1"/>
+    <text x="424" y="20" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">Metadata &amp; Thumbnails</text>
+    <text x="424" y="36" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Stay-open ExifTool Daemon</text>
+    <text x="424" y="50" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">3-Tier Fallback (Exif/PIL/ffmpeg)</text>
+
+    <rect x="640" y="0" width="216" height="60" rx="8" fill="#1b1412" stroke="#3d261e" stroke-width="1"/>
+    <text x="652" y="20" fill="#f68059" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="600">Local Intelligence</text>
+    <text x="652" y="36" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">MobileCLIP ONNX Embeddings</text>
+    <text x="652" y="50" fill="#a88980" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10">Natural Language Photo Search</text>
+  </g>
+
+  <!-- ================= LAYER 3: STORAGE & PERSISTENCE ================= -->
+  <g filter="url(#shadow2)">
+    <rect x="36" y="418" width="888" height="84" rx="12" fill="url(#layerGrad3)" stroke="#234d31" stroke-width="1.5"/>
+  </g>
+  <rect x="52" y="430" width="130" height="20" rx="10" fill="#0d2415"/>
+  <text x="62" y="444" fill="#30d158" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10" font-weight="700">PERSISTENCE &amp; VAULT</text>
+
+  <g transform="translate(52, 456)">
+    <text x="0" y="16" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700">SQLite 3 (WAL Mode)</text>
+    <text x="0" y="32" fill="#8bc99d" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">ACID Sessions, Batches, Vector embeddings, 45+ migrations</text>
+  </g>
+
+  <g transform="translate(480, 456)">
+    <text x="0" y="16" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700">Organized File Vault</text>
+    <text x="0" y="32" fill="#8bc99d" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Atomic year/month tree, sidecar metadata, thumbnail cache</text>
+  </g>
+</svg>

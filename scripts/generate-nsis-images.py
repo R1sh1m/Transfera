@@ -11,11 +11,11 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import sys
 
-REPO = Path(r"C:\Users\Rishi Misra\Desktop\Code\Projects\Transfera")
+REPO = Path(__file__).resolve().parent.parent
 ICON_PNG = REPO / "frontend/src-tauri/icons/icon.png"
 OUT_DIR  = REPO / "frontend/src-tauri/icons"
 
-# Brand colours matching the app (dark mode, from DESIGN.md tokens)
+# Brand colours matching the app (dark mode, from .agents/DESIGN.md tokens)
 BG_DARK     = (17, 17, 24)      # #111118 — near-black
 ACCENT_TEXT = (255, 255, 255)   # white
 DIVIDER     = (60, 60, 80)      # subtle grey line

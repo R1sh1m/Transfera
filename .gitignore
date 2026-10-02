@@ -117,9 +117,6 @@ native/wpd_helper/.cache/
 *.ilk
 *.exp
 
-# --- Documentation (design spec, not runtime code) ---
-DESIGN.md
-
 # --- Misc ---
 *.bak
 *.backup
@@ -128,10 +125,13 @@ htmlcov/
 .coverage
 coverage.xml
 digest.txt
-.agents/
-AGENTS.md
 skills-lock.json
 Transfera_Architecture_Spec_v2.pdf
+
+# --- Local agent notes (not committed) ---
+.agents/AGENTS.md
+.agents/verification-log.md
+.agents/.cache/
 
 # Scratch test data (not the test suite — that's in backend/tests/ and IS tracked)
 test_dest/
