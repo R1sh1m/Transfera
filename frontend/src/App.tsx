@@ -451,11 +451,19 @@ function BackendRecoveryWatcher() {
       // Unavailable screen from here. useHealth retries 3x with backoff
       // before isError, so this is a genuine outage, not a blip.
       useTransferStore.getState().setServerDown(true);
-    } else if (wasDown && health?.status === "ok") {
-      // Backend just came back — refetch everything
-      qc.invalidateQueries();
-      useTransferStore.getState().setServerDown(false);
-      setWasDown(false);
+    } else if (health?.status === "ok") {
+      // Backend healthy: always clear a stale down screen, whatever set it
+      // (missed backend:ready race, or a backend:down that fired before a
+      // slow cold boot finished). Guarded reads keep a healthy poll a
+      // complete no-op — no render churn, no query invalidation.
+      if (wasDown) {
+        // Backend just came back — refetch everything
+        qc.invalidateQueries();
+        setWasDown(false);
+      }
+      if (useTransferStore.getState().ui.serverDown) {
+        useTransferStore.getState().setServerDown(false);
+      }
     }
   }, [isError, health, wasDown, qc]);
 

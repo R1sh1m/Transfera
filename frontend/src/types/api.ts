@@ -247,6 +247,7 @@ export interface ModelDownloadStatus {
   ready: boolean;
   missing: string[];
   downloaded_bytes: number;
+  total_bytes: number;
   error?: string | null;
 }
 

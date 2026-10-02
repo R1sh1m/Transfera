@@ -29,7 +29,11 @@ use tauri::{
 };
 
 const BACKEND_PORT: u16 = 47821;
-const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+// First launch unpacks/scans hundreds of megabytes (Defender real-time
+// scan of _internal/ alone can take a minute), so allow a generous window
+// before reporting backend:down. The frontend self-heals anyway once
+// /api/health answers, so this only delays the error screen, never blocks.
+const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const GRACEFUL_SHUTDOWN_WAIT: Duration = Duration::from_secs(4);
 
 /// IPC allowlist — renderer input must never reach process spawn unvalidated.

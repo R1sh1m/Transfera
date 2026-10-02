@@ -92,6 +92,13 @@ export function CapabilitiesBadge() {
   const mb = modelStatus
     ? (modelStatus.downloaded_bytes / 1e6).toFixed(0)
     : "0";
+  // Inverted progress: the Action Blue wash fills the pill left-to-right
+  // as bytes land (polled every 2s while downloading). Track stays neutral
+  // so the label keeps its muted tone — single accent, no extra colors.
+  const totalBytes = modelStatus?.total_bytes ?? 0;
+  const downloadedBytes = modelStatus?.downloaded_bytes ?? 0;
+  const fillPct =
+    totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0;
   if (!data) return null;
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -120,12 +127,28 @@ export function CapabilitiesBadge() {
       )}
       {downloading && (
         <span
-          className="px-2 py-0.5 rounded-pill border border-border"
+          className="relative px-2 py-0.5 rounded-pill border border-border overflow-hidden"
           title="Installing AI libraries and downloading on-board AI models in the background"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(fillPct)}
+          aria-label={
+            modelStatus?.status === "installing-packages"
+              ? "Installing AI libraries"
+              : `Downloading AI models, ${mb} megabytes`
+          }
         >
-          {modelStatus?.status === "installing-packages"
-            ? "Installing AI libraries…"
-            : `Downloading AI… ${mb} MB`}
+          <span
+            aria-hidden
+            className="absolute inset-y-0 left-0 bg-action/30 transition-[width] duration-300"
+            style={{ width: `${fillPct}%` }}
+          />
+          <span className="relative">
+            {modelStatus?.status === "installing-packages"
+              ? "Installing AI libraries…"
+              : `Downloading AI… ${mb} MB`}
+          </span>
         </span>
       )}
       <button

@@ -72,6 +72,9 @@ def download_status() -> dict:
     missing = missing_models()
     state["ready"] = not missing
     state["missing"] = missing
+    # Total expected bytes across all specs — drives the frontend's
+    # fill-inside-the-pill progress (downloaded_bytes / total_bytes).
+    state["total_bytes"] = sum(size for _, _, size in MODEL_SPECS)
     if state["status"] == "downloading" and state["ready"]:
         with _download_lock:
             _download_state["status"] = "ready"
