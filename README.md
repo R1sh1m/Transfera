@@ -107,7 +107,7 @@ Every file transferred by Transfera travels through a two-stage verified vaultin
   <img src="docs/assets/two-hop-pipeline.svg" alt="Two-Hop Verified Pipeline" width="100%">
 </p>
 
-For a deep dive into the native Tauri shell, multi-tier device fallback, stay-open ExifTool daemon, and crash recovery, see the full **[Architecture Specification](ARCHITECTURE.md)**.
+For a deeper dive see the full **[Architecture Specification](ARCHITECTURE.md)**.
 
 ---
 
