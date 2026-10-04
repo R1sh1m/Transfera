@@ -41,14 +41,7 @@ Transfera moves photos and videos off your phone, camera, or USB drive into a ve
 
 ## 🚀 Installation
 
-### Step 1 — Clone
-
-```bash
-git clone https://github.com/R1sh1m/Transfera.git
-cd Transfera
-```
-
-### Step 2 — Run the installer for your platform
+Copy-paste **one block** for your platform — it clones the repo and starts the installer (always the latest code, never a stale copy).
 
 <table>
 <tr>
@@ -59,6 +52,8 @@ cd Transfera
 <td>
 
 ```bash
+[ -d Transfera ] || git clone --depth 1 https://github.com/R1sh1m/Transfera.git Transfera
+cd Transfera
 bash scripts/install.sh
 ```
 
@@ -66,6 +61,9 @@ bash scripts/install.sh
 <td>
 
 ```powershell
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Warning "git not found - install it first: winget install --id Git.Git -e" }
+if (-not (Test-Path .\Transfera)) { git clone --depth 1 https://github.com/R1sh1m/Transfera.git .\Transfera }
+cd .\Transfera
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-Transfera.ps1
 ```
 
