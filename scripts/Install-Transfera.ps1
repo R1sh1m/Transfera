@@ -136,23 +136,22 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
   Ok "$name installed"
 }
 
-# FIGlet Relief2 TRANSFERA banner (pure ASCII, PS 5.1-safe).
-# Width-adaptive: full 99-column art on wide consoles, compact wordmark
-# below 100 columns (a narrow window wraps the art mid-glyph and the logo
+# FIGlet Slant TRANSFERA banner (pure ASCII, PS 5.1-safe).
+# Width-adaptive: full 55-column art on normal consoles, compact wordmark
+# below 60 columns (a narrow window wraps the art mid-glyph and the logo
 # effectively disappears). Art lines below intentionally unindented.
 cls 2>$null
 Write-Host ""
 $consoleWidth = 120
 try { $consoleWidth = $Host.UI.RawUI.WindowSize.Width } catch { }
 if ($consoleWidth -le 0) { $consoleWidth = 120 }
-if ($consoleWidth -ge 100) {
-Write-Host "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" -ForegroundColor Cyan
-Write-Host "///////// \//////// \\\/////// \\/// \\/// \\/////// \\///////// \///////// \//////// \\\/////// \\" -ForegroundColor Cyan
-Write-Host "\\\/// \\\\/// \\/// \/// \\/// \///// /// \/// \\\\\\\/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \" -ForegroundColor Cyan
-Write-Host "\\\/// \\\\//////// \\///////// \///////// \\/////// \\/////// \\\/////// \\\//////// \\///////// \" -ForegroundColor Cyan
-Write-Host "\\\/// \\\\/// \\/// \/// \\/// \/// ///// \\\\\\\/// \/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \" -ForegroundColor Cyan
-Write-Host "\\\/// \\\\/// \\/// \/// \\/// \/// \\/// \\/////// \\/// \\\\\\\///////// \/// \\/// \/// \\/// \" -ForegroundColor Cyan
-Write-Host "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" -ForegroundColor Cyan
+if ($consoleWidth -ge 60) {
+Write-Host "  __________  ___    _   _______ ________________  ___ " -ForegroundColor Cyan
+Write-Host " /_  __/ __ \/   |  / | / / ___// ____/ ____/ __ \/   |" -ForegroundColor Cyan
+Write-Host "  / / / /_/ / /| | /  |/ /\__ \/ /_  / __/ / /_/ / /| |" -ForegroundColor Cyan
+Write-Host " / / / _, _/ ___ |/ /|  /___/ / __/ / /___/ _, _/ ___ |" -ForegroundColor Cyan
+Write-Host "/_/ /_/ |_/_/  |_/_/ |_//____/_/   /_____/_/ |_/_/  |_|" -ForegroundColor Cyan
+Write-Host "                                                       " -ForegroundColor Cyan
 Write-Host ""
 } else {
   Write-Host "  TRANSFERA" -ForegroundColor Cyan
