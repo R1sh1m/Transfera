@@ -31,6 +31,9 @@
   Skip downloading the on-board AI stack (onnxruntime + tokenizers) and MobileCLIP models (~320 MB total).
 .PARAMETER Yes
   Non-interactive: assume yes for the (small) confirmation prompts.
+.PARAMETER NoAutoClose
+  Keep the console window open after a successful install (by default it
+  closes itself a few seconds after ALL DONE; failures always stay open).
 #>
 [CmdletBinding()]
 param(
@@ -40,11 +43,23 @@ param(
   [switch]$SkipNative,
   [switch]$SkipDriver,
   [switch]$SkipAI,
-  [switch]$Yes
+  [switch]$Yes,
+  [switch]$NoAutoClose
 )
 
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/R1sh1m/Transfera.git"
+
+# Full transcript for post-mortems (best-effort: nested transcripts and
+# exotic hosts throw, which is fine — console output remains). Fail()
+# points at this file so a closed window never loses the evidence.
+$script:TranscriptPath = Join-Path ([IO.Path]::GetTempPath()) ("transfera-install-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+try { Start-Transcript -Path $script:TranscriptPath -ErrorAction Stop | Out-Null } catch { $script:TranscriptPath = $null }
+
+# Full transcript for post-mortems (best-effort: nested transcripts and
+# exotic hosts throw, which is fine — the console output remains).
+$script:TranscriptPath = Join-Path ([IO.Path]::GetTempPath()) ("transfera-install-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+try { Start-Transcript -Path $script:TranscriptPath -ErrorAction Stop | Out-Null } catch { $script:TranscriptPath = $null }
 
 function Step([string]$msg) {
   Write-Host ""
@@ -57,11 +72,22 @@ function StepBox([string]$icon, [string]$num, [string]$title, [string]$note = ""
   Write-Host "  ║  $icon  Step $num — $title" -ForegroundColor Cyan
   if ($note -ne "") { Write-Host "  ║      $note" -ForegroundColor DarkCyan }
   Write-Host $line -ForegroundColor Cyan
+  # Overall progress bar (suppressed automatically on redirected hosts).
+  $parts = $num -split "/"
+  if ($parts.Count -eq 2 -and $parts[0] -match '^\d+$' -and $parts[1] -match '^\d+$' -and [int]$parts[1] -gt 0) {
+    $pct = [int]([int]$parts[0] / [int]$parts[1] * 100)
+    Write-Progress -Activity "Transfera install" -Status "Step $num — $title" -PercentComplete $pct
+  }
 }
 function Ok([string]$msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Fail([string]$msg) {
   Write-Host "  [FAIL] $msg" -ForegroundColor Red
+  Write-Progress -Activity "Transfera install" -Completed
+  if ($script:TranscriptPath -and (Test-Path $script:TranscriptPath)) {
+    Write-Host "  Full log: $script:TranscriptPath" -ForegroundColor DarkCyan
+  }
+  try { Stop-Transcript | Out-Null } catch { }
   exit 1
 }
 function Invoke-Native([ScriptBlock]$Command, [string]$ShowPattern) {
@@ -469,3 +495,22 @@ Write-Host "  ║   Launch it from the Start Menu  🚀                        �
 Write-Host "  ║                                                            ║" -ForegroundColor Green
 Write-Host "  ══════════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
+
+# Success epilogue: tidy progress UI, stop the transcript, then close
+# our own console window so no stray terminal lingers. Failures never
+# reach here (Fail() exits first and stays open for reading).
+Write-Progress -Activity "Transfera install" -Completed
+try { Stop-Transcript | Out-Null } catch { }
+$launchedAsFile = [Environment]::GetCommandLineArgs() -contains "-File"
+$isConsoleHost = (Get-Host).Name -eq "ConsoleHost"
+if (-not $NoAutoClose -and $launchedAsFile -and $isConsoleHost) {
+  # Dedicated installer window (right-click Run / powershell -File):
+  # safe to close. Direct invocations inside a working shell stay open.
+  Write-Host "  This window closes automatically — press N within 8 seconds to keep it..." -ForegroundColor DarkCyan
+  $closeIt = $true
+  try {
+    choice /C YN /T 8 /D Y /M "Close this window" | Out-Null
+    if ($LASTEXITCODE -eq 2) { $closeIt = $false }
+  } catch { }
+  if ($closeIt) { Stop-Process -Id $PID }
+}

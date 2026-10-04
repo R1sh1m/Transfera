@@ -34,6 +34,7 @@ import {
   onBackendReady,
   getBackendStatus,
 } from "@/lib/desktop";
+import { API_BASE_URL } from "@/lib/api-client";
 import { useHealth } from "@/lib/queries";
 import type { UIState } from "@/store/transfer";
 
@@ -386,9 +387,11 @@ function BackendDownScreen() {
     } catch {
       // ignore
     }
-    // Direct health-endpoint probe as a second chance
+    // Direct health-endpoint probe as a second chance. Absolute backend
+    // URL: a relative fetch would hit the Tauri page origin, which serves
+    // no API (404) in the packaged app.
     try {
-      const res = await fetch("/api/health");
+      const res = await fetch(`${API_BASE_URL}/api/health`);
       if (res.ok) {
         useTransferStore.getState().setServerDown(false);
         setRetrying(false);

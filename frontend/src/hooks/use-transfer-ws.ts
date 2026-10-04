@@ -81,9 +81,18 @@ export function useTransferWs(sessionId: number | null) {
     cleanup();
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    // In packaged Electron (file:// protocol), window.location.host is empty.
-    // Fall back to direct backend connection on port 47821.
-    const host = window.location.host || "127.0.0.1:47821";
+    // Packaged shells don't serve the API from the page origin (Tauri runs
+    // at http(s)://tauri.localhost, Electron at file://), so resolve the
+    // backend host the same way api-client.ts does — otherwise live updates
+    // silently connect nowhere in production while working fine in dev.
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const host =
+      !origin ||
+      origin.startsWith("file://") ||
+      origin.includes("tauri.localhost") ||
+      window.location.protocol === "asset:"
+        ? "127.0.0.1:47821"
+        : window.location.host;
     const token = getLocalToken();
     const url =
       `${protocol}//${host}/ws/transfer/${sessionId}` +
@@ -157,8 +166,16 @@ export function useTransferWs(sessionId: number | null) {
         ")",
       );
 
-      // Codes 1008/4003/4403 → server rejected (no session, terminal, no token)
-      if (event.code === 1008 || event.code === 4003 || event.code === 4403) {
+      // Codes 1008/4003/4403 → server rejected (no session, terminal, no token).
+      // Exception: 4403 with no token yet is a startup race (the api-client
+      // token fetch is still in flight) — retry like a normal drop instead
+      // of latching off forever. A 4403 WITH a token present is a genuine
+      // auth failure and still stops.
+      const authRace = event.code === 4403 && !getLocalToken();
+      if (
+        !authRace &&
+        (event.code === 1008 || event.code === 4003 || event.code === 4403)
+      ) {
         shouldReconnectRef.current = false;
         setWsError(
           event.code === 4403
