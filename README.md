@@ -41,7 +41,7 @@ Transfera moves photos and videos off your phone, camera, or USB drive into a ve
 
 ## 🚀 Installation
 
-Copy-paste **one block** for your platform — it clones the repo and starts the installer (always the latest code, never a stale copy).
+Copy-paste **one block** for your platform.
 
 <table>
 <tr>
@@ -67,11 +67,11 @@ cd .\Transfera
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-Transfera.ps1
 ```
 
-</td>
+</td>    
 </tr>
 </table>
 
-First run takes 5–15 minutes (downloads + build). Every subsequent launch starts in seconds.
+First run takes 5–15 minutes (downloads + build).
 
 #### Optional flags (both scripts)
 
@@ -133,4 +133,4 @@ Most engine problems resolve themselves: the app detects a dead engine, shows it
 ## 📄 License
 
 **AGPL-3.0-or-later** — see [LICENSE](LICENSE).  
-Free for personal, academic, and commercial *use*. If you modify or re-host Transfera (including as a network service), keep the copyright notice, state your changes, and share modified source under the same terms. The "Transfera" name and artwork are reserved.
+
