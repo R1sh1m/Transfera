@@ -14,9 +14,9 @@
 █████████████████████████████████████████████████████████████████████████████████████████████
 ```
 
-**Your photos & videos. Your machine. Your rules.**
+**Your photos & videos on your machine**
 
-Transfera moves photos and videos off your phone, camera, or USB drive into a verified local archive — hashed on the way in, re-verified before anything lands, filed by date automatically. No cloud, no account, no subscription. Your media never leaves your machine.
+Transfera moves photos and videos off your phone, camera, or USB drive into a verified local archive — hashed on the way in, re-verified before anything lands, filed by date automatically. Ensuring that your data is safely transferred and available for you to access anytime.
 
 [![CI](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml/badge.svg)](https://github.com/R1sh1m/Transfera/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -31,17 +31,17 @@ Transfera moves photos and videos off your phone, camera, or USB drive into a ve
 ## Why Transfera
 
 - **Verified end to end** — every file is hashed while copying, then hashed again before it enters your archive. Anything that fails verification never lands.
-- **Organized automatically** — photos file into `2026/09-September/`, documents into `Documents/<Kind>/` date folders. No renaming chores.
+- **Organized automatically** — photos file into `2026/09-September/`, documents into `Documents/<Kind>/` date folders.
 - **iPhone & iPad, no iTunes** — plug in, unlock, tap Trust. Tiered access (direct, helper, bridge) degrades gracefully instead of failing outright.
 - **Find anything instantly** — on-device AI search ("sunset beach") with keyword fallback, plus duplicates, faces, trash, and timeline.
 - **Survives crashes and restarts** — interrupted transfers resume where they stopped; partial files never pollute your archive. If the engine ever fails to start, the app tells you and recovers on its own once it's back.
-- **Private by architecture** — everything runs on localhost. The network is used once, to fetch helper tools — never for your media.
+- **Private by architecture** — everything runs on localhost. The network is used once, only to fetch helper tools.
 
 ---
 
-## 🚀 Installation
+## Installation
 
-Copy-paste **one block** for your platform.
+Copy-paste the relevant **block** for your platform.
 
 <table>
 <tr>
@@ -113,7 +113,7 @@ For a deeper dive see the full **[Architecture Specification](ARCHITECTURE.md)**
 
 ## 🔧 Troubleshooting
 
-Most engine problems resolve themselves: the app detects a dead engine, shows it plainly, and reconnects automatically once it's back. What's left is below.
+Most engine problems resolve themselves, some common situations are listed:
 
 | What you see | What to do |
 |---|---|
@@ -124,7 +124,7 @@ Most engine problems resolve themselves: the app detects a dead engine, shows it
 
 ---
 
-## 📄 License
+## License
 
 **AGPL-3.0-or-later** — see [LICENSE](LICENSE).  
 
