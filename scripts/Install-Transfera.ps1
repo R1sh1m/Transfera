@@ -126,6 +126,27 @@ function Invoke-Probe([ScriptBlock]$Command) {
     $ErrorActionPreference = $prevEAP
   }
 }
+function Wait-InstallerProcess([System.Diagnostics.Process]$proc, [int]$TimeoutMinutes = 30) {
+  # Replacement for bare `Start-Process -Wait`, which blocks forever when
+  # the installer detaches, elevates out of view, or never reports back.
+  # Polls HasExited with a heartbeat and a hard cap so the terminal can
+  # neither hang silently nor outlive a stuck wizard. Returns exit code.
+  $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+  $ticks = 0
+  while (-not $proc.HasExited) {
+    Start-Sleep -Seconds 5
+    $ticks++
+    if ($ticks % 12 -eq 0) {
+      $elapsed = [int]((Get-Date) - $proc.StartTime).TotalMinutes
+      Write-Host "  Still waiting on the installer window (~${elapsed}m elapsed)..." -ForegroundColor DarkCyan
+    }
+    if ((Get-Date) -gt $deadline) {
+      Fail "Installer did not finish within ${TimeoutMinutes} minutes. If its window is still open, complete or cancel it, then re-run this script."
+    }
+  }
+  $proc.Refresh()
+  return $proc.ExitCode
+}
 function Confirm-Step([string]$msg) {
   if ($Yes) { return $true }
   # Headless runs (detached, stdin at EOF) make Read-Host throw or return
@@ -166,7 +187,10 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
 # Width-adaptive: full 55-column art on normal consoles, compact wordmark
 # below 60 columns (a narrow window wraps the art mid-glyph and the logo
 # effectively disappears). Art lines below intentionally unindented.
-cls 2>$null
+# Clear-Host guarded: without a real console buffer (detached/scheduled
+# launches) bare `cls` throws terminably and kills the run before printing
+# anything — the one failure mode that leaves zero diagnostics behind.
+try { cls 2>$null } catch { }
 Write-Host ""
 $consoleWidth = 120
 try { $consoleWidth = $Host.UI.RawUI.WindowSize.Width } catch { }
@@ -469,13 +493,16 @@ $mb = [math]::Round($installer.Length / 1MB, 1)
 Ok "Installer built: $($installer.Name) ($mb MB) — compiled locally, so no SmartScreen warning."
 if ($Silent) {
   Step "Silent-installing..."
-  Start-Process $installer.FullName -ArgumentList "/S" -Wait
+  $sp = Start-Process $installer.FullName -ArgumentList "/S" -PassThru
+  $scode = Wait-InstallerProcess $sp
+  if ($scode -ne 0) { Fail "Silent install failed with code ${scode}." }
 } else {
   Step "Launching the installer (one click-through, no SmartScreen)..."
   Write-Host "  Complete the installer window to continue (check the taskbar if it opened behind this window)..." -ForegroundColor DarkCyan
-  $installProc = Start-Process $installer.FullName -PassThru -Wait
-  if ($installProc.ExitCode -ne 0) {
-    Fail "Installer exited with code $($installProc.ExitCode) (cancelled?). Re-run this script to retry."
+  $installProc = Start-Process $installer.FullName -PassThru
+  $icode = Wait-InstallerProcess $installProc
+  if ($icode -ne 0) {
+    Fail "Installer exited with code ${icode} (cancelled?). Re-run this script to retry."
   }
 }
 Write-Host ""
