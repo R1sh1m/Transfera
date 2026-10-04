@@ -118,7 +118,6 @@ Most engine problems resolve themselves: the app detects a dead engine, shows it
 | What you see | What to do |
 |---|---|
 | Engine Unavailable | Usually transient — the screen clears on its own once the engine answers. If it persists, click **Retry**. |
-| "Failed to load Python DLL" on launch |
 | iPhone not listed | Use a data cable (not charge-only), unlock, tap **Trust**, unplug and replug. The Device Setup page walks through driver states. |
 | "duplicates found" paused | Open the popup → **Skip**, **Keep both**, or **Overwrite** → Resume. |
 | Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait for the ready state, press **Index library**, search again. |
