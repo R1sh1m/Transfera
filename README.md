@@ -117,16 +117,11 @@ Most engine problems resolve themselves: the app detects a dead engine, shows it
 
 | What you see | What to do |
 |---|---|
-| Engine Unavailable | Usually transient — the screen clears on its own once the engine answers. If it persists, click **Retry**; still stuck? Reinstall, and attach the engine log when asking for help (`%APPDATA%\com.transfera.app\data\logs\transfera.log` on Windows). |
-| Stuck on "Starting Transfera" | First launch can take up to two minutes (antivirus scanning the engine). It resolves on its own; only Retry if the error screen appears. |
-| "Failed to load Python DLL" on launch | Missing VC++ runtime — the installer installs it automatically, so reinstall from the latest build. Don't run the app from a OneDrive on-demand folder (right-click it → **Always keep on this device**). |
-| App window is blank | Close fully, wait 10 s, reopen. Still broken? Delete app data (`%APPDATA%\com.transfera.app` on Windows, the `com.transfera.app` folder under `~/Library/Application Support` / `~/.local/share` on macOS/Linux) and relaunch. |
+| Engine Unavailable | Usually transient — the screen clears on its own once the engine answers. If it persists, click **Retry**. |
+| "Failed to load Python DLL" on launch |
 | iPhone not listed | Use a data cable (not charge-only), unlock, tap **Trust**, unplug and replug. The Device Setup page walks through driver states. |
 | "duplicates found" paused | Open the popup → **Skip**, **Keep both**, or **Overwrite** → Resume. |
 | Search finds nothing | Default is filename-only. Press **Get AI models** in Library, wait for the ready state, press **Index library**, search again. |
-| Antivirus flags a file | Add the Transfera folder to your AV exclusions — locally compiled helpers sometimes trip heuristics. |
-| Garbled text (boxes, `?`) in the installer terminal | Cosmetic: legacy conhost raster fonts can't render the checkmarks/emoji. Use Windows Terminal, or run `chcp 65001` first (the installer also sets UTF-8 itself when it can). |
-| Something looks broken | Attach the engine log above when asking for help. |
 
 ---
 
