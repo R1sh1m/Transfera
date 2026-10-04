@@ -136,9 +136,16 @@ function Winget-Ensure([string]$id, [string]$name, [string]$extraArgs = "") {
   Ok "$name installed"
 }
 
-# FIGlet Relief2 TRANSFERA banner (pure ASCII, PS 5.1-safe)
+# FIGlet Relief2 TRANSFERA banner (pure ASCII, PS 5.1-safe).
+# Width-adaptive: full 99-column art on wide consoles, compact wordmark
+# below 100 columns (a narrow window wraps the art mid-glyph and the logo
+# effectively disappears). Art lines below intentionally unindented.
 cls 2>$null
 Write-Host ""
+$consoleWidth = 120
+try { $consoleWidth = $Host.UI.RawUI.WindowSize.Width } catch { }
+if ($consoleWidth -le 0) { $consoleWidth = 120 }
+if ($consoleWidth -ge 100) {
 Write-Host "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" -ForegroundColor Cyan
 Write-Host "///////// \//////// \\\/////// \\/// \\/// \\/////// \\///////// \///////// \//////// \\\/////// \\" -ForegroundColor Cyan
 Write-Host "\\\/// \\\\/// \\/// \/// \\/// \///// /// \/// \\\\\\\/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \" -ForegroundColor Cyan
@@ -147,6 +154,9 @@ Write-Host "\\\/// \\\\/// \\/// \/// \\/// \/// ///// \\\\\\\/// \/// \\\\\\\//
 Write-Host "\\\/// \\\\/// \\/// \/// \\/// \/// \\/// \\/////// \\/// \\\\\\\///////// \/// \\/// \/// \\/// \" -ForegroundColor Cyan
 Write-Host "\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" -ForegroundColor Cyan
 Write-Host ""
+} else {
+  Write-Host "  TRANSFERA" -ForegroundColor Cyan
+}
 Write-Host "  Your photos & videos. Your machine. Your rules." -ForegroundColor White
 Write-Host "  Windows installer — building everything locally from source" -ForegroundColor DarkCyan
 Write-Host ""
