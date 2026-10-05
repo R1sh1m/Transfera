@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Generator
 from threading import Thread
 from unittest.mock import patch
 
@@ -74,7 +75,7 @@ def _run_server(port: int) -> None:
 
 
 @pytest.fixture(scope="module")
-def client(tmp_path_factory) -> httpx.Client:
+def client(tmp_path_factory) -> Generator[httpx.Client, None, None]:
     """Start the backend server and return an HTTPX client with auth headers.
 
     Isolation (hard-won lesson: this fixture used to boot the REAL app on
