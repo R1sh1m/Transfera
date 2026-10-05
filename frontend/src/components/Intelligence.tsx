@@ -375,12 +375,10 @@ export function PeoplePanel() {
   if (!data || data.people.length === 0)
     return (
       <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
-        <div className="flex items-center gap-2 font-semibold text-foreground">
+        <div className="flex items-center gap-2 font-semibold text-foreground mb-1">
           <Users className="w-4 h-4 text-action" /> People
         </div>
-        No face clusters yet. Install the optional SCRFD + ArcFace ONNX models
-        into the models folder to enable fully-offline face detection — the API
-        and this panel are already wired.
+        No face clusters yet. Run <strong className="font-semibold text-foreground">Index library</strong> above to scan your media and group faces automatically.
       </div>
     );
   return (

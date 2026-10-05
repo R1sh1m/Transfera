@@ -15,14 +15,29 @@ includes the AI runtime from day one; ~120 MB accepted per product call).
 Model *weights* (~207 MB) stay on-demand and are NEVER frozen in.
 """
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 block_cipher = None
+
+# pywin32 native bits (win32/*.pyd incl. win32security, plus the
+# pywin32_system32 DLLs they link against). pymobiledevice3's Windows usbmux
+# path does `import win32security` at module top — without these files the
+# frozen engine loses all Tier 1 iPhone access with a bare ImportError.
+# Guarded: pywin32 is Windows-only, so non-Windows builds skip silently.
+pywin32_binaries: list = []
+try:
+    pywin32_binaries += collect_dynamic_libs("win32")
+except Exception as exc:  # noqa: BLE001 - optional platform dependency
+    print(f"pywin32 win32/*.pyd collection skipped: {exc}")
+try:
+    pywin32_binaries += collect_dynamic_libs("pywin32_system32")
+except Exception as exc:  # noqa: BLE001 - directory is not an importable package
+    print(f"pywin32_system32 DLL collection skipped: {exc}")
 
 a = Analysis(
     ["backend/main.py"],
     pathex=[],
-    binaries=[],
+    binaries=[*pywin32_binaries],
     datas=[
         # On-demand AI runtime manifest: backend/engines/clip.py resolves it
         # via BACKEND_ROOT (MEIPASS when frozen). The AI wheels themselves
@@ -69,6 +84,12 @@ a = Analysis(
         "construct",
         "cryptography",
         "hexdump",
+        # pywin32: win32security is imported at module top by
+        # pymobiledevice3.osu.win_util on Windows (admin check). Without an
+        # explicit entry PyInstaller can miss the extension module.
+        "win32security",
+        "win32api",
+        "pywintypes",
         # Validation / misc
         "pydantic",
         "email_validator",

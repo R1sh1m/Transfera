@@ -549,9 +549,10 @@ export default function LibraryPage() {
   const [migrateRunning, setMigrateRunning] = useState(false);
   const [migrateDismissed, setMigrateDismissed] = useState(false);
   const [migrateResult, setMigrateResult] = useState<string | null>(null);
-  // Collapsed "nothing to move" state: the filing card shrinks to a single
-  // button; expanding reveals the explainer + Check again/Dismiss actions.
+  // The filing card: collapsed icon -> hover tooltip -> click to expand full card.
+  // Dismiss only hides until you leave and return to this page.
   const [docsExpanded, setDocsExpanded] = useState(false);
+  const [docsIconHovered, setDocsIconHovered] = useState(false);
   const [viewMode, setViewMode] = useState<"masonry" | "list" | "history">(
     "masonry",
   );
@@ -962,10 +963,9 @@ export default function LibraryPage() {
         <SemanticSearchBar onResults={(q) => setSemanticQuery(q)} />
       )}
 
-      {/* Documents migration card — manual move from the legacy unified
-          tree into Documents/<Kind>/ date folders. When a check finds
-          nothing to move, the card collapses to a single disclosure
-          button so a settled state doesn't consume a full card. */}
+      {/* Document filing: icon button that shows info on hover and expands on click.
+          "Nothing to move" state collapses to a small icon; dismissed hides it
+          per-navigation (migrateDismissed resets on re-mount). */}
       {section === "vault" &&
         !migrateDismissed &&
         (!migrateLoading &&
@@ -973,17 +973,34 @@ export default function LibraryPage() {
         migratePreview.total === 0 &&
         !migrateResult &&
         !docsExpanded ? (
-          <div>
+          // Collapsed icon button with hover tooltip
+          <div className="relative flex items-center">
             <button
               type="button"
               onClick={() => setDocsExpanded(true)}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs rounded-pill border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors active:scale-[0.95]"
-              title="How document filing works"
+              onMouseEnter={() => setDocsIconHovered(true)}
+              onMouseLeave={() => setDocsIconHovered(false)}
+              className="flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors active:scale-[0.95]"
+              title="Document filing"
+              aria-label="Document filing"
             >
               <FileText className="w-3.5 h-3.5" />
-              Document filing
-              <ChevronDown className="w-3.5 h-3.5" />
             </button>
+            <AnimatePresence>
+              {docsIconHovered && (
+                <motion.div
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute left-10 top-1/2 -translate-y-1/2 z-20 pointer-events-none"
+                >
+                  <div className="bg-foreground text-background text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap shadow-lg">
+                    Document filing — click to manage
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         ) : (
           <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
@@ -1012,7 +1029,7 @@ export default function LibraryPage() {
                     type="button"
                     onClick={handleMigrateDocuments}
                     disabled={migrateRunning}
-                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-pill hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {migrateRunning
                       ? "Moving…"
@@ -1023,14 +1040,14 @@ export default function LibraryPage() {
                     type="button"
                     onClick={fetchMigratePreview}
                     disabled={migrateLoading}
-                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
+                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-pill hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
                   >
                     {migrateLoading ? "Checking…" : "Check again"}
                   </button>
                 )}
                 <button
                   type="button"
-                  onClick={() => setMigrateDismissed(true)}
+                  onClick={() => { setMigrateDismissed(true); setDocsExpanded(false); }}
                   className="text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Dismiss
@@ -1053,43 +1070,55 @@ export default function LibraryPage() {
           />
         </div>
 
-        <select
-          value={extension}
-          onChange={(e) => setExtension(e.target.value)}
-          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
-        >
-          <option value="">All types</option>
-          {allExtensions.map((ext) => (
-            <option key={ext} value={ext}>
-              {ext}
-            </option>
-          ))}
-        </select>
+        {/* Custom pill-shaped type filter */}
+        <div className="relative">
+          <select
+            value={extension}
+            onChange={(e) => setExtension(e.target.value)}
+            className="appearance-none pl-3 pr-7 py-1.5 bg-background border border-input rounded-full text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-muted/50 transition-colors"
+          >
+            <option value="">All types</option>
+            {allExtensions.map((ext) => (
+              <option key={ext} value={ext}>
+                {ext}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+        </div>
 
-        <select
-          value={docKind}
-          onChange={(e) => setDocKind(e.target.value)}
-          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
-          title="Filter documents by kind folder (Documents/<Kind>/)"
-        >
-          <option value="">All doc kinds</option>
-          {DOCUMENT_KINDS.map((kind) => (
-            <option key={kind} value={kind}>
-              {kind}
-            </option>
-          ))}
-        </select>
+        {/* Custom pill-shaped doc-kind filter */}
+        <div className="relative">
+          <select
+            value={docKind}
+            onChange={(e) => setDocKind(e.target.value)}
+            className="appearance-none pl-3 pr-7 py-1.5 bg-background border border-input rounded-full text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-muted/50 transition-colors"
+            title="Filter documents by kind folder (Documents/<Kind>/)"
+          >
+            <option value="">All doc kinds</option>
+            {DOCUMENT_KINDS.map((kind) => (
+              <option key={kind} value={kind}>
+                {kind}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+        </div>
 
-        <select
-          value={finalStatus}
-          onChange={(e) => setFinalStatus(e.target.value)}
-          className="px-3 py-2 bg-background border border-input rounded-md text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
-        >
-          <option value="">All statuses</option>
-          <option value="completed">Completed (default)</option>
-          <option value="failed">Failed</option>
-          <option value="pending">Pending</option>
-        </select>
+        {/* Custom pill-shaped status filter */}
+        <div className="relative">
+          <select
+            value={finalStatus}
+            onChange={(e) => setFinalStatus(e.target.value)}
+            className="appearance-none pl-3 pr-7 py-1.5 bg-background border border-input rounded-full text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-muted/50 transition-colors"
+          >
+            <option value="">All statuses</option>
+            <option value="completed">Completed (default)</option>
+            <option value="failed">Failed</option>
+            <option value="pending">Pending</option>
+          </select>
+          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+        </div>
 
         <div className="flex items-center border border-input rounded-md">
           <button

@@ -21,7 +21,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from backend.api.auth import require_local_token
-from backend.ios_device import browse_device_directory, read_device_file
+from backend.device_backend import DeviceLockedError, DeviceNotTrustedError, DeviceStatus, WpdDeviceAccessDenied
+from backend.ios_device import read_device_file
+from backend.tier2_manager import get_device_manager
 
 _PREVIEW_MAX_FILES = 5000
 _PREVIEW_MAX_DEPTH = 8
@@ -560,10 +562,94 @@ async def ios_preview_directory(
     sort_by: str = Query("newest", pattern="^(newest|oldest|name_asc|name_desc|size_desc|size_asc)$"),
     _: None = Depends(require_local_token),
 ):
+    manager = get_device_manager()
+
+    # Verify device is connected and ready via unified manager
+    devices, _tier = await manager.list_devices()
+    device = next((d for d in devices if d.serial == device_id), None)
+
+    if device is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "disconnected",
+                "message": f"Device {device_id} is not connected or not reachable. "
+                "Ensure the device is plugged in via USB and unlocked.",
+            },
+        )
+
+    # Early-exit for terminal device states that no backend can work around
+    if device.status == DeviceStatus.LOCKED:
+        raise HTTPException(
+            status_code=423,
+            detail={
+                "status": "locked",
+                "message": "Your iPhone is locked. Please unlock it and tap "
+                "'Trust This Computer' when prompted, then try again.",
+            },
+        )
+    if device.status == DeviceStatus.NOT_TRUSTED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": "not_trusted",
+                "message": "Please tap 'Trust This Computer' on your iPhone and enter your passcode, then try again.",
+            },
+        )
+
     try:
-        entries = await browse_device_directory(device_id, path)
+        entries = await manager.browse_device(device_id, path)
+    except DeviceLockedError as exc:
+        raise HTTPException(
+            status_code=423,
+            detail={"status": "locked", "message": exc.message},
+        )
+    except DeviceNotTrustedError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"status": "not_trusted", "message": exc.message},
+        )
+    except WpdDeviceAccessDenied as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "wpd_denied",
+                "message": str(exc),
+            },
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "not_found",
+                "message": f"Path not found on device: {path}",
+            },
+        )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Device error: {exc}")
+        error_text = str(exc)
+        exc_lower = error_text.lower()
+        if "locked" in exc_lower or "lock" in exc_lower:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "status": "locked",
+                    "message": "Your iPhone is locked. Please unlock it and "
+                    "tap 'Trust This Computer' when prompted, then try again.",
+                },
+            )
+        if "trust" in exc_lower or "pair" in exc_lower or "paired" in exc_lower:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "status": "not_trusted",
+                    "message": "Please tap 'Trust This Computer' on your "
+                    "iPhone and enter your passcode, then try again.",
+                },
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": error_text},
+        )
 
     items: list[dict] = []
     total_photos = 0

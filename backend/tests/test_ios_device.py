@@ -1,0 +1,96 @@
+"""
+Tests for iOS device failure handling (no hardware required).
+
+Covers the hang classes that surfaced as a bare 30 s client timeout with
+an empty preview grid:
+  * usbmux import failure degrades to [] with a single warning (the device
+    list is polled every few seconds — it must not spam the log);
+  * the lockdown trust probe is bounded (slow/locked device -> LOCKED);
+  * AFC directory walks are bounded (stalled device -> RuntimeError, which
+    the endpoint maps to a clear 503 instead of a hung request).
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+import threading
+
+import pytest
+
+import backend.ios_device as ios_device
+from backend.ios_device import DeviceStatus, browse_device_directory, list_ios_devices
+
+
+async def test_usbmux_import_failure_warns_once_and_returns_empty(monkeypatch, caplog):
+    """A broken usbmux import (e.g. missing win32security) degrades quietly."""
+    monkeypatch.setitem(sys.modules, "pymobiledevice3.usbmux", None)
+    # Reset the once-flag in case another test already tripped it.
+    monkeypatch.setattr(ios_device, "_warned_usbmux_import", False)
+    with caplog.at_level(logging.WARNING, logger="backend.ios_device"):
+        assert await list_ios_devices() == []
+        assert await list_ios_devices() == []
+    warnings = [r for r in caplog.records if "Failed to import pymobiledevice3 usbmux" in r.message]
+    assert len(warnings) == 1
+
+
+class _BlockingLockdown:
+    """Fake lockdown whose trust probe never answers."""
+
+    short_info = {"DeviceName": "iPhone", "ProductType": "iPhone99,9", "ProductVersion": "99.9"}
+
+    def __init__(self):
+        self._gate = threading.Event()
+
+    @property
+    def all_values(self):
+        self._gate.wait(30)
+        return {}
+
+    def close(self):
+        pass
+
+
+class _MuxDev:
+    serial = "SERIAL-123"
+    connection_type = "USB"
+
+
+async def test_trust_probe_timeout_reports_locked(monkeypatch):
+    """A trust probe that never answers is bounded and reports LOCKED."""
+    import pymobiledevice3.lockdown as _lockdown_mod
+    import pymobiledevice3.usbmux as _usbmux_mod
+
+    lockdown = _BlockingLockdown()
+    monkeypatch.setattr(_lockdown_mod, "create_using_usbmux", lambda *_args, **_kwargs: lockdown)
+    monkeypatch.setattr(_usbmux_mod, "list_devices", lambda: [_MuxDev()])
+    monkeypatch.setattr(ios_device, "_TRUST_PROBE_TIMEOUT", 0.2)
+    devices = await list_ios_devices()
+    assert len(devices) == 1
+    assert devices[0].status == DeviceStatus.LOCKED
+
+
+class _HangingAfc:
+    def listdir(self, path):
+        threading.Event().wait(30)
+        return []
+
+    def close(self):
+        pass
+
+
+class _NoopLockdown:
+    def close(self):
+        pass
+
+
+async def test_browse_hang_raises_actionable_error(monkeypatch):
+    """A stalled AFC walk raises instead of hanging past client timeouts."""
+    monkeypatch.setattr(ios_device, "_BROWSE_TIMEOUT", 0.2)
+
+    async def _fake_afc_service(serial):
+        return _HangingAfc(), _NoopLockdown()
+
+    monkeypatch.setattr(ios_device, "_get_afc_service", _fake_afc_service)
+    with pytest.raises(RuntimeError, match="stopped responding"):
+        await browse_device_directory("SERIAL-123", "/DCIM")

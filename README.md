@@ -61,7 +61,7 @@ bash scripts/install.sh
 <td>
 
 ```powershell
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Warning "git not found - install it first: winget install --id Git.Git -e" }
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Warning "git not found" }
 if (-not (Test-Path .\Transfera)) { git clone --depth 1 https://github.com/R1sh1m/Transfera.git .\Transfera }
 cd .\Transfera
 powershell -ExecutionPolicy Bypass -File .\scripts\Install-Transfera.ps1

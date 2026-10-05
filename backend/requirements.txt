@@ -12,6 +12,11 @@ aiofiles>=23.2,<25.0
 aiohttp>=3.9,<4.0
 pydantic>=2.7,<3.0
 pymobiledevice3>=5.0,<6.0
+# pywin32 provides win32security, required by pymobiledevice3's Windows
+# usbmux path (admin check). Without it, `from pymobiledevice3.usbmux
+# import list_devices` raises ImportError and Tier 1 iPhone access is dead.
+# Windows-only marker keeps Linux/macOS installs working.
+pywin32>=300; sys_platform == "win32"
 exifread>=3.0,<4.0
 # On-board AI search runtime — shipped in the base install from day one
 # (no opt-in pip step). Model *weights* (~207 MB) still download once via

@@ -3,7 +3,7 @@
 // Live system metrics, directory analysis, session management.
 // ---------------------------------------------------------------------------
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -30,6 +30,7 @@ import {
   Smartphone,
   Wifi,
   Terminal,
+  Pencil,
 } from "lucide-react";
 import {
   useSessionList,
@@ -44,7 +45,7 @@ import {
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
 import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
-import { isDesktop, openPath, runElevated } from "@/lib/desktop";
+import { isDesktop, openPath, openDirectory, runElevated } from "@/lib/desktop";
 import type { SessionInfo, SessionStatus } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -148,7 +149,7 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
 }
 
 // ---------------------------------------------------------------------------
-// Directory Metrics Card
+// Directory Metrics Card (interactive — path editable from Dashboard)
 // ---------------------------------------------------------------------------
 interface DirMetricsCardProps {
   label: string;
@@ -156,6 +157,7 @@ interface DirMetricsCardProps {
   icon: React.ReactNode;
   iconBg: string;
   path: string | null;
+  onPathChange: (newPath: string) => void;
   sessionName?: string;
   transferMode?: "copy" | "move";
 }
@@ -166,17 +168,40 @@ function DirMetricsCard({
   icon,
   iconBg,
   path,
+  onPathChange,
   sessionName,
   transferMode,
 }: DirMetricsCardProps) {
   const { data: metrics, isLoading } = useFolderMetadata(path);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(path ?? "");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Keep draft in sync when path changes externally (e.g. from Setup page)
+  useEffect(() => {
+    if (!editing) setDraft(path ?? "");
+  }, [path, editing]);
+
+  const commitDraft = () => {
+    const trimmed = draft.trim();
+    if (trimmed !== (path ?? "")) onPathChange(trimmed);
+    setEditing(false);
+  };
+
+  const handleBrowse = async () => {
+    const selected = await openDirectory(path ?? undefined);
+    if (selected) {
+      onPathChange(selected);
+      setDraft(selected);
+    }
+  };
 
   return (
     <div className="bg-card border border-border rounded-lg p-4">
       <div className="flex items-center gap-3 mb-3">
         <div
           className={cn(
-            "w-9 h-9 rounded-lg flex items-center justify-center",
+            "w-9 h-9 rounded-lg flex items-center justify-center shrink-0",
             iconBg,
           )}
         >
@@ -184,16 +209,45 @@ function DirMetricsCard({
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold text-foreground">{label}</p>
-          <p
-            className="text-[11px] text-muted-foreground truncate"
-            title={path ?? undefined}
-          >
-            {path || "No path selected"}
-          </p>
+          {editing ? (
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commitDraft}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitDraft();
+                if (e.key === "Escape") { setDraft(path ?? ""); setEditing(false); }
+              }}
+              autoFocus
+              className="mt-0.5 w-full text-[11px] bg-background border border-input rounded px-1.5 py-0.5 text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              placeholder="Enter folder path…"
+            />
+          ) : (
+            <button
+              onClick={() => { setDraft(path ?? ""); setEditing(true); }}
+              className="no-drag flex items-center gap-1 group/edit min-w-0"
+              title="Click to edit path"
+            >
+              <p className="text-[11px] text-muted-foreground truncate group-hover/edit:text-foreground transition-colors">
+                {path || sublabel}
+              </p>
+              <Pencil className="w-2.5 h-2.5 text-muted-foreground opacity-0 group-hover/edit:opacity-60 transition-opacity shrink-0" />
+            </button>
+          )}
         </div>
+        {isDesktop && (
+          <button
+            onClick={handleBrowse}
+            className="no-drag shrink-0 w-7 h-7 rounded-full bg-muted hover:bg-muted/70 flex items-center justify-center transition-colors"
+            title="Browse for folder"
+          >
+            <FolderOpen className="w-3.5 h-3.5 text-muted-foreground" />
+          </button>
+        )}
         {sessionName && (
           <span
-            className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]"
+            className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[80px]"
             title={sessionName}
           >
             {sessionName}
@@ -244,8 +298,10 @@ function DirMetricsCard({
             </div>
           )}
         </div>
-      ) : (
-        <p className="text-xs text-muted-foreground py-2">{sublabel}</p>
+      ) : path ? null : (
+        <p className="text-xs text-muted-foreground py-1">
+          {isDesktop ? "Click the path or browse to set a folder" : sublabel}
+        </p>
       )}
     </div>
   );
@@ -1053,6 +1109,10 @@ export default function DashboardPage() {
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot);
   const destRoot = useTransferStore((s) => s.transfer.destRoot);
+  const setupSourcePath = useTransferStore((s) => s.ui.setupSourcePath);
+  const setupDestPath = useTransferStore((s) => s.ui.setupDestPath);
+  const setSetupSourcePath = useTransferStore((s) => s.setSetupSourcePath);
+  const setSetupDestPath = useTransferStore((s) => s.setSetupDestPath);
 
   const { data: backendStatus } = useDeviceBackendStatus();
   const [dismissedCards, setDismissedCards] = useState<string[]>(
@@ -1086,8 +1146,9 @@ export default function DashboardPage() {
     showAppleCard || showPymobileCard || showWslCard || showBridgeCard;
 
   const latestSession = sessionList?.sessions?.[0];
-  const activeSource = sourceRoot || latestSession?.source_root || null;
-  const activeDest = destRoot || latestSession?.dest_root || null;
+  // Prefer setup path (editable), then live transfer, then last session
+  const activeSource = setupSourcePath || sourceRoot || latestSession?.source_root || null;
+  const activeDest = setupDestPath || destRoot || latestSession?.dest_root || null;
   const activeSessionName = latestSession?.session_name;
   const activeTransferMode = latestSession?.transfer_mode;
 
@@ -1136,6 +1197,7 @@ export default function DashboardPage() {
           }
           iconBg="bg-blue-50 dark:bg-blue-950"
           path={activeSource}
+          onPathChange={(p) => setSetupSourcePath(p)}
           sessionName={activeSessionName}
           transferMode={activeTransferMode}
         />
@@ -1147,6 +1209,7 @@ export default function DashboardPage() {
           }
           iconBg="bg-green-50 dark:bg-green-950"
           path={activeDest}
+          onPathChange={(p) => setSetupDestPath(p)}
           sessionName={activeSessionName}
           transferMode={activeTransferMode}
         />

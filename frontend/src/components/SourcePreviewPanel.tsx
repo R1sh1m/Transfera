@@ -32,7 +32,9 @@ export interface SourcePreviewPanelProps {
   onTransferStart?: (paths?: string[]) => void;
 }
 
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+function authHeaders(
+  extra: Record<string, string> = {},
+): Record<string, string> {
   const token = getLocalToken();
   return token ? { ...extra, "X-Local-Token": token } : { ...extra };
 }
@@ -55,7 +57,10 @@ function formatDuration(seconds?: number | null): string | null {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function totalSelectedSize(items: MediaPreviewItem[], selectedSet: Set<string>): number {
+function totalSelectedSize(
+  items: MediaPreviewItem[],
+  selectedSet: Set<string>,
+): number {
   let bytes = 0;
   for (const item of items) {
     if (selectedSet.has(item.abs_path)) {
@@ -87,7 +92,9 @@ function MediaThumbCell({
   thumbQueue,
 }: MediaThumbCellProps) {
   const cellRef = useRef<HTMLDivElement>(null);
-  const [loadState, setLoadState] = useState<"none" | "loading" | "loaded" | "error">("none");
+  const [loadState, setLoadState] = useState<
+    "none" | "loading" | "loaded" | "error"
+  >("none");
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -272,11 +279,50 @@ function SkeletonGrid({ count = 12 }: { count?: number }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({
+  devicePath,
+  onImportAll,
+}: {
+  devicePath?: string | null;
+  onImportAll?: () => void;
+}) {
+  if (!devicePath) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+        <ImageOff className="w-8 h-8 mb-2" />
+        <p className="text-sm">No media files found in this directory</p>
+      </div>
+    );
+  }
+  // Device folder levels (e.g. iPhone /DCIM) contain only subfolders, so a
+  // flat file grid is legitimately empty here — offer the recursive
+  // import directly instead of a dead end. iPhones expose photos and
+  // videos over AFC only; documents live in app sandboxes and cannot be
+  // browsed from a device source.
   return (
-    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-      <ImageOff className="w-8 h-8 mb-2" />
-      <p className="text-sm">No media files found in this directory</p>
+    <div className="flex flex-col items-center justify-center py-8 text-center space-y-3">
+      <ImageOff className="w-8 h-8 text-muted-foreground" />
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-foreground">
+          No media files directly in this folder
+        </p>
+        <p className="text-xs text-muted-foreground max-w-xs">
+          Photos on iPhone live in subfolders like 100APPLE — import everything
+          below, or pick a deeper folder.
+        </p>
+        <p className="text-[11px] text-muted-foreground/80 max-w-xs">
+          Note: iPhone exposes photos and videos only. Import documents from a
+          folder on this PC or a USB drive.
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onImportAll}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-action text-white rounded-lg text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
+      >
+        <Upload className="w-3.5 h-3.5" />
+        Import everything under {devicePath}
+      </button>
     </div>
   );
 }
@@ -550,7 +596,10 @@ function SourcePreviewPanelInner({
   );
 
   const handleGridBlur = useCallback((e: React.FocusEvent) => {
-    if (gridRef.current && !gridRef.current.contains(e.relatedTarget as Node | null)) {
+    if (
+      gridRef.current &&
+      !gridRef.current.contains(e.relatedTarget as Node | null)
+    ) {
       setFocusedIndex(null);
     }
   }, []);

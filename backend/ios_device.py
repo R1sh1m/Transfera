@@ -40,12 +40,22 @@ except ImportError as exc:
         f"path={_sys.path}"
     )
 
+# Set once the usbmux-import failure has been logged: the device list is
+# polled every few seconds, and repeating this warning would flood the log.
+_warned_usbmux_import = False
+
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 IOS_SOURCE_PREFIX = "ios://"
 DCIM_PATH = "/DCIM"
+
+# Bounds for operations with no internal timeouts (patchable in tests).
+# Without these, a stalled device hangs the request past the client's
+# timeout and surfaces as a bare fetch failure.
+_TRUST_PROBE_TIMEOUT = 8.0
+_BROWSE_TIMEOUT = 25.0
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +146,17 @@ async def list_ios_devices() -> list[IOSDevice]:
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.usbmux import list_devices
     except Exception as exc:
-        logger.warning("Failed to import pymobiledevice3 usbmux: %s", exc)
+        global _warned_usbmux_import
+        if not _warned_usbmux_import:
+            _warned_usbmux_import = True
+            logger.warning(
+                "Failed to import pymobiledevice3 usbmux: %s "
+                "(on Windows this usually means pywin32 is missing — "
+                "pip install pywin32; further occurrences logged at debug)",
+                exc,
+            )
+        else:
+            logger.debug("pymobiledevice3 usbmux import still failing: %s", exc)
         return []
 
     try:
@@ -174,11 +194,23 @@ async def list_ios_devices() -> list[IOSDevice]:
                 ios_version = info.get("ProductVersion", "unknown")
                 connection_type = getattr(mux_dev, "connection_type", "USB")
 
-                # Determine trust status
+                # Determine trust status. all_values dumps the whole lockdown
+                # domain tree (dozens of USB round trips) with no internal
+                # timeout — bound it so a locked/slow device degrades to a
+                # clear LOCKED state instead of hanging the request past the
+                # client's timeout. Matches the handshake-timeout treatment.
                 status = DeviceStatus.READY
                 try:
-                    # Attempt to access all_values — this requires trust
-                    _ = lockdown.all_values
+                    _ = await asyncio.wait_for(
+                        asyncio.to_thread(lambda: lockdown.all_values),
+                        timeout=_TRUST_PROBE_TIMEOUT,
+                    )
+                except TimeoutError:
+                    logger.debug(
+                        "Device %s trust probe timed out — treating as locked",
+                        serial,
+                    )
+                    status = DeviceStatus.LOCKED
                 except Exception:
                     status = DeviceStatus.NOT_TRUSTED
 
@@ -333,40 +365,57 @@ async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFi
     """
     afc, lockdown = await _get_afc_service(serial)
     try:
-        entries = await asyncio.to_thread(afc.listdir, path)
-        result: list[DeviceFileInfo] = []
-        for name in entries:
-            full_path = posixpath.join(path, name) if path != "/" else f"/{name}"
-            try:
-                info = await asyncio.to_thread(afc.stat, full_path)
-                is_dir = info.get("st_ifmt") == "S_IFDIR"
-                size = int(info.get("st_size", 0))
-                mtime = info.get("st_mtime")
-                mtime_val = mtime.timestamp() if hasattr(mtime, "timestamp") else float(mtime or 0)
-                result.append(
-                    DeviceFileInfo(
-                        name=name,
-                        path=full_path,
-                        is_dir=is_dir,
-                        size=size,
-                        mtime=mtime_val,
-                    )
-                )
-            except Exception:
-                # Can't stat — still list it
-                result.append(
-                    DeviceFileInfo(
-                        name=name,
-                        path=full_path,
-                        is_dir=False,
-                        size=0,
-                        mtime=0,
-                    )
-                )
-        return result
+        # AFC listdir/stat have no internal timeouts — a stalled device
+        # would hang the request past the client's timeout and surface as
+        # a bare fetch failure. Bound the whole walk so callers get a
+        # clear 503 ("reconnect and retry") instead.
+        try:
+            return await asyncio.wait_for(
+                _browse_device_directory_inner(afc, path),
+                timeout=_BROWSE_TIMEOUT,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Device stopped responding while listing {path} — reconnect the device and retry."
+            ) from exc
     finally:
         afc.close()
         lockdown.close()
+
+
+async def _browse_device_directory_inner(afc, path: str) -> list[DeviceFileInfo]:
+    """AFC walk implementation (bounded by the caller's wait_for)."""
+    entries = await asyncio.to_thread(afc.listdir, path)
+    result: list[DeviceFileInfo] = []
+    for name in entries:
+        full_path = posixpath.join(path, name) if path != "/" else f"/{name}"
+        try:
+            info = await asyncio.to_thread(afc.stat, full_path)
+            is_dir = info.get("st_ifmt") == "S_IFDIR"
+            size = int(info.get("st_size", 0))
+            mtime = info.get("st_mtime")
+            mtime_val = mtime.timestamp() if hasattr(mtime, "timestamp") else float(mtime or 0)
+            result.append(
+                DeviceFileInfo(
+                    name=name,
+                    path=full_path,
+                    is_dir=is_dir,
+                    size=size,
+                    mtime=mtime_val,
+                )
+            )
+        except Exception:
+            # Can't stat — still list it
+            result.append(
+                DeviceFileInfo(
+                    name=name,
+                    path=full_path,
+                    is_dir=False,
+                    size=0,
+                    mtime=0,
+                )
+            )
+    return result
 
 
 async def get_device_file_info(serial: str, path: str) -> DeviceFileInfo:
