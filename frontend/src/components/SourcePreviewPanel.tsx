@@ -191,7 +191,8 @@ function MediaThumbCell({
         }
       }}
       data-cell-index={cellIndex}
-      aria-label={`${item.filename}, ${isSelected ? "selected" : "not selected"}`}
+      aria-label={`${item.filename}, ${formatBytes(item.size_bytes)}, ${isSelected ? "selected" : "not selected"}`}
+      title={`${item.filename} • ${formatBytes(item.size_bytes)}${item.duration_s ? ` • ${formatDuration(item.duration_s)}` : ""}`}
       className={cn(
         "relative aspect-square rounded-lg overflow-hidden cursor-pointer group bg-muted select-none",
         isFocused &&
@@ -223,14 +224,31 @@ function MediaThumbCell({
         </div>
       )}
 
+      {/* Top badges (Video / Duplicate) */}
+      <div className="absolute top-1.5 left-1.5 flex items-center gap-1 z-10 pointer-events-none">
+        {item.type === "video" && (
+          <div className="px-1.5 py-0.5 rounded-md bg-black/60 backdrop-blur-xs text-white text-[9px] font-medium leading-none flex items-center gap-0.5">
+            <Film className="w-2.5 h-2.5" />
+            {item.duration_s != null ? formatDuration(item.duration_s) : "Video"}
+          </div>
+        )}
+        {isLikelyDuplicate && (
+          <div className="px-1.5 py-0.5 rounded-md bg-black/60 backdrop-blur-xs text-white text-[9px] font-medium leading-none flex items-center gap-0.5">
+            <CheckCircle className="w-2.5 h-2.5 text-blue-400" />
+            In library
+          </div>
+        )}
+      </div>
+
+      {/* Selection Checkbox */}
       <div
         role="checkbox"
         aria-checked={isSelected}
         className={cn(
-          "absolute top-1.5 right-1.5 w-5 h-5 rounded-full flex items-center justify-center transition-all duration-150",
+          "absolute top-1.5 right-1.5 w-5 h-5 rounded-full flex items-center justify-center transition-all duration-150 z-10",
           isSelected
             ? "bg-action border-2 border-white shadow-xs"
-            : "border-2 border-white/85 bg-black/15 group-hover:bg-black/25",
+            : "border-2 border-white/85 bg-black/20 group-hover:bg-black/40",
         )}
       >
         <AnimatePresence mode="wait">
@@ -248,19 +266,15 @@ function MediaThumbCell({
         </AnimatePresence>
       </div>
 
-      {item.type === "video" && (
-        <div className="absolute bottom-1 left-1 px-1 py-0.5 rounded bg-black/45 text-white text-[10px] leading-none flex items-center gap-0.5">
-          <Film className="w-2.5 h-2.5" />
-          {item.duration_s != null ? formatDuration(item.duration_s) : ""}
+      {/* File info overlay (filename + size) */}
+      <div className="absolute inset-x-0 bottom-0 p-1.5 bg-gradient-to-t from-black/80 via-black/40 to-transparent flex flex-col justify-end text-[10px] text-white leading-tight pointer-events-none">
+        <div className="flex items-center justify-between gap-1">
+          <span className="truncate font-medium">{item.filename}</span>
+          <span className="shrink-0 text-[9px] text-white/90 font-mono">
+            {formatBytes(item.size_bytes)}
+          </span>
         </div>
-      )}
-
-      {isLikelyDuplicate && (
-        <div className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/45 text-white text-[10px] leading-none flex items-center gap-0.5">
-          <CheckCircle className="w-2.5 h-2.5" />
-          In library
-        </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -283,8 +297,19 @@ function SkeletonGrid({ count = 12 }: { count?: number }) {
   );
 }
 
-function EmptyState({ devicePath, _onImportAll, }: { devicePath?: string | null; _onImportAll?: () => void; }) { void _onImportAll;
-  if (!devicePath) {
+function EmptyState({
+  devicePath,
+  sourcePath,
+  onImportAll,
+  isImporting,
+}: {
+  devicePath?: string | null;
+  sourcePath?: string | null;
+  onImportAll?: () => void;
+  isImporting?: boolean;
+}) {
+  const displayFolder = devicePath || sourcePath;
+  if (!displayFolder) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
         <ImageOff className="w-8 h-8 mb-2" />
@@ -292,6 +317,48 @@ function EmptyState({ devicePath, _onImportAll, }: { devicePath?: string | null;
       </div>
     );
   }
+
+  const isDevice = Boolean(devicePath);
+
+  return (
+    <div className="flex flex-col items-center justify-center py-8 text-center space-y-3">
+      <ImageOff className="w-8 h-8 text-muted-foreground" />
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-foreground">
+          No media files directly in this folder
+        </p>
+        <p className="text-xs text-muted-foreground max-w-xs">
+          {isDevice
+            ? "Photos on iPhone live in subfolders like 100APPLE — import everything below, or pick a deeper folder."
+            : "Media files may be located in subfolders — import everything under this folder to include them."}
+        </p>
+        {isDevice && (
+          <p className="text-[11px] text-muted-foreground/80 max-w-xs">
+            Note: iPhone exposes photos and videos only. Import documents from a
+            folder on this PC or a USB drive.
+          </p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onImportAll}
+        disabled={isImporting}
+        className="inline-flex items-center gap-1.5 px-4 py-2 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all disabled:opacity-50"
+      >
+        {isImporting ? (
+          <>
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Loading all media...
+          </>
+        ) : (
+          <>
+            <Upload className="w-3.5 h-3.5" />
+            Import everything under {displayFolder}
+          </>
+        )}
+      </button>
+    </div>
+  );
 }
 
 function ImportAllModal({
@@ -511,6 +578,19 @@ function SourcePreviewPanelInner({
   const gridRef = useRef<HTMLDivElement>(null);
   const thumbQueueRef = useRef<ThumbQueue>(createThumbQueue(4));
 
+  const [isRecursive, setIsRecursive] = useState(false);
+  const isImportingAllRef = useRef(false);
+  const prevSourceKeyRef = useRef("");
+  const currentSourceKey = `${sourcePath || ""}:${deviceSource?.device_id || ""}:${deviceSource?.device_path || ""}`;
+
+  useEffect(() => {
+    if (prevSourceKeyRef.current !== currentSourceKey) {
+      prevSourceKeyRef.current = currentSourceKey;
+      setIsRecursive(false);
+      setPage(1);
+    }
+  }, [currentSourceKey]);
+
   function getPreviewUrl(pageNum: number, pageSize: number, sort: string) {
     if (deviceSource) {
       const p = new URLSearchParams({
@@ -520,11 +600,14 @@ function SourcePreviewPanelInner({
         page_size: String(pageSize),
         sort_by: sort,
       });
+      if (isRecursive) {
+        p.set("recursive", "true");
+      }
       return `${API_BASE_URL}/api/device/ios-preview?${p}`;
     }
     const p = new URLSearchParams({
       path: sourcePath || "",
-      recursive: "false",
+      recursive: isRecursive ? "true" : "false",
       page: String(pageNum),
       page_size: String(pageSize),
       sort_by: sort,
@@ -565,6 +648,10 @@ function SourcePreviewPanelInner({
       return;
     }
 
+    if (isImportingAllRef.current) {
+      return;
+    }
+
     let cancelled = false;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -576,7 +663,8 @@ function SourcePreviewPanelInner({
       setFocusedIndex(null);
     }
 
-    const url = getPreviewUrl(page, 100, sortBy);
+    const pageSize = isRecursive ? _PREVIEW_MAX_FILES : 100;
+    const url = getPreviewUrl(page, pageSize, sortBy);
 
     fetch(url, {
       signal: controller.signal,
@@ -628,6 +716,7 @@ function SourcePreviewPanelInner({
     deviceSource?.device_path,
     page,
     sortBy,
+    isRecursive,
     retryNonce,
   ]);
 
@@ -703,48 +792,96 @@ function SourcePreviewPanelInner({
   }, []);
 
   const handleImportAll = useCallback(async () => {
-    if (!deviceSource) return;
+    if (!deviceSource && !sourcePath) return;
+    isImportingAllRef.current = true;
     setLoading(true);
     setPreviewError(null);
     try {
       const p = new URLSearchParams({
-        device_id: deviceSource.device_id,
-        path: deviceSource.device_path,
         page: "1",
         page_size: String(_PREVIEW_MAX_FILES),
-        sort_by: "newest",
+        sort_by: sortBy || "newest",
         recursive: "true",
       });
-      const res = await fetch(`${API_BASE_URL}/api/device/ios-preview?${p}`, {
+
+      let url = "";
+      if (deviceSource) {
+        p.set("device_id", deviceSource.device_id);
+        p.set("path", deviceSource.device_path);
+        url = `${API_BASE_URL}/api/device/ios-preview?${p}`;
+      } else {
+        p.set("path", sourcePath || "");
+        url = `${API_BASE_URL}/api/device/preview?${p}`;
+      }
+
+      const res = await fetch(url, {
         headers: authHeaders(),
       });
-      if (!res.ok) throw new Error("Failed to load full listing");
+      if (!res.ok) {
+        let message = "Failed to load media preview";
+        try {
+          const errBody = await res.json();
+          const detail = errBody?.detail;
+          message =
+            typeof detail === "string" ? detail : detail?.message || message;
+        } catch {}
+        throw new Error(message);
+      }
       const data = await res.json();
-      setImportAllData({
-        items: data.items || [],
-        total: data.total || 0,
+      const loadedItems: MediaPreviewItem[] = data.items || [];
+      const allPaths = loadedItems.map((item) => item.abs_path);
+
+      setIsRecursive(true);
+      setItems(loadedItems);
+      setMetadata({
+        total: data.total || loadedItems.length,
         photos: data.photos || 0,
         videos: data.videos || 0,
-        totalSize: data.total_size_bytes || 0,
-        path: deviceSource.device_path,
+        total_size_bytes: data.total_size_bytes || 0,
       });
+      setTotalPages(data.pages || 1);
+      setPage(1);
+
+      // Select all items by default
+      const nextSelected = new Set(allPaths);
+      selectedRef.current = nextSelected;
+      setSelected(nextSelected);
+
+      // Confirm selection to parent
+      onSelectionConfirm(allPaths);
+
+      // Notify parent to show toast or start transfer
+      onTransferStart?.(allPaths);
     } catch (err) {
       setPreviewError(
         err instanceof Error ? err.message : "Failed to load preview",
       );
     } finally {
+      isImportingAllRef.current = false;
       setLoading(false);
     }
-  }, [deviceSource]);
+  }, [deviceSource, sourcePath, sortBy, onSelectionConfirm, onTransferStart]);
 
   const handleConfirmImportAll = useCallback(() => {
-    const empty: string[] = [];
-    selectedRef.current = new Set();
-    setSelected(new Set());
+    if (!importAllData) return;
+    const allPaths = importAllData.items.map((i) => i.abs_path);
+    setIsRecursive(true);
+    setItems(importAllData.items);
+    setMetadata({
+      total: importAllData.total,
+      photos: importAllData.photos,
+      videos: importAllData.videos,
+      total_size_bytes: importAllData.totalSize,
+    });
+    setTotalPages(1);
+    setPage(1);
+    const nextSelected = new Set(allPaths);
+    selectedRef.current = nextSelected;
+    setSelected(nextSelected);
     setImportAllData(null);
-    onSelectionConfirm(empty);
-    onTransferStart?.(empty);
-  }, [onSelectionConfirm, onTransferStart]);
+    onSelectionConfirm(allPaths);
+    onTransferStart?.(allPaths);
+  }, [importAllData, onSelectionConfirm, onTransferStart]);
 
   const handleCancelImportAll = useCallback(() => {
     setImportAllData(null);
@@ -821,6 +958,7 @@ function SourcePreviewPanelInner({
               <span className="text-xs text-muted-foreground">
                 {metadata.total} files &middot;{" "}
                 {formatBytes(metadata.total_size_bytes)}
+                {isRecursive && " (all subfolders)"}
               </span>
             )}
           </div>
@@ -858,17 +996,17 @@ function SourcePreviewPanelInner({
                       : "bg-muted text-muted-foreground hover:bg-muted/80",
                   )}
                 >
-                  {f === "all" && "All"}
+                  {f === "all" && `All (${metadata.total})`}
                   {f === "photo" && (
                     <span className="flex items-center gap-1">
                       <Image className="w-3 h-3" />
-                      Photos
+                      Photos {metadata.photos > 0 ? `(${metadata.photos})` : ""}
                     </span>
                   )}
                   {f === "video" && (
                     <span className="flex items-center gap-1">
                       <Film className="w-3 h-3" />
-                      Videos
+                      Videos {metadata.videos > 0 ? `(${metadata.videos})` : ""}
                     </span>
                   )}
                 </button>
@@ -919,7 +1057,7 @@ function SourcePreviewPanelInner({
                 setSelected(next);
                 onSelectionConfirm?.(Array.from(next));
               }}
-              className="px-2 py-1 bg-action text-white rounded-full hover:bg-action/90 active:scale-[0.95] transition-all shrink-0"
+              className="px-2.5 py-1 bg-action text-white rounded-pill hover:bg-action/90 active:scale-[0.95] transition-all shrink-0"
             >
               Select only new files
             </button>
@@ -953,7 +1091,7 @@ function SourcePreviewPanelInner({
                   <button
                     type="button"
                     onClick={handleRetry}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-muted text-foreground rounded-lg text-xs font-normal hover:bg-muted/80 active:scale-[0.95] transition-all"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-muted text-foreground rounded-pill text-xs font-normal hover:bg-muted/80 active:scale-[0.95] transition-all"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                     Retry
@@ -962,7 +1100,7 @@ function SourcePreviewPanelInner({
                     <button
                       type="button"
                       onClick={handleImportAll}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-action text-white rounded-lg text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
                     >
                       <Upload className="w-3.5 h-3.5" />
                       Import everything anyway
@@ -982,7 +1120,9 @@ function SourcePreviewPanelInner({
             >
               <EmptyState
                 devicePath={deviceSource?.device_path ?? null}
-                _onImportAll={deviceSource ? handleImportAll : undefined}
+                sourcePath={sourcePath ?? null}
+                onImportAll={handleImportAll}
+                isImporting={loading}
               />
             </motion.div>
           )}
@@ -1057,7 +1197,7 @@ function SourcePreviewPanelInner({
             }}
             disabled={selectedCount === 0}
             className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-normal transition-all",
+              "flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal transition-all",
               selectedCount > 0
                 ? "bg-action text-white hover:bg-action/90 active:scale-[0.95]"
                 : "bg-muted text-muted-foreground cursor-default opacity-40",
