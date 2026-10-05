@@ -34,6 +34,11 @@
 .PARAMETER NoAutoClose
   Keep the console window open after a successful install (by default it
   closes itself a few seconds after ALL DONE; failures always stay open).
+.PARAMETER WaitForInstaller
+  Wait for the NSIS installer wizard to finish and check its exit code
+  instead of closing right after launching it. By default the script
+  launches the installer fire-and-forget (a cancelled/failed wizard is
+  then NOT detected) so the console can close immediately.
 #>
 [CmdletBinding()]
 param(
@@ -44,7 +49,8 @@ param(
   [switch]$SkipDriver,
   [switch]$SkipAI,
   [switch]$Yes,
-  [switch]$NoAutoClose
+  [switch]$NoAutoClose,
+  [switch]$WaitForInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,14 +62,44 @@ $RepoUrl = "https://github.com/R1sh1m/Transfera.git"
 $script:TranscriptPath = Join-Path ([IO.Path]::GetTempPath()) ("transfera-install-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
 try { Start-Transcript -Path $script:TranscriptPath -ErrorAction Stop | Out-Null } catch { $script:TranscriptPath = $null }
 
-# Full transcript for post-mortems (best-effort: nested transcripts and
-# exotic hosts throw, which is fine — the console output remains).
-$script:TranscriptPath = Join-Path ([IO.Path]::GetTempPath()) ("transfera-install-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
-try { Start-Transcript -Path $script:TranscriptPath -ErrorAction Stop | Out-Null } catch { $script:TranscriptPath = $null }
+function Save-InstallLog() {
+  # Persist the transcript somewhere temp-cleanup won't eat, so the evidence
+  # survives the auto-close below. Returns the durable path (or $null).
+  try { Stop-Transcript | Out-Null } catch { }
+  if (-not $script:TranscriptPath -or -not (Test-Path $script:TranscriptPath)) { return $null }
+  try {
+    $logDir = Join-Path $env:LOCALAPPDATA "Transfera\logs"
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $dest = Join-Path $logDir (Split-Path $script:TranscriptPath -Leaf)
+    Copy-Item $script:TranscriptPath $dest -Force -ErrorAction Stop
+    return $dest
+  } catch {
+    return $script:TranscriptPath
+  }
+}
 
 function Step([string]$msg) {
   Write-Host ""
   Write-Host "==> $msg" -ForegroundColor Cyan
+}
+# Bottom-anchored progress: Write-Progress pops a top overlay in Windows
+# PowerShell 5.1 that covers the banner (see screenshot), so progress is
+# rendered inline instead — the latest line is always at the bottom of the
+# output flow. PS 7+ is also pinned to the minimal inline view.
+$ProgressPreference = "SilentlyContinue"
+try { if ($null -ne $PSStyle -and $null -ne $PSStyle.Progress) { $PSStyle.Progress.View = "Minimal" } } catch { }
+function Write-BottomProgress([string]$Status, [int]$Percent) {
+  try { $w = $Host.UI.RawUI.WindowSize.Width } catch { $w = 80 }
+  if (-not $w -or $w -le 0) { $w = 80 }
+  $barW = [Math]::Max(10, [Math]::Min(40, $w - 40))
+  $filled = [int]([Math]::Floor($Percent / 100 * $barW))
+  if ($filled -lt 0) { $filled = 0 }
+  if ($filled -gt $barW) { $filled = $barW }
+  $bar = ("█" * $filled) + ("─" * ($barW - $filled))
+  Write-Host ("  [{0}] {1}% — {2}" -f $bar, $Percent, $Status) -ForegroundColor DarkCyan
+}
+function Clear-BottomProgress() {
+  # Inline bar stays in scrollback as history — nothing overlayed to clear.
 }
 function StepBox([string]$icon, [string]$num, [string]$title, [string]$note = "") {
   $line = "  " + ("═" * 58)
@@ -72,18 +108,18 @@ function StepBox([string]$icon, [string]$num, [string]$title, [string]$note = ""
   Write-Host "  ║  $icon  Step $num — $title" -ForegroundColor Cyan
   if ($note -ne "") { Write-Host "  ║      $note" -ForegroundColor DarkCyan }
   Write-Host $line -ForegroundColor Cyan
-  # Overall progress bar (suppressed automatically on redirected hosts).
+  # Overall progress line at the bottom of the output flow (no top overlay).
   $parts = $num -split "/"
   if ($parts.Count -eq 2 -and $parts[0] -match '^\d+$' -and $parts[1] -match '^\d+$' -and [int]$parts[1] -gt 0) {
     $pct = [int]([int]$parts[0] / [int]$parts[1] * 100)
-    Write-Progress -Activity "Transfera install" -Status "Step $num — $title" -PercentComplete $pct
+    Write-BottomProgress -Status "Transfera install — Step $num — $title" -Percent $pct
   }
 }
 function Ok([string]$msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Fail([string]$msg) {
   Write-Host "  [FAIL] $msg" -ForegroundColor Red
-  Write-Progress -Activity "Transfera install" -Completed
+  Clear-BottomProgress
   if ($script:TranscriptPath -and (Test-Path $script:TranscriptPath)) {
     Write-Host "  Full log: $script:TranscriptPath" -ForegroundColor DarkCyan
   }
@@ -498,11 +534,18 @@ if ($Silent) {
   if ($scode -ne 0) { Fail "Silent install failed with code ${scode}." }
 } else {
   Step "Launching the installer (one click-through, no SmartScreen)..."
-  Write-Host "  Complete the installer window to continue (check the taskbar if it opened behind this window)..." -ForegroundColor DarkCyan
-  $installProc = Start-Process $installer.FullName -PassThru
-  $icode = Wait-InstallerProcess $installProc
-  if ($icode -ne 0) {
-    Fail "Installer exited with code ${icode} (cancelled?). Re-run this script to retry."
+  Write-Host "  Check the taskbar if the installer window opened behind this window..." -ForegroundColor DarkCyan
+  if ($WaitForInstaller) {
+    Write-Host "  (-WaitForInstaller: this window stays open until the installer wizard finishes...)" -ForegroundColor DarkCyan
+    $installProc = Start-Process $installer.FullName -PassThru
+    $icode = Wait-InstallerProcess $installProc
+    if ($icode -ne 0) {
+      Fail "Installer exited with code ${icode} (cancelled?). Re-run this script to retry."
+    }
+  } else {
+    # Fire-and-forget: the console closes right after launching (see the
+    # epilogue below), so a cancelled/failed wizard is NOT detected here.
+    Start-Process $installer.FullName | Out-Null
   }
 }
 Write-Host ""
@@ -523,21 +566,43 @@ Write-Host "  ║                                                            ║
 Write-Host "  ══════════════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 
-# Success epilogue: tidy progress UI, stop the transcript, then close
-# our own console window so no stray terminal lingers. Failures never
-# reach here (Fail() exits first and stays open for reading).
-Write-Progress -Activity "Transfera install" -Completed
-try { Stop-Transcript | Out-Null } catch { }
+# Success epilogue: persist the log, then close our console window so no
+# stray terminal lingers. Failures never reach here (Fail() exits first
+# and stays open for reading).
+Clear-BottomProgress
+$savedLog = Save-InstallLog
+if ($savedLog) {
+  Write-Host "  Full log saved at: $savedLog" -ForegroundColor DarkCyan
+}
 $launchedAsFile = [Environment]::GetCommandLineArgs() -contains "-File"
 $isConsoleHost = (Get-Host).Name -eq "ConsoleHost"
 if (-not $NoAutoClose -and $launchedAsFile -and $isConsoleHost) {
-  # Dedicated installer window (right-click Run / powershell -File):
-  # safe to close. Direct invocations inside a working shell stay open.
+  # Dedicated installer run (powershell -File): safe to close. Direct
+  # invocations inside a working shell stay open.
   Write-Host "  This window closes automatically — press N within 8 seconds to keep it..." -ForegroundColor DarkCyan
   $closeIt = $true
   try {
     choice /C YN /T 8 /D Y /M "Close this window" | Out-Null
     if ($LASTEXITCODE -eq 2) { $closeIt = $false }
   } catch { }
-  if ($closeIt) { Stop-Process -Id $PID }
+  if ($closeIt) {
+    # Stop-Process -Id $PID only kills powershell.exe — when hosted inside
+    # cmd.exe (launched from a cmd prompt / terminal tab) that just drops
+    # back to the parent prompt with the window still open. Close the
+    # hosting console too so the window actually goes away. Never touch a
+    # full terminal emulator (that would kill sibling tabs); only the
+    # direct cmd.exe host of this run. The countdown above is the guard.
+    $hostClosed = $false
+    try {
+      $self = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop
+      if ($self.ParentProcessId) {
+        $parent = Get-Process -Id $self.ParentProcessId -ErrorAction Stop
+        if ($parent.ProcessName -ieq "cmd") {
+          Stop-Process -Id $parent.Id -Force
+          $hostClosed = $true
+        }
+      }
+    } catch { }
+    if (-not $hostClosed) { Stop-Process -Id $PID }
+  }
 }

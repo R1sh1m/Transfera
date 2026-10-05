@@ -19,7 +19,7 @@ import threading
 import pytest
 
 import backend.ios_device as ios_device
-from backend.ios_device import DeviceStatus, browse_device_directory, list_ios_devices
+from backend.ios_device import DeviceStatus, browse_device_directory, list_ios_devices, query_lockdown_versions
 
 
 async def test_usbmux_import_failure_warns_once_and_returns_empty(monkeypatch, caplog):
@@ -94,3 +94,48 @@ async def test_browse_hang_raises_actionable_error(monkeypatch):
     monkeypatch.setattr(ios_device, "_get_afc_service", _fake_afc_service)
     with pytest.raises(RuntimeError, match="stopped responding"):
         await browse_device_directory("SERIAL-123", "/DCIM")
+
+
+class _InfoLockdown:
+    """Fake lockdown that answers short_info (no trust probe needed)."""
+
+    short_info = {"DeviceName": "Rishi's iPhone", "ProductType": "iPhone17,2", "ProductVersion": "18.4"}
+
+    def close(self):
+        pass
+
+
+async def test_query_lockdown_versions_returns_short_info_only(monkeypatch):
+    """Version query uses short_info and never touches the trust probe."""
+    import pymobiledevice3.lockdown as _lockdown_mod
+    import pymobiledevice3.usbmux as _usbmux_mod
+
+    lockdown = _InfoLockdown()
+    monkeypatch.setattr(_lockdown_mod, "create_using_usbmux", lambda *_args, **_kwargs: lockdown)
+    monkeypatch.setattr(_usbmux_mod, "list_devices", lambda: [_MuxDev()])
+    versions = await query_lockdown_versions()
+    assert versions == {
+        "SERIAL-123": {"name": "Rishi's iPhone", "model": "iPhone17,2", "ios_version": "18.4"},
+    }
+
+
+async def test_query_lockdown_versions_skips_untrusted_devices(monkeypatch):
+    """Lockdown failures (untrusted/locked) omit the device instead of raising."""
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("not paired")
+
+    import pymobiledevice3.lockdown as _lockdown_mod
+    import pymobiledevice3.usbmux as _usbmux_mod
+
+    monkeypatch.setattr(_lockdown_mod, "create_using_usbmux", _raise)
+    monkeypatch.setattr(_usbmux_mod, "list_devices", lambda: [_MuxDev()])
+    assert await query_lockdown_versions() == {}
+
+
+async def test_query_lockdown_versions_empty_without_usbmux(monkeypatch):
+    """No driver / no devices degrades to an empty mapping."""
+    import pymobiledevice3.usbmux as _usbmux_mod
+
+    monkeypatch.setattr(_usbmux_mod, "list_devices", lambda: [])
+    assert await query_lockdown_versions() == {}

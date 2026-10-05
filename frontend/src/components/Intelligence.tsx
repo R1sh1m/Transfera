@@ -22,7 +22,6 @@ import { cn, parseBackendDate } from "@/lib/utils";
 import {
   useBackfill,
   useCapabilities,
-  useDownloadModels,
   useDuplicateGroups,
   useModelStatus,
   useMoments,
@@ -80,22 +79,16 @@ function Thumb({
 export function CapabilitiesBadge() {
   const { data } = useCapabilities();
   const backfill = useBackfill();
-  const download = useDownloadModels();
-  const [wantModels, setWantModels] = useState(false);
-  const { data: modelStatus } = useModelStatus(wantModels);
+  const { data: modelStatus } = useModelStatus(false);
   const busy =
     modelStatus?.status === "downloading" ||
     modelStatus?.status === "installing-packages";
   const downloading = busy;
   const clipReady = data?.semantic_mode === "clip";
-  // Explicit success reply: between download completion and the
-  // capabilities refetch landing, show a disabled confirmation instead
-  // of flashing the Get button again as if nothing happened.
   const [justFinished, setJustFinished] = useState(false);
   useEffect(() => {
     if (clipReady) setJustFinished(false);
   }, [clipReady]);
-  const showGetModels = !!data && !clipReady && !downloading && !justFinished;
   const mb = modelStatus
     ? (modelStatus.downloaded_bytes / 1e6).toFixed(0)
     : "0";
@@ -111,35 +104,20 @@ export function CapabilitiesBadge() {
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <span
         className={cn(
-          "px-2 py-0.5 rounded-pill border border-border",
-          clipReady ? "text-green-600" : "text-muted-foreground",
+          "px-2.5 py-0.5 rounded-pill border border-border text-xs",
+          clipReady ? "text-green-600 border-green-300 dark:border-green-800" : "text-muted-foreground",
         )}
-        title={`phash: ${data.phash_available}, faces: ${data.faces_available}, clip: ${data.clip_available}`}
+        title={clipReady ? "On-device AI semantic search active" : "Standard search active"}
       >
         {clipReady ? "CLIP on-device" : "Keyword search"} ·{" "}
         {data.faces_available ? "Faces on" : "Faces off"}
       </span>
-      {showGetModels && (
-        <button
-          onClick={() => {
-            setWantModels(true);
-            download.mutate(undefined, {
-              onSuccess: () => setJustFinished(true),
-            });
-          }}
-          disabled={download.isPending}
-          className="px-3 py-1 rounded-pill border border-border text-xs hover:bg-muted active:scale-[0.95] disabled:opacity-40"
-          title="Download the on-board AI libraries (~120 MB) and vision model (~210 MB) once to enable true semantic search"
-        >
-          Get AI models
-        </button>
-      )}
       {justFinished && !clipReady && (
         <span
           className="px-3 py-1 rounded-pill border border-border text-xs text-muted-foreground opacity-60 cursor-default"
-          title="Models downloaded — enabling semantic search…"
+          title="Models ready — enabling semantic search…"
         >
-          ✓ AI models ready
+          ✓ AI search ready
         </span>
       )}
       {downloading && (

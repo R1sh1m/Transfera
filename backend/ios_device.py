@@ -270,6 +270,53 @@ async def list_ios_devices() -> list[IOSDevice]:
     return list(devices)
 
 
+async def query_lockdown_versions() -> dict[str, dict[str, str]]:
+    """
+    Best-effort ``{serial: {name, model, ios_version}}`` via usbmux lockdown
+    ``short_info`` only — no trust probe.
+
+    Unlike :func:`list_ios_devices` this never runs the multi-second
+    ``all_values`` trust check, so it stays cheap enough to call on every
+    device-list poll. Devices that are untrusted/locked (or any failure)
+    are simply absent from the result. Returns ``{}`` when pymobiledevice3
+    or usbmuxd is unavailable.
+    """
+    if not _PYMOBILEDEVICE3_AVAILABLE:
+        return {}
+    try:
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.usbmux import list_devices
+    except Exception:
+        return {}
+    try:
+        mux_devices = list_devices()
+    except Exception:
+        return {}
+    if not mux_devices:
+        return {}
+
+    async def _one(mux_dev) -> tuple[str, dict[str, str] | None]:
+        try:
+            lockdown = await asyncio.wait_for(
+                asyncio.to_thread(create_using_usbmux, serial=mux_dev.serial, autopair=False),
+                timeout=2.0,
+            )
+            try:
+                info = lockdown.short_info
+                return mux_dev.serial, {
+                    "name": info.get("DeviceName", ""),
+                    "model": info.get("ProductType", ""),
+                    "ios_version": info.get("ProductVersion", ""),
+                }
+            finally:
+                lockdown.close()
+        except Exception:
+            return mux_dev.serial, None
+
+    results = await asyncio.gather(*[_one(m) for m in mux_devices])
+    return {serial: info for serial, info in results if info}
+
+
 # ---------------------------------------------------------------------------
 # Driver status check (independent of device enumeration)
 # ---------------------------------------------------------------------------

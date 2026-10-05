@@ -30,6 +30,16 @@ _PREVIEW_MAX_DEPTH = 8
 
 logger = logging.getLogger(__name__)
 
+# HEIF opener for Pillow decodes below (mirrors thumbnailer/metadata_extractor).
+# Registration is process-global; other modules usually beat us to it, but the
+# preview endpoints must not depend on import order.
+try:
+    from pillow_heif import register_heif_opener as _register_heif_opener
+
+    _register_heif_opener()
+except Exception:
+    logger.debug("pillow-heif unavailable — HEIF preview thumbnails will fall back to gray")
+
 
 async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -> bytes | None:
     """
@@ -74,12 +84,15 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
 
 router = APIRouter(prefix="/api/device")
 
-# Supported extensions for preview scanning
+# Supported extensions for preview scanning. Image set mirrors the iPhone-native
+# formats the scanner imports (config.IMAGE_EXTENSIONS): notably .heif, which
+# iPhones emit and Pillow decodes via pillow-heif (registered above).
 PREVIEW_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {
         ".jpg",
         ".jpeg",
         ".heic",
+        ".heif",
         ".png",
         ".webp",
         ".dng",
@@ -560,6 +573,7 @@ async def ios_preview_directory(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=100),
     sort_by: str = Query("newest", pattern="^(newest|oldest|name_asc|name_desc|size_desc|size_asc)$"),
+    recursive: bool = Query(False, description="Recursively scan subdirectories"),
     _: None = Depends(require_local_token),
 ):
     manager = get_device_manager()
@@ -598,7 +612,12 @@ async def ios_preview_directory(
         )
 
     try:
-        entries = await manager.browse_device(device_id, path)
+        if recursive:
+            from backend.engines.scanner import _walk_ios_directory
+
+            entries = await _walk_ios_directory(device_id, path)
+        else:
+            entries = await manager.browse_device(device_id, path)
     except DeviceLockedError as exc:
         raise HTTPException(
             status_code=423,
@@ -648,7 +667,7 @@ async def ios_preview_directory(
             )
         raise HTTPException(
             status_code=400,
-            detail={"status": "error", "message": error_text},
+            detail={"status": "error", "message": f"Could not list device folder {path}: {error_text}"},
         )
 
     items: list[dict] = []
@@ -657,13 +676,13 @@ async def ios_preview_directory(
     total_size = 0
 
     for entry in entries:
-        if entry.is_dir:
+        if not recursive and entry.is_dir:
             continue
         fname = entry.name
         ext = os.path.splitext(fname)[1].lower()
         if ext not in PREVIEW_EXTENSIONS:
             continue
-        device_abs = f"{path.rstrip('/')}/{fname}"
+        device_abs = f"{path.rstrip('/')}/{fname}" if not recursive else entry.path
         item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
         size_bytes = entry.size
         mtime = entry.mtime

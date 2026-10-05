@@ -27,6 +27,8 @@ import {
   XCircle,
   AlertCircle,
   Smartphone,
+  Tablet,
+  Camera,
   Clock,
   RefreshCw,
   RotateCcw,
@@ -34,6 +36,7 @@ import {
   Usb,
   X,
 } from "lucide-react";
+import { getDeviceMeta } from "@/lib/device-utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   useConfig,
@@ -632,8 +635,7 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                       No devices detected yet
                                     </p>
                                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                                      Plug in your iPhone or iPad using a USB
-                                      cable.
+                                      Connect your iPhone, iPad, Android phone, or Digital Camera using a USB cable.
                                     </p>
                                   </div>
                                 </div>
@@ -654,25 +656,48 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                 </button>
                               </div>
 
-                              <div className="p-3 bg-amber-500/10 dark:bg-amber-950/20 border border-amber-500/30 dark:border-amber-900/40 rounded-lg text-xs space-y-1.5">
-                                <p className="font-semibold text-amber-700 dark:text-amber-300 text-[11px] uppercase tracking-wider">
-                                  Quick iPhone Connection Checklist
+                              <div className="p-3 bg-muted/40 dark:bg-muted/20 border border-border rounded-xl text-xs space-y-2">
+                                <p className="font-semibold text-foreground text-[11px] uppercase tracking-wider flex items-center justify-between">
+                                  <span>Device Connection Checklist</span>
+                                  <span className="text-[10px] text-muted-foreground font-normal lowercase">iOS &middot; Android &middot; Cameras</span>
                                 </p>
-                                <ul className="space-y-1 text-[11px] text-amber-800 dark:text-amber-300/90 list-disc list-inside">
-                                  <li>
-                                    <strong>Unlock device:</strong> Screen must
-                                    be awake and unlocked with passcode
-                                  </li>
-                                  <li>
-                                    <strong>Trust prompt:</strong> Tap{" "}
-                                    <em>Trust This Computer</em> on your iPhone
-                                    if shown
-                                  </li>
-                                  <li>
-                                    <strong>Data cable:</strong> Ensure your
-                                    cable transfers data (not charging-only)
-                                  </li>
-                                </ul>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5 text-[11px]">
+                                  {/* iPhone / iPad */}
+                                  <div className="p-2 rounded-lg bg-blue-500/5 border border-blue-500/20 space-y-1">
+                                    <p className="font-semibold text-blue-700 dark:text-blue-300">
+                                      iPhone / iPad
+                                    </p>
+                                    <ul className="text-muted-foreground space-y-0.5 list-disc list-inside text-[10.5px]">
+                                      <li>Screen unlocked with passcode</li>
+                                      <li>Tap <em>Trust This Computer</em></li>
+                                      <li>Data-capable USB cable</li>
+                                    </ul>
+                                  </div>
+
+                                  {/* Android */}
+                                  <div className="p-2 rounded-lg bg-emerald-500/5 border border-emerald-500/20 space-y-1">
+                                    <p className="font-semibold text-emerald-700 dark:text-emerald-300">
+                                      Android Devices
+                                    </p>
+                                    <ul className="text-muted-foreground space-y-0.5 list-disc list-inside text-[10.5px]">
+                                      <li>Screen unlocked</li>
+                                      <li>USB: <strong>File Transfer (MTP)</strong></li>
+                                      <li>Avoid "Charging only" mode</li>
+                                    </ul>
+                                  </div>
+
+                                  {/* Cameras / Storage */}
+                                  <div className="p-2 rounded-lg bg-purple-500/5 border border-purple-500/20 space-y-1">
+                                    <p className="font-semibold text-purple-700 dark:text-purple-300">
+                                      Cameras &amp; Drives
+                                    </p>
+                                    <ul className="text-muted-foreground space-y-0.5 list-disc list-inside text-[10.5px]">
+                                      <li>Power camera ON</li>
+                                      <li>Set USB Mode to <strong>MTP/PTP</strong></li>
+                                      <li>Or insert SD card in reader</li>
+                                    </ul>
+                                  </div>
+                                </div>
                               </div>
                             </div>
                           );
@@ -722,12 +747,10 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                 <div className="space-y-2 flex-1">
                                   <div>
                                     <p className="text-xs font-semibold text-foreground">
-                                      Apple Device Support Required
+                                      Apple Support (For iPhones &amp; iPads)
                                     </p>
                                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                                      Install Apple Mobile Device Support to
-                                      connect and transfer files from your
-                                      iPhone.
+                                      Install Apple Mobile Device Support to transfer files from iOS devices. Android phones, digital cameras, and USB drives work natively with built-in Windows drivers.
                                     </p>
                                   </div>
                                   <DriverInstallerInline />
@@ -750,81 +773,131 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                     </>
                   )}
 
-                  {readyDevices.map((device) => (
-                    <button
-                      key={device.serial}
-                      type="button"
-                      onClick={() => handleSelectDevice(device)}
-                      className={cn(
-                        "w-full flex items-center gap-2.5 p-2.5 rounded-lg transition-colors text-left",
-                        isIOS &&
-                          sourceRef.type === "device" &&
-                          sourceRef.device_id === device.serial
-                          ? "bg-blue-100 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800"
-                          : "bg-background hover:bg-muted border border-border",
-                      )}
-                    >
-                      <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center shrink-0">
-                        <Smartphone className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold text-foreground truncate">
-                          {device.name}
-                        </p>
-                        <p className="text-[10px] text-muted-foreground">
-                          {device.model} · iOS {device.ios_version}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <TierBadge tier={device.active_tier} />
-                        <span className="text-[9px] px-1 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded">
-                          Ready
-                        </span>
-                        <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      </div>
-                    </button>
-                  ))}
-
-                  {nonReadyDevices.map((device) => (
-                    <div
-                      key={device.serial}
-                      className="w-full flex items-center gap-2.5 p-2.5 bg-background border border-border rounded-lg opacity-60"
-                    >
-                      <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
-                        <Smartphone className="w-4 h-4 text-muted-foreground" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold text-foreground truncate">
-                          {device.name}
-                        </p>
-                        <p className="text-[10px] text-muted-foreground">
-                          {device.status === "not_trusted"
-                            ? 'Unlock and tap "Trust This Computer"'
-                            : device.status === "locked"
-                              ? "Device is locked"
-                              : device.status === "error"
-                                ? device.error_detail || "Connection error"
-                                : device.model}
-                        </p>
-                      </div>
-                      <span
+                  {readyDevices.map((device) => {
+                    const meta = getDeviceMeta(device);
+                    const isSelected =
+                      sourceRef?.type === "device" &&
+                      sourceRef.device_id.toLowerCase() === device.serial.toLowerCase();
+                    return (
+                      <button
+                        key={device.serial}
+                        type="button"
+                        onClick={() => handleSelectDevice(device)}
                         className={cn(
-                          "text-[9px] px-1 py-0.5 rounded",
-                          device.status === "not_trusted"
-                            ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400"
-                            : device.status === "locked"
-                              ? "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400"
-                              : "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400",
+                          "w-full flex items-center gap-2.5 p-2.5 rounded-lg transition-all text-left active:scale-[0.99]",
+                          isSelected
+                            ? "bg-action/10 border-2 border-action text-foreground shadow-xs"
+                            : "bg-background hover:bg-muted/60 border border-border",
                         )}
                       >
-                        {device.status === "not_trusted"
-                          ? "Not Trusted"
-                          : device.status === "locked"
-                            ? "Locked"
-                            : "Error"}
-                      </span>
-                    </div>
-                  ))}
+                        <div
+                          className={cn(
+                            "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                            meta.accentColor.bg,
+                          )}
+                        >
+                          {meta.iconType === "tablet" ? (
+                            <Tablet className={cn("w-4 h-4", meta.accentColor.text)} />
+                          ) : meta.iconType === "camera" ? (
+                            <Camera className={cn("w-4 h-4", meta.accentColor.text)} />
+                          ) : (
+                            <Smartphone className={cn("w-4 h-4", meta.accentColor.text)} />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs font-semibold text-foreground truncate">
+                              {meta.displayName}
+                            </p>
+                            <span
+                              className={cn(
+                                "text-[9px] px-1.5 py-0.5 rounded-pill border shrink-0",
+                                meta.accentColor.badgeBg,
+                                meta.accentColor.badgeText,
+                                meta.accentColor.border,
+                              )}
+                            >
+                              {meta.platformBadge}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground truncate">
+                            {meta.categoryLabel}
+                            {device.ios_version &&
+                            device.ios_version.toLowerCase() !== "unknown" &&
+                            !device.ios_version.toLowerCase().includes("android")
+                              ? ` · iOS ${device.ios_version}`
+                              : null}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <TierBadge tier={device.active_tier} />
+                          <span className="text-[9px] px-1.5 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-pill font-medium">
+                            Ready
+                          </span>
+                          <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                        </div>
+                      </button>
+                    );
+                  })}
+
+                  {nonReadyDevices.map((device) => {
+                    const meta = getDeviceMeta(device);
+                    return (
+                      <div
+                        key={device.serial}
+                        className="w-full flex items-center gap-2.5 p-2.5 bg-background border border-border rounded-lg opacity-60"
+                      >
+                        <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
+                          {meta.iconType === "tablet" ? (
+                            <Tablet className="w-4 h-4 text-muted-foreground" />
+                          ) : meta.iconType === "camera" ? (
+                            <Camera className="w-4 h-4 text-muted-foreground" />
+                          ) : (
+                            <Smartphone className="w-4 h-4 text-muted-foreground" />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs font-semibold text-foreground truncate">
+                              {meta.displayName}
+                            </p>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-pill bg-muted text-muted-foreground">
+                              {meta.platformBadge}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground">
+                            {meta.platformBadge === "Android"
+                              ? device.status === "locked"
+                                ? 'Unlock phone & select "File Transfer (MTP)"'
+                                : 'Set USB Mode to "File Transfer (MTP)"'
+                              : device.status === "not_trusted"
+                                ? 'Unlock and tap "Trust This Computer"'
+                                : device.status === "locked"
+                                  ? "Device is locked"
+                                  : device.status === "error"
+                                    ? device.error_detail || "Connection error"
+                                    : device.model}
+                          </p>
+                        </div>
+                        <span
+                          className={cn(
+                            "text-[9px] px-1.5 py-0.5 rounded-pill font-medium",
+                            device.status === "not_trusted"
+                              ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400"
+                              : device.status === "locked"
+                                ? "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400"
+                                : "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400",
+                          )}
+                        >
+                          {device.status === "not_trusted"
+                            ? "Not Trusted"
+                            : device.status === "locked"
+                              ? "Locked"
+                              : "Error"}
+                        </span>
+                      </div>
+                    );
+                  })}
 
                   {/* Prefer Tier 2 setting — only show when Apple driver is not already actively handling devices */}
                   {backendActiveTier !== "tier1" &&
@@ -2009,12 +2082,12 @@ export default function DeviceSetupPage() {
   } | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Source reference — the typed source (either local folder or device)
-  const [sourceRef, setSourceRef] = useState<SourceRef | null>(() => {
-    // Initialize from legacy source path in store
-    if (sourcePath) {
-      if (sourcePath.startsWith(IOS_SOURCE_PREFIX)) {
-        const withoutPrefix = sourcePath.slice(IOS_SOURCE_PREFIX.length);
+  // Helper: parse store string path into a typed SourceRef
+  const parseSourcePath = useCallback(
+    (path: string | null): SourceRef | null => {
+      if (!path || !path.trim()) return null;
+      if (path.startsWith(IOS_SOURCE_PREFIX)) {
+        const withoutPrefix = path.slice(IOS_SOURCE_PREFIX.length);
         const slashIdx = withoutPrefix.indexOf("/");
         const deviceId =
           slashIdx === -1 ? withoutPrefix : withoutPrefix.slice(0, slashIdx);
@@ -2025,10 +2098,23 @@ export default function DeviceSetupPage() {
             slashIdx === -1 ? "/" : "/" + withoutPrefix.slice(slashIdx + 1),
         };
       }
-      return { type: "local_folder", path: sourcePath };
+      return { type: "local_folder", path };
+    },
+    [],
+  );
+
+  // Source reference — the typed source (either local folder or device)
+  const [sourceRef, setSourceRef] = useState<SourceRef | null>(() =>
+    parseSourcePath(sourcePath),
+  );
+
+  // Sync external changes from store (e.g. edited on Dashboard page) into sourceRef
+  useEffect(() => {
+    const currentStr = sourceRef ? sourceRefToString(sourceRef) : "";
+    if (sourcePath !== currentStr) {
+      setSourceRef(parseSourcePath(sourcePath));
     }
-    return null;
-  });
+  }, [sourcePath, parseSourcePath]);
 
   // Device import state for incremental imports
   const deviceSerial =
@@ -2071,10 +2157,12 @@ export default function DeviceSetupPage() {
     !needsMoveConfirm &&
     !createSession.isPending;
 
-  // Sync sourceRef back to store for legacy compat
+  // Sync sourceRef changes from this page back to store
   useEffect(() => {
-    setSourcePath(effectiveSourcePath);
-  }, [effectiveSourcePath, setSourcePath]);
+    if (effectiveSourcePath !== sourcePath) {
+      setSourcePath(effectiveSourcePath);
+    }
+  }, [effectiveSourcePath, sourcePath, setSourcePath]);
 
   const handleTransferModeChange = useCallback(
     (mode: TransferMode) => {

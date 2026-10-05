@@ -1060,6 +1060,10 @@ class DeviceBackendManager:
         # This call is NOT ios-specific (it's enumerating ALL devices),
         # so we use the non-iOS-isolated waterfall to let WPD show
         # non-iOS MTP devices too.
+        all_found_devices: list[IOSDevice] = []
+        primary_tier = DeviceAccessTier.NONE
+        known_apple_serials: set[str] = set()
+
         for backend in self._waterfall_order(is_ios_query=False):
             if not backend.is_configured:
                 continue
@@ -1092,7 +1096,7 @@ class DeviceBackendManager:
                 all_non_ready = all(
                     d.status in (DeviceStatus.NOT_TRUSTED, DeviceStatus.LOCKED, DeviceStatus.ERROR) for d in devices
                 )
-                if all_non_ready:
+                if all_non_ready and not all_found_devices:
                     # Check if there are other configured/available backends in the waterfall order
                     has_alternatives = False
                     waterfall = self._waterfall_order(is_ios_query=False)
@@ -1116,28 +1120,46 @@ class DeviceBackendManager:
                         )
                         continue
 
-                # Classify serials for iOS isolation tracking
-                self._classify_serials(devices)
-                found_serials = {d.serial for d in devices}
-                stale = [s for s in self._device_tier_map if s not in found_serials]
-                for s in stale:
-                    del self._device_tier_map[s]
-                    self._device_tier_prefs.pop(s, None)
                 for d in devices:
-                    self._device_tier_map[d.serial] = backend.tier
-                    self._device_tier_prefs[d.serial] = backend.tier.value
-                _save_device_tier_prefs(self._device_tier_prefs)
-                if stale:
-                    logger.debug(
-                        "DeviceBackend: purged %d stale device(s) from tier map",
-                        len(stale),
-                    )
-                return devices, backend.tier
+                    is_dup = False
+                    d_serial_clean = (d.serial or "").replace("-", "").lower()
+                    if backend.tier == DeviceAccessTier.WPD:
+                        for apple_serial in known_apple_serials:
+                            if apple_serial and apple_serial in d_serial_clean:
+                                is_dup = True
+                                break
+                    elif any((d.serial or "").lower() == (existing.serial or "").lower() for existing in all_found_devices):
+                        is_dup = True
 
-            logger.debug(
-                "DeviceBackend: %s found no devices -- checking next backend",
-                backend.tier.value,
-            )
+                    if not is_dup:
+                        all_found_devices.append(d)
+                        self._device_tier_map[d.serial] = backend.tier
+                        self._device_tier_prefs[d.serial] = backend.tier.value
+                        if backend.tier != DeviceAccessTier.WPD:
+                            known_apple_serials.add(d_serial_clean)
+                        if primary_tier == DeviceAccessTier.NONE:
+                            primary_tier = backend.tier
+
+            else:
+                logger.debug(
+                    "DeviceBackend: %s found no devices -- checking next backend",
+                    backend.tier.value,
+                )
+
+        if all_found_devices:
+            self._classify_serials(all_found_devices)
+            found_serials = {d.serial for d in all_found_devices}
+            stale = [s for s in self._device_tier_map if s not in found_serials]
+            for s in stale:
+                del self._device_tier_map[s]
+                self._device_tier_prefs.pop(s, None)
+            _save_device_tier_prefs(self._device_tier_prefs)
+            if stale:
+                logger.debug(
+                    "DeviceBackend: purged %d stale device(s) from tier map",
+                    len(stale),
+                )
+            return all_found_devices, primary_tier
 
         if self._device_tier_map:
             logger.debug(

@@ -9,6 +9,8 @@ import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Smartphone,
+  Tablet,
+  Camera,
   FolderOpen,
   Folder,
   ChevronRight,
@@ -21,11 +23,10 @@ import {
   Music,
   FileText,
   RefreshCw,
-  Usb,
-  Wifi,
   HardDrive,
 } from "lucide-react";
 import { useIOSBrowse } from "@/lib/queries";
+import { getDeviceMeta } from "@/lib/device-utils";
 import { cn } from "@/lib/utils";
 import type { IOSDeviceInfo, IOSDeviceFileEntry } from "@/types/api";
 
@@ -146,13 +147,24 @@ export function DeviceFolderBrowser({
     currentPath,
   );
 
-  // Check if this is a disconnect error
+  const devMeta = getDeviceMeta(device);
+
+  // Check if this is a path-specific error vs an actual device disconnection
+  const isPathNotFound =
+    isError &&
+    currentPath !== "/" &&
+    (error?.message?.includes("File not found") ||
+      error?.message?.includes("Path not found") ||
+      error?.message?.includes("not found") ||
+      (error as any)?.response?.status === 404);
+
   const isDisconnected =
     isError &&
-    (error?.message?.includes("not found") ||
-      error?.message?.includes("Device not found") ||
+    !isPathNotFound &&
+    (error?.message?.includes("Device not found") ||
       error?.message?.includes("not connected") ||
-      (error as any)?.response?.status === 404);
+      error?.message?.includes("device offline") ||
+      (currentPath === "/" && (error as any)?.response?.status === 404));
 
   // Filter entries: show only directories in folder mode, everything in file mode
   const entries = data?.entries ?? [];
@@ -208,13 +220,13 @@ export function DeviceFolderBrowser({
             Device disconnected
           </h3>
           <p className="text-xs text-muted-foreground max-w-xs">
-            {device.name} is no longer connected. Reconnect the device via USB
+            {devMeta.displayName} is no longer connected. Reconnect the device via USB
             and unlock it, then try again.
           </p>
           <button
             type="button"
             onClick={() => refetch()}
-            className="mt-4 inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-normal hover:bg-primary/90 transition-colors"
+            className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 transition-colors"
           >
             <RefreshCw className="w-3 h-3" />
             Retry
@@ -237,62 +249,49 @@ export function DeviceFolderBrowser({
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div className="flex items-center gap-2">
-            <Smartphone className="w-4 h-4 text-blue-500" />
-            <span className="text-sm font-semibold text-foreground">
-              {device.name}
-            </span>
-            {device.active_tier &&
-              (() => {
-                const tierConfig =
-                  device.active_tier === "tier1"
-                    ? {
-                        label: "Apple Support",
-                        title: "Connected via: Apple Mobile Device Support",
-                        icon: <Usb className="w-2.5 h-2.5" />,
-                        className:
-                          "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400",
-                      }
-                    : device.active_tier === "wpd"
-                      ? {
-                          label: "Windows",
-                          title:
-                            "Connected via: Windows Portable Devices (WPD)",
-                          icon: <HardDrive className="w-2.5 h-2.5" />,
-                          className:
-                            "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
-                        }
-                      : {
-                          label: "Open-source bridge",
-                          title: "Connected via: Open-source WSL bridge",
-                          icon: <Wifi className="w-2.5 h-2.5" />,
-                          className:
-                            "bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400",
-                        };
-                return (
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-0.5 text-[9px] px-1 py-0.5 rounded",
-                      tierConfig.className,
-                    )}
-                    title={tierConfig.title}
-                  >
-                    {tierConfig.icon}
-                    {tierConfig.label}
-                  </span>
-                );
-              })()}
+            <div
+              className={cn(
+                "w-7 h-7 rounded-lg flex items-center justify-center shrink-0",
+                devMeta.accentColor.bg,
+              )}
+            >
+              {devMeta.iconType === "tablet" ? (
+                <Tablet className={cn("w-3.5 h-3.5", devMeta.accentColor.text)} />
+              ) : devMeta.iconType === "camera" ? (
+                <Camera className={cn("w-3.5 h-3.5", devMeta.accentColor.text)} />
+              ) : devMeta.iconType === "hard-drive" ? (
+                <HardDrive className={cn("w-3.5 h-3.5", devMeta.accentColor.text)} />
+              ) : (
+                <Smartphone className={cn("w-3.5 h-3.5", devMeta.accentColor.text)} />
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-sm font-semibold text-foreground truncate max-w-[200px]">
+                {devMeta.displayName}
+              </span>
+              <span
+                className={cn(
+                  "text-[9px] px-1.5 py-0.5 rounded-pill border shrink-0",
+                  devMeta.accentColor.badgeBg,
+                  devMeta.accentColor.badgeText,
+                  devMeta.accentColor.border,
+                )}
+              >
+                {devMeta.platformBadge}
+              </span>
+            </div>
           </div>
         </div>
 
         {/* Selection mode toggle */}
-        <div className="flex gap-1 p-0.5 bg-muted rounded-lg">
+        <div className="flex gap-1 p-0.5 bg-muted rounded-pill">
           <button
             type="button"
             onClick={() => setSelectionMode("folder")}
             className={cn(
-              "px-2.5 py-1 rounded-md text-xs font-normal transition-colors",
+              "px-3 py-1 rounded-pill text-xs font-normal transition-colors",
               selectionMode === "folder"
-                ? "bg-background text-foreground shadow-xs"
+                ? "bg-background text-foreground shadow-xs font-semibold"
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
@@ -302,9 +301,9 @@ export function DeviceFolderBrowser({
             type="button"
             onClick={() => setSelectionMode("file")}
             className={cn(
-              "px-2.5 py-1 rounded-md text-xs font-normal transition-colors",
+              "px-3 py-1 rounded-pill text-xs font-normal transition-colors",
               selectionMode === "file"
-                ? "bg-background text-foreground shadow-xs"
+                ? "bg-background text-foreground shadow-xs font-semibold"
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
@@ -313,9 +312,31 @@ export function DeviceFolderBrowser({
         </div>
       </div>
 
-      {/* Breadcrumb */}
-      <div className="px-4 py-2 border-b border-border bg-muted/30">
+      {/* Breadcrumb & Quick Presets */}
+      <div className="px-4 py-2 border-b border-border bg-muted/30 flex items-center justify-between gap-3">
         <Breadcrumb path={currentPath} onNavigate={handleNavigate} />
+        <div className="flex items-center gap-1 shrink-0">
+          <span className="text-[10px] text-muted-foreground mr-1 hidden sm:inline">Jump to:</span>
+          {["/DCIM", "/Pictures", "/Movies", "/"].map((p) => {
+            const label = p === "/" ? "Root" : p.replace("/", "");
+            const isActive = currentPath === p;
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setCurrentPath(p)}
+                className={cn(
+                  "px-2 py-0.5 rounded-pill text-[10px] font-normal transition-all active:scale-[0.95]",
+                  isActive
+                    ? "bg-action text-white"
+                    : "bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80",
+                )}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* File list */}
@@ -333,18 +354,31 @@ export function DeviceFolderBrowser({
           <div className="flex flex-col items-center justify-center py-8 text-center px-4">
             <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
             <p className="text-sm text-foreground font-semibold">
-              Failed to load folder
+              {isPathNotFound ? `"${currentPath}" not found on device` : "Failed to load folder"}
             </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              {error?.message || "An error occurred while browsing the device."}
+            <p className="text-xs text-muted-foreground mt-1 max-w-sm">
+              {isPathNotFound
+                ? "This folder does not exist on this storage volume. Try browsing the root directory."
+                : error?.message || "An error occurred while browsing the device."}
             </p>
-            <button
-              type="button"
-              onClick={() => refetch()}
-              className="mt-3 text-xs text-primary hover:underline"
-            >
-              Try again
-            </button>
+            <div className="flex items-center gap-2 mt-3">
+              {currentPath !== "/" && (
+                <button
+                  type="button"
+                  onClick={() => setCurrentPath("/")}
+                  className="px-3 py-1.5 rounded-pill bg-action text-white text-xs font-normal hover:bg-action/90 transition-all active:scale-[0.95]"
+                >
+                  Browse Root (/)
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => refetch()}
+                className="px-3 py-1.5 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground transition-all"
+              >
+                Try again
+              </button>
+            </div>
           </div>
         )}
 

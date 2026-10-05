@@ -28,9 +28,12 @@ import {
   Trash2,
   X,
   Smartphone,
+  Tablet,
+  Camera,
   Wifi,
   Terminal,
   Pencil,
+  Check,
 } from "lucide-react";
 import {
   useSessionList,
@@ -42,11 +45,13 @@ import {
   useDeviceBackendStatus,
   useInstallDriver,
   useInstallPymobiledevice3,
+  useIOSDevices,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
 import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
 import { isDesktop, openPath, openDirectory, runElevated } from "@/lib/desktop";
-import type { SessionInfo, SessionStatus } from "@/types/api";
+import { formatDevicePath, getDeviceMeta } from "@/lib/device-utils";
+import type { SessionInfo, SessionStatus, IOSDeviceInfo } from "@/types/api";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -160,6 +165,7 @@ interface DirMetricsCardProps {
   onPathChange: (newPath: string) => void;
   sessionName?: string;
   transferMode?: "copy" | "move";
+  connectedDevices?: IOSDeviceInfo[];
 }
 
 function DirMetricsCard({
@@ -171,7 +177,24 @@ function DirMetricsCard({
   onPathChange,
   sessionName,
   transferMode,
+  connectedDevices = [],
 }: DirMetricsCardProps) {
+  const { isDevice, cleanPath: deviceCleanPath, meta: deviceMeta } = formatDevicePath(
+    path,
+    connectedDevices,
+  );
+
+  // Ready connected devices other than the currently selected one
+  const otherReadyDevices = connectedDevices.filter((d) => {
+    if (d.status !== "ready") return false;
+    const curSerial = path
+      ?.replace(/^ios:\/\//, "")
+      .replace(/^wpd:\/\//, "")
+      .split("/")[0]
+      ?.toLowerCase();
+    return d.serial.toLowerCase() !== curSerial;
+  });
+
   const { data: metrics, isLoading } = useFolderMetadata(path);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(path ?? "");
@@ -184,84 +207,291 @@ function DirMetricsCard({
 
   const commitDraft = () => {
     const trimmed = draft.trim();
-    if (trimmed !== (path ?? "")) onPathChange(trimmed);
+    if (trimmed !== (path ?? "")) {
+      onPathChange(trimmed);
+    }
     setEditing(false);
   };
 
-  const handleBrowse = async () => {
-    const selected = await openDirectory(path ?? undefined);
-    if (selected) {
-      onPathChange(selected);
-      setDraft(selected);
+  const handleCancel = () => {
+    setDraft(path ?? "");
+    setEditing(false);
+  };
+
+  const handleBrowse = async (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    try {
+      if (isDesktop) {
+        const cleanPath = path && !isDevice ? path : undefined;
+        const selected = await openDirectory(cleanPath);
+        if (selected) {
+          onPathChange(selected);
+          setDraft(selected);
+          return;
+        }
+      }
+      // Non-desktop or cancelled
+      if (!isDesktop) {
+        setDraft(path ?? "");
+        setEditing(true);
+      }
+    } catch (err) {
+      console.error("Browse directory failed:", err);
+      setDraft(path ?? "");
+      setEditing(true);
     }
   };
 
+  const handleClear = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onPathChange("");
+    setDraft("");
+    setEditing(false);
+  };
+
+  const effectiveIcon = isDevice ? (
+    deviceMeta.iconType === "tablet" ? (
+      <Tablet className={cn("w-4.5 h-4.5", deviceMeta.accentColor.text)} />
+    ) : deviceMeta.iconType === "camera" ? (
+      <Camera className={cn("w-4.5 h-4.5", deviceMeta.accentColor.text)} />
+    ) : deviceMeta.iconType === "hard-drive" ? (
+      <HardDrive className={cn("w-4.5 h-4.5", deviceMeta.accentColor.text)} />
+    ) : (
+      <Smartphone className={cn("w-4.5 h-4.5", deviceMeta.accentColor.text)} />
+    )
+  ) : (
+    icon
+  );
+
+  const effectiveIconBg = isDevice ? deviceMeta.accentColor.bg : iconBg;
+  const displayPath = isDevice ? deviceCleanPath : path;
+
   return (
-    <div className="bg-card border border-border rounded-lg p-4">
-      <div className="flex items-center gap-3 mb-3">
+    <div
+      onClick={() => {
+        if (!path && !editing) handleBrowse();
+      }}
+      className={cn(
+        "bg-card border rounded-xl p-4 transition-all relative group/card",
+        path
+          ? "border-border shadow-xs"
+          : "border-dashed border-border/80 hover:border-primary/60 hover:bg-muted/10 cursor-pointer",
+      )}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-2.5">
         <div
           className={cn(
             "w-9 h-9 rounded-lg flex items-center justify-center shrink-0",
-            iconBg,
+            effectiveIconBg,
           )}
         >
-          {icon}
+          {effectiveIcon}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-semibold text-foreground">{label}</p>
-          {editing ? (
+          <div className="flex items-center justify-between gap-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <p className="text-xs font-semibold text-foreground">{label}</p>
+              {isDevice && (
+                <span
+                  className={cn(
+                    "text-[10px] font-normal px-2 py-0.5 rounded-pill border shrink-0",
+                    deviceMeta.accentColor.badgeBg,
+                    deviceMeta.accentColor.badgeText,
+                    deviceMeta.accentColor.border,
+                  )}
+                >
+                  {deviceMeta.platformBadge}
+                </span>
+              )}
+            </div>
+            {sessionName && (
+              <span
+                className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[100px]"
+                title={sessionName}
+              >
+                {sessionName}
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground/80 truncate">
+            {isDevice
+              ? deviceMeta.categoryLabel
+              : path
+                ? "Click browse or edit to change"
+                : sublabel}
+          </p>
+        </div>
+      </div>
+
+      {/* Path Display / Edit Row */}
+      <div className="mb-3">
+        {editing ? (
+          <div
+            className="flex items-center gap-1.5"
+            onClick={(e) => e.stopPropagation()}
+          >
             <input
               ref={inputRef}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              onBlur={commitDraft}
               onKeyDown={(e) => {
                 if (e.key === "Enter") commitDraft();
-                if (e.key === "Escape") { setDraft(path ?? ""); setEditing(false); }
+                if (e.key === "Escape") handleCancel();
               }}
               autoFocus
-              className="mt-0.5 w-full text-[11px] bg-background border border-input rounded px-1.5 py-0.5 text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-              placeholder="Enter folder path…"
+              className="flex-1 text-xs bg-background border border-input rounded-md px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+              placeholder="e.g. C:\Photos or D:\Backups"
             />
-          ) : (
             <button
-              onClick={() => { setDraft(path ?? ""); setEditing(true); }}
-              className="no-drag flex items-center gap-1 group/edit min-w-0"
-              title="Click to edit path"
+              type="button"
+              onClick={commitDraft}
+              className="p-1.5 rounded-md bg-action text-white hover:bg-action/90 transition-colors"
+              title="Save path"
             >
-              <p className="text-[11px] text-muted-foreground truncate group-hover/edit:text-foreground transition-colors">
-                {path || sublabel}
-              </p>
-              <Pencil className="w-2.5 h-2.5 text-muted-foreground opacity-0 group-hover/edit:opacity-60 transition-opacity shrink-0" />
+              <Check className="w-3.5 h-3.5" />
             </button>
-          )}
-        </div>
-        {isDesktop && (
-          <button
-            onClick={handleBrowse}
-            className="no-drag shrink-0 w-7 h-7 rounded-full bg-muted hover:bg-muted/70 flex items-center justify-center transition-colors"
-            title="Browse for folder"
-          >
-            <FolderOpen className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
-        )}
-        {sessionName && (
-          <span
-            className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[80px]"
-            title={sessionName}
-          >
-            {sessionName}
-          </span>
+            <button
+              type="button"
+              onClick={handleCancel}
+              className="p-1.5 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              title="Cancel"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : path ? (
+          <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-muted/40 border border-border/60">
+            <div
+              className="flex items-center gap-1.5 min-w-0 flex-1"
+              title={displayPath ?? undefined}
+            >
+              {isDevice ? (
+                deviceMeta.iconType === "tablet" ? (
+                  <Tablet className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                ) : deviceMeta.iconType === "camera" ? (
+                  <Camera className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                ) : deviceMeta.iconType === "hard-drive" ? (
+                  <HardDrive className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                ) : (
+                  <Smartphone className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                )
+              ) : (
+                <Folder className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+              )}
+              <span className="text-xs font-mono text-foreground truncate select-all">
+                {displayPath}
+              </span>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDraft(path ?? "");
+                  setEditing(true);
+                }}
+                className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                title="Type path manually"
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                onClick={handleClear}
+                className="p-1 rounded text-muted-foreground hover:text-red-500 hover:bg-muted transition-colors"
+                title="Clear directory"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="px-2.5 py-2 rounded-lg border border-dashed border-border/80 bg-muted/20 text-center">
+            <p className="text-xs text-muted-foreground">No directory selected</p>
+          </div>
         )}
       </div>
 
-      {isLoading && path ? (
-        <div className="flex items-center gap-2 py-2">
+      {/* Action Buttons Row */}
+      {!editing && (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleBrowse}
+            className="no-drag flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-pill border border-border bg-muted/50 hover:bg-muted text-xs font-normal text-foreground hover:text-foreground active:scale-[0.95] transition-all"
+          >
+            <FolderOpen className="w-3.5 h-3.5 text-muted-foreground" />
+            {path ? (isDevice ? "Change device / folder…" : "Change folder…") : "+ Select folder…"}
+          </button>
+          {!path && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setDraft("");
+                setEditing(true);
+              }}
+              className="no-drag flex items-center justify-center gap-1 py-1.5 px-3 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] transition-all"
+              title="Type or paste path"
+            >
+              <Pencil className="w-3 h-3" />
+              Type path
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Quick switch between connected devices (e.g. iPhone <-> Android) */}
+      {!editing && otherReadyDevices.length > 0 && (
+        <div className="mt-3 pt-2.5 border-t border-border/50 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[11px] text-muted-foreground">Other connected devices:</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {otherReadyDevices.map((d) => {
+              const dMeta = getDeviceMeta(d);
+              return (
+                <button
+                  key={d.serial}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const prefix =
+                      d.active_tier === "wpd" || d.serial.startsWith("\\\\?\\") ? "wpd://" : "ios://";
+                    onPathChange(`${prefix}${d.serial}/DCIM`);
+                  }}
+                  className={cn(
+                    "no-drag px-2.5 py-1 rounded-pill text-[11px] font-normal border transition-all active:scale-[0.95] flex items-center gap-1 hover:opacity-90",
+                    dMeta.accentColor.bg,
+                    dMeta.accentColor.text,
+                    dMeta.accentColor.border,
+                  )}
+                  title={`Switch to ${dMeta.displayName}`}
+                >
+                  {dMeta.iconType === "tablet" ? (
+                    <Tablet className="w-3 h-3" />
+                  ) : dMeta.iconType === "camera" ? (
+                    <Camera className="w-3 h-3" />
+                  ) : (
+                    <Smartphone className="w-3 h-3" />
+                  )}
+                  <span>Switch to {dMeta.shortName}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Metrics */}
+      {isLoading && path && !isDevice ? (
+        <div className="flex items-center gap-2 py-2 mt-2 pt-2 border-t border-border">
           <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
-          <span className="text-xs text-muted-foreground">Analyzing...</span>
+          <span className="text-xs text-muted-foreground">
+            Calculating folder size…
+          </span>
         </div>
       ) : metrics ? (
-        <div className="space-y-2">
+        <div className="space-y-2 mt-2 pt-2 border-t border-border">
           <div className="grid grid-cols-2 gap-2">
             <div className="text-center">
               <p className="text-sm font-bold text-foreground">
@@ -298,11 +528,7 @@ function DirMetricsCard({
             </div>
           )}
         </div>
-      ) : path ? null : (
-        <p className="text-xs text-muted-foreground py-1">
-          {isDesktop ? "Click the path or browse to set a folder" : sublabel}
-        </p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1115,6 +1341,7 @@ export default function DashboardPage() {
   const setSetupDestPath = useTransferStore((s) => s.setSetupDestPath);
 
   const { data: backendStatus } = useDeviceBackendStatus();
+  const { data: iosDevices } = useIOSDevices();
   const [dismissedCards, setDismissedCards] = useState<string[]>(
     getInitialDismissedCards,
   );
@@ -1146,9 +1373,16 @@ export default function DashboardPage() {
     showAppleCard || showPymobileCard || showWslCard || showBridgeCard;
 
   const latestSession = sessionList?.sessions?.[0];
+  const [clearedSource, setClearedSource] = useState(false);
+  const [clearedDest, setClearedDest] = useState(false);
+
   // Prefer setup path (editable), then live transfer, then last session
-  const activeSource = setupSourcePath || sourceRoot || latestSession?.source_root || null;
-  const activeDest = setupDestPath || destRoot || latestSession?.dest_root || null;
+  const activeSource = clearedSource
+    ? null
+    : setupSourcePath || sourceRoot || latestSession?.source_root || null;
+  const activeDest = clearedDest
+    ? null
+    : setupDestPath || destRoot || latestSession?.dest_root || null;
   const activeSessionName = latestSession?.session_name;
   const activeTransferMode = latestSession?.transfer_mode;
 
@@ -1197,9 +1431,14 @@ export default function DashboardPage() {
           }
           iconBg="bg-blue-50 dark:bg-blue-950"
           path={activeSource}
-          onPathChange={(p) => setSetupSourcePath(p)}
+          onPathChange={(p) => {
+            if (!p) setClearedSource(true);
+            else setClearedSource(false);
+            setSetupSourcePath(p);
+          }}
           sessionName={activeSessionName}
           transferMode={activeTransferMode}
+          connectedDevices={iosDevices?.devices}
         />
         <DirMetricsCard
           label="Backup Destination"
@@ -1209,7 +1448,11 @@ export default function DashboardPage() {
           }
           iconBg="bg-green-50 dark:bg-green-950"
           path={activeDest}
-          onPathChange={(p) => setSetupDestPath(p)}
+          onPathChange={(p) => {
+            if (!p) setClearedDest(true);
+            else setClearedDest(false);
+            setSetupDestPath(p);
+          }}
           sessionName={activeSessionName}
           transferMode={activeTransferMode}
         />

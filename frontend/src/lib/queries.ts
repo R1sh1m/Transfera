@@ -539,7 +539,11 @@ export function useFolderMetadata(path: string | null) {
       );
       return data;
     },
-    enabled: !!path && path.trim().length > 0,
+    enabled:
+      !!path &&
+      path.trim().length > 0 &&
+      !path.startsWith("ios://") &&
+      !path.startsWith("wpd://"),
     refetchInterval: 30000,
     retry: 1,
     staleTime: 15000,

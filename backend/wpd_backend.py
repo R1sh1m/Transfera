@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,9 +25,14 @@ from typing import Any
 
 creationflags = 0x08000000 if sys.platform == "win32" else 0
 
-from backend.ios_device import DeviceFileInfo, DeviceStatus, IOSDevice
+from backend.ios_device import DeviceFileInfo, DeviceStatus, IOSDevice, query_lockdown_versions
 
 logger = logging.getLogger(__name__)
+
+# WPD PnP device IDs for iPhones embed the 40-char hex UDID
+# (e.g. \\?\USB#VID_05AC&PID_12A8#<UDID>#{...}). Extract it to match
+# WPD rows against usbmux lockdown rows for metadata enrichment.
+_UDID_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 # Default chunk size for streaming reads -- matches BATCH_SIZE * 1024
 # used by the cache manager (BATCH_SIZE=100 => 100 KB).
@@ -267,7 +273,42 @@ class WpdBackend:
                     status=DeviceStatus.READY,
                 )
             )
+
+        await self._enrich_from_lockdown(devices)
         return devices
+
+    async def _enrich_from_lockdown(self, devices: list[IOSDevice]) -> None:
+        """
+        Fill name/model/ios_version on WPD rows from usbmux lockdown data
+        when the same phone is visible to the Apple driver (matched by the
+        UDID embedded in the WPD PnP device ID).
+
+        Best-effort and cheap (``short_info`` only, no trust probe): any
+        failure — no driver, untrusted/locked phone, no match — keeps the
+        WPD values. Mutates ``devices`` in place; never raises.
+        """
+        if not devices:
+            return
+        try:
+            versions = await query_lockdown_versions()
+        except Exception:
+            return
+        if not versions:
+            return
+        by_udid = {serial.lower(): info for serial, info in versions.items() if serial}
+        for dev in devices:
+            match = _UDID_RE.search(dev.serial or "")
+            if not match:
+                continue
+            info = by_udid.get(match.group(0).lower())
+            if not info:
+                continue
+            if info.get("ios_version"):
+                dev.ios_version = info["ios_version"]
+            if info.get("name"):
+                dev.name = info["name"]
+            if info.get("model"):
+                dev.model = info["model"]
 
     async def browse(self, serial: str, path: str) -> list[DeviceFileInfo]:  # type: ignore[override]
         # Normalize path: strip leading slash -- WPD helper expects "DCIM" not "/DCIM".

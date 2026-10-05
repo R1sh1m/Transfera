@@ -646,7 +646,8 @@ The inline media preview panel on the Setup page that appears when a source dire
 
 **States:**
 - **Loading:** `SkeletonGrid` — 4-column grid of `aspect-square rounded-lg bg-muted` cells with a shimmer gradient sweep (`@keyframes shimmer` — gradient moves from -200% to 200% over 1.5s, infinite), each cell staggered by `0.05s`
-- **Empty:** Centered `ImageOff` icon + "No media files found in this directory" in `text-muted-foreground`
+- **Empty (local/device folder):** Centered `ImageOff` icon + "No media files found in this directory" in `text-muted-foreground`. For device sources at a folder level (e.g. `/DCIM`), shows a context message — "No media files directly in this folder… Photos on iPhone live in subfolders like 100APPLE" — with an **"Import everything under {path}"** action button (`bg-action text-white`) that triggers a full recursive transfer (`selected_files: null`).
+- **Error (device source):** When the preview API fails (e.g. WPD path not found, device locked, stale serial), renders a distinct error card instead of the generic empty state: red `AlertTriangle` icon, "Couldn't load this folder" heading, the backend error message, **Retry** button (`bg-muted`), and for device sources an **"Import everything anyway"** button (`bg-action`) that also triggers full recursive transfer.
 - **Loaded:** Real thumbnail grid with progressive loading (max 4 concurrent fetches)
 - **Thumbnail failed:** `ImageOff` icon fallback in the cell; file is still selectable
 

@@ -29,7 +29,6 @@ import {
   RefreshCw,
   Trash2,
   AlertTriangle,
-  ChevronDown,
 } from "lucide-react";
 import {
   useMediaList,
@@ -38,6 +37,7 @@ import {
   useSemanticSearch,
 } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
+import { PillSelect } from "@/components/PillSelect";
 import TransferHistoryTable from "@/components/TransferHistoryTable";
 import MediaDetailModal from "@/components/MediaDetailModal";
 import {
@@ -545,13 +545,8 @@ export default function LibraryPage() {
   const [finalStatus, setFinalStatus] = useState("completed");
   const [migratePreview, setMigratePreview] =
     useState<DocumentMigratePreview | null>(null);
-  const [migrateLoading, setMigrateLoading] = useState(false);
   const [migrateRunning, setMigrateRunning] = useState(false);
-  const [migrateDismissed, setMigrateDismissed] = useState(false);
   const [migrateResult, setMigrateResult] = useState<string | null>(null);
-  // The filing card: collapsed icon -> hover tooltip -> click to expand full card.
-  // Dismiss only hides until you leave and return to this page.
-  const [docsExpanded, setDocsExpanded] = useState(false);
   const [docsIconHovered, setDocsIconHovered] = useState(false);
   const [viewMode, setViewMode] = useState<"masonry" | "list" | "history">(
     "masonry",
@@ -621,7 +616,6 @@ export default function LibraryPage() {
   });
 
   const fetchMigratePreview = useCallback(async () => {
-    setMigrateLoading(true);
     try {
       const res = await apiClient.get<DocumentMigratePreview>(
         "/library/migrate-documents/preview",
@@ -629,16 +623,14 @@ export default function LibraryPage() {
       setMigratePreview(res.data);
     } catch {
       setMigratePreview(null);
-    } finally {
-      setMigrateLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (section === "vault" && !migrateDismissed && migratePreview === null) {
+    if (section === "vault" && migratePreview === null) {
       fetchMigratePreview();
     }
-  }, [section, migrateDismissed, migratePreview, fetchMigratePreview]);
+  }, [section, migratePreview, fetchMigratePreview]);
 
   const handleMigrateDocuments = useCallback(async () => {
     setMigrateRunning(true);
@@ -963,232 +955,169 @@ export default function LibraryPage() {
         <SemanticSearchBar onResults={(q) => setSemanticQuery(q)} />
       )}
 
-      {/* Document filing: icon button that shows info on hover and expands on click.
-          "Nothing to move" state collapses to a small icon; dismissed hides it
-          per-navigation (migrateDismissed resets on re-mount). */}
-      {section === "vault" &&
-        !migrateDismissed &&
-        (!migrateLoading &&
-        migratePreview &&
-        migratePreview.total === 0 &&
-        !migrateResult &&
-        !docsExpanded ? (
-          // Collapsed icon button with hover tooltip
-          <div className="relative flex items-center">
-            <button
-              type="button"
-              onClick={() => setDocsExpanded(true)}
-              onMouseEnter={() => setDocsIconHovered(true)}
-              onMouseLeave={() => setDocsIconHovered(false)}
-              className="flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors active:scale-[0.95]"
-              title="Document filing"
-              aria-label="Document filing"
-            >
-              <FileText className="w-3.5 h-3.5" />
-            </button>
-            <AnimatePresence>
-              {docsIconHovered && (
-                <motion.div
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 4 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute left-10 top-1/2 -translate-y-1/2 z-20 pointer-events-none"
-                >
-                  <div className="bg-foreground text-background text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap shadow-lg">
-                    Document filing — click to manage
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        ) : (
-          <div className="bg-card border border-border rounded-lg p-4 flex items-start gap-3">
-            <div className="shrink-0 w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <FileText className="w-4 h-4 text-primary" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-foreground">
-                File documents separately
-              </p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {migrateLoading
-                  ? "Checking for documents in the old shared folders…"
-                  : migratePreview && migratePreview.total > 0
-                    ? `${migratePreview.total} document(s) are still in the shared date folders. Move them into Documents/<Kind>/ date folders.`
-                    : "New documents land in Documents/<Kind>/ date folders. Nothing left to move."}
-              </p>
-              {migrateResult && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  {migrateResult}
-                </p>
-              )}
-              <div className="flex items-center gap-2 mt-2">
-                {migratePreview && migratePreview.total > 0 ? (
-                  <button
-                    type="button"
-                    onClick={handleMigrateDocuments}
-                    disabled={migrateRunning}
-                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-pill hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {migrateRunning
-                      ? "Moving…"
-                      : `Move ${migratePreview.total} into Documents/`}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={fetchMigratePreview}
-                    disabled={migrateLoading}
-                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-pill hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
-                  >
-                    {migrateLoading ? "Checking…" : "Check again"}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => { setMigrateDismissed(true); setDocsExpanded(false); }}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-
       {/* Toolbar */}
-      <div className="flex items-center gap-3">
-        <div className="flex-1 relative">
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <div className="flex-1 min-w-[200px] relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search files..."
-            className="w-full pl-9 pr-3 py-2 bg-background border border-input rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
+            className="w-full pl-9 pr-3 py-1.5 bg-background border border-input rounded-full text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
           />
         </div>
 
         {/* Custom pill-shaped type filter */}
-        <div className="relative">
-          <select
-            value={extension}
-            onChange={(e) => setExtension(e.target.value)}
-            className="appearance-none pl-3 pr-7 py-1.5 bg-background border border-input rounded-full text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-muted/50 transition-colors"
-          >
-            <option value="">All types</option>
-            {allExtensions.map((ext) => (
-              <option key={ext} value={ext}>
-                {ext}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
-        </div>
+        <PillSelect
+          value={extension}
+          onChange={setExtension}
+          placeholder="All types"
+          options={[
+            { value: "", label: "All types" },
+            ...allExtensions.map((ext) => ({ value: ext, label: ext })),
+          ]}
+        />
 
         {/* Custom pill-shaped doc-kind filter */}
-        <div className="relative">
-          <select
-            value={docKind}
-            onChange={(e) => setDocKind(e.target.value)}
-            className="appearance-none pl-3 pr-7 py-1.5 bg-background border border-input rounded-full text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-muted/50 transition-colors"
-            title="Filter documents by kind folder (Documents/<Kind>/)"
-          >
-            <option value="">All doc kinds</option>
-            {DOCUMENT_KINDS.map((kind) => (
-              <option key={kind} value={kind}>
-                {kind}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
-        </div>
+        <PillSelect
+          value={docKind}
+          onChange={setDocKind}
+          placeholder="All doc kinds"
+          options={[
+            { value: "", label: "All doc kinds" },
+            ...DOCUMENT_KINDS.map((kind) => ({ value: kind, label: kind })),
+          ]}
+          title="Filter documents by kind folder (Documents/<Kind>/)"
+        />
 
         {/* Custom pill-shaped status filter */}
-        <div className="relative">
-          <select
-            value={finalStatus}
-            onChange={(e) => setFinalStatus(e.target.value)}
-            className="appearance-none pl-3 pr-7 py-1.5 bg-background border border-input rounded-full text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-muted/50 transition-colors"
-          >
-            <option value="">All statuses</option>
-            <option value="completed">Completed (default)</option>
-            <option value="failed">Failed</option>
-            <option value="pending">Pending</option>
-          </select>
-          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
-        </div>
+        <PillSelect
+          value={finalStatus}
+          onChange={setFinalStatus}
+          placeholder="All statuses"
+          options={[
+            { value: "", label: "All statuses" },
+            { value: "completed", label: "Completed (default)" },
+            { value: "failed", label: "Failed" },
+            { value: "pending", label: "Pending" },
+          ]}
+        />
 
-        <div className="flex items-center border border-input rounded-md">
+        {/* Pill-shaped View mode segmented control */}
+        <div className="flex items-center p-0.5 bg-muted/50 border border-border rounded-full">
           <button
             onClick={() => setViewMode("masonry")}
             className={cn(
-              "p-2 rounded-l-md transition-colors",
+              "p-1.5 rounded-full transition-colors",
               viewMode === "masonry"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted",
+                ? "bg-primary text-primary-foreground shadow-xs"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
             )}
             title="Grid view"
           >
-            <Grid3X3 className="w-4 h-4" />
+            <Grid3X3 className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => setViewMode("list")}
             className={cn(
-              "p-2 transition-colors",
+              "p-1.5 rounded-full transition-colors",
               viewMode === "list"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted",
+                ? "bg-primary text-primary-foreground shadow-xs"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
             )}
             title="List view"
           >
-            <LayoutList className="w-4 h-4" />
+            <LayoutList className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => setViewMode("history")}
             className={cn(
-              "p-2 rounded-r-md transition-colors",
+              "p-1.5 rounded-full transition-colors",
               viewMode === "history"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted",
+                ? "bg-primary text-primary-foreground shadow-xs"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
             )}
             title="Transfer history"
           >
-            <History className="w-4 h-4" />
+            <History className="w-3.5 h-3.5" />
           </button>
+        </div>
+
+        {/* Document filing icon button with pill hover tooltip */}
+        <div className="relative flex items-center">
+          <button
+            type="button"
+            onClick={handleMigrateDocuments}
+            disabled={migrateRunning}
+            onMouseEnter={() => setDocsIconHovered(true)}
+            onMouseLeave={() => setDocsIconHovered(false)}
+            className={cn(
+              "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
+              migrateRunning && "opacity-60 cursor-not-allowed",
+            )}
+            aria-label="Document filing"
+          >
+            {migrateRunning ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+            ) : (
+              <FileText className="w-3.5 h-3.5" />
+            )}
+          </button>
+          <AnimatePresence>
+            {docsIconHovered && (
+              <motion.div
+                initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-0 top-10 z-30 pointer-events-none"
+              >
+                <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
+                  <FileText className="w-3 h-3 text-action" />
+                  <span>
+                    {migrateResult
+                      ? migrateResult
+                      : migratePreview && migratePreview.total > 0
+                        ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
+                        : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
+                  </span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         <button
           onClick={handleRegenThumbnails}
           disabled={regenStatus === "loading"}
           className={cn(
-            "flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border transition-colors",
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border transition-colors active:scale-[0.95]",
             regenStatus === "done"
               ? "border-green-500 text-green-600 bg-green-50 dark:bg-green-950"
-              : "border-input text-muted-foreground hover:bg-muted hover:text-foreground",
+              : "border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground",
             regenStatus === "loading" && "opacity-60 cursor-not-allowed",
           )}
           title="Re-generate and refresh preview thumbnails for your library"
         >
           {regenStatus === "loading" ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
           ) : regenStatus === "done" ? (
-            <CheckCircle2 className="w-4 h-4" />
+            <CheckCircle2 className="w-3.5 h-3.5" />
           ) : (
-            <RefreshCw className="w-4 h-4" />
+            <RefreshCw className="w-3.5 h-3.5" />
           )}
-          {regenStatus === "done" ? "Updated" : "Refresh Previews"}
+          {regenStatus === "done" ? "Updated" : "Refresh"}
         </button>
 
         <button
           onClick={() => setShowClearDialog(true)}
           disabled={libraryTotal === 0}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-md text-sm border border-input text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border border-border text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.95]"
           title="Clear all library entries"
         >
-          <Trash2 className="w-4 h-4" />
-          Clear Library
+          <Trash2 className="w-3.5 h-3.5" />
+          Clear
         </button>
       </div>
 

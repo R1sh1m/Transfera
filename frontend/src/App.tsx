@@ -46,6 +46,12 @@ import DuplicateModal from "@/components/DuplicateModal";
 import CloseGuardModal from "@/components/CloseGuardModal";
 import ThemeToggle from "@/components/ThemeToggle";
 import PageErrorBoundary from "@/components/PageErrorBoundary";
+import { useDeviceWatcher } from "@/hooks/use-device-watcher";
+
+function DeviceWatcher() {
+  useDeviceWatcher();
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Navigation
@@ -322,10 +328,35 @@ function BackendDownScreen() {
   const serverDown = useTransferStore((s) => s.ui.serverDown);
   const [retrying, setRetrying] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const { data: health } = useHealth();
 
-  // Listen for backend:starting — show a loading state instead of the error screen
+  // Initial probe on mount — if backend is already healthy, never show starting/down screen
   useEffect(() => {
-    const unsub = onBackendStarting(() => {
+    fetch(`${API_BASE_URL}/api/health`)
+      .then((res) => {
+        if (res.ok) {
+          setIsStarting(false);
+          if (useTransferStore.getState().ui.serverDown) {
+            useTransferStore.getState().setServerDown(false);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Listen for backend:starting — only show loading if backend isn't already responding
+  useEffect(() => {
+    const unsub = onBackendStarting(async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/health`);
+        if (res.ok) {
+          setIsStarting(false);
+          useTransferStore.getState().setServerDown(false);
+          return;
+        }
+      } catch {
+        // Backend not yet ready
+      }
       setIsStarting(true);
     });
     return unsub;
@@ -339,6 +370,40 @@ function BackendDownScreen() {
     });
     return unsub;
   }, []);
+
+  // Rapid health polling while starting or down (every 300ms) so the loading screen
+  // dismisses the instant the backend is ready — never waits for slow TanStack intervals
+  useEffect(() => {
+    if (!isStarting && !serverDown) return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/health`);
+        if (res.ok && !cancelled) {
+          setIsStarting(false);
+          if (useTransferStore.getState().ui.serverDown) {
+            useTransferStore.getState().setServerDown(false);
+          }
+        }
+      } catch {
+        // Still booting
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isStarting, serverDown]);
+
+  // Clear starting/down as soon as TanStack useHealth sees "ok"
+  useEffect(() => {
+    if (health?.status === "ok") {
+      setIsStarting(false);
+      if (useTransferStore.getState().ui.serverDown) {
+        useTransferStore.getState().setServerDown(false);
+      }
+    }
+  }, [health]);
 
   if (!serverDown && !isStarting) return null;
 
@@ -361,8 +426,7 @@ function BackendDownScreen() {
             Starting Transfera
           </h1>
           <p className="text-sm text-muted-foreground">
-            The backend engine is starting up. This takes a few seconds on the
-            first launch.
+            The backend engine is starting up. This takes a few seconds.
           </p>
         </div>
       </motion.div>
@@ -445,6 +509,10 @@ function BackendRecoveryWatcher() {
   const qc = useQueryClient();
   const { data: health, isError } = useHealth();
   const [wasDown, setWasDown] = useState(false);
+  // Only escalate to "Engine Unavailable" if the backend was previously
+  // confirmed healthy this session. Cold-start probe failures (while the
+  // backend is still booting) should not trigger the error screen.
+  const [wasEverUp, setWasEverUp] = useState(false);
 
   useEffect(() => {
     if (isError) {
@@ -452,13 +520,17 @@ function BackendRecoveryWatcher() {
       // Mid-run engine death (kill -9, crash, port stolen): the shell only
       // emits backend:down for startup failures, so flip into the Engine
       // Unavailable screen from here. useHealth retries 3x with backoff
-      // before isError, so this is a genuine outage, not a blip.
-      useTransferStore.getState().setServerDown(true);
+      // before isError, so this is a genuine outage — but only if we've
+      // confirmed the backend was healthy at least once this session.
+      if (wasEverUp) {
+        useTransferStore.getState().setServerDown(true);
+      }
     } else if (health?.status === "ok") {
       // Backend healthy: always clear a stale down screen, whatever set it
       // (missed backend:ready race, or a backend:down that fired before a
       // slow cold boot finished). Guarded reads keep a healthy poll a
       // complete no-op — no render churn, no query invalidation.
+      setWasEverUp(true);
       if (wasDown) {
         // Backend just came back — refetch everything
         qc.invalidateQueries();
@@ -468,7 +540,7 @@ function BackendRecoveryWatcher() {
         useTransferStore.getState().setServerDown(false);
       }
     }
-  }, [isError, health, wasDown, qc]);
+  }, [isError, health, wasDown, wasEverUp, qc]);
 
   return null;
 }
@@ -502,6 +574,7 @@ export default function App() {
       <NotificationToast />
       <BackendDownScreen />
       <BackendRecoveryWatcher />
+      <DeviceWatcher />
     </QueryClientProvider>
   );
 }
