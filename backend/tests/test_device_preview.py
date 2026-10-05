@@ -14,6 +14,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import backend.api.device_preview as device_preview
+from backend.api.auth import require_local_token_or_query
+from backend.config import LOCAL_SECRET_TOKEN
 from backend.ios_device import DeviceStatus, IOSDevice
 
 
@@ -90,3 +92,43 @@ def test_unknown_device_returns_disconnected(test_client, monkeypatch):
     r = test_client.get("/api/device/ios-preview", params={"device_id": "GONE", "path": "/DCIM"})
     assert r.status_code == 404
     assert r.json()["detail"]["status"] == "disconnected"
+
+
+async def test_thumbnail_auth_accepts_header_or_query():
+    """<img> tags can't send headers, so thumbnails also accept ?token=."""
+    import pytest
+
+    assert await require_local_token_or_query(LOCAL_SECRET_TOKEN, None) is None
+    assert await require_local_token_or_query(None, LOCAL_SECRET_TOKEN) is None
+    with pytest.raises(Exception) as exc_info:
+        await require_local_token_or_query(None, None)
+    assert exc_info.value.status_code == 403
+    with pytest.raises(Exception) as exc_info:
+        await require_local_token_or_query("wrong", "also-wrong")
+    assert exc_info.value.status_code == 403
+
+
+def test_ios_thumbnail_rejects_bad_token(test_client):
+    r = test_client.get(
+        "/api/device/ios-thumbnail",
+        params={"device_id": "SERIAL-123", "path": "/DCIM/x.jpg", "token": "wrong"},
+    )
+    assert r.status_code == 403
+
+
+def test_ios_thumbnail_accepts_query_token(test_client):
+    # Unknown device + valid ?token= passes auth and degrades to the gray
+    # fallback (200) instead of 403 — no hardware needed.
+    r = test_client.get(
+        "/api/device/ios-thumbnail",
+        params={"device_id": "NOPE", "path": "/DCIM/x.jpg", "token": LOCAL_SECRET_TOKEN},
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+
+
+def test_local_thumbnail_query_token(test_client):
+    bad = test_client.get("/api/device/thumbnail", params={"path": "/nope.jpg", "token": "wrong"})
+    assert bad.status_code == 403
+    good = test_client.get("/api/device/thumbnail", params={"path": "/nope.jpg", "token": LOCAL_SECRET_TOKEN})
+    assert good.status_code == 200

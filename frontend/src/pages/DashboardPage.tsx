@@ -51,6 +51,7 @@ import { useTransferStore } from "@/store/transfer";
 import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
 import { isDesktop, openPath, openDirectory, runElevated } from "@/lib/desktop";
 import { formatDevicePath, getDeviceMeta } from "@/lib/device-utils";
+import { getLocalToken } from "@/lib/api-client";
 import type { SessionInfo, SessionStatus, IOSDeviceInfo } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -969,7 +970,12 @@ function SessionRow({ session }: { session: SessionInfo }) {
     if (isDesktop) {
       openPath(session.session_report_path);
     } else {
-      window.open(`/api/sessions/${session.id}/report?fmt=html`, "_blank");
+      const token = getLocalToken();
+      const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
+      window.open(
+        `/api/sessions/${session.id}/report?fmt=html${tokenParam}`,
+        "_blank",
+      );
     }
   };
 

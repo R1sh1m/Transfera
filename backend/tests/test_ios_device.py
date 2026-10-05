@@ -19,7 +19,13 @@ import threading
 import pytest
 
 import backend.ios_device as ios_device
-from backend.ios_device import DeviceStatus, browse_device_directory, list_ios_devices, query_lockdown_versions
+from backend.ios_device import (
+    DeviceStatus,
+    browse_device_directory,
+    friendly_device_model,
+    list_ios_devices,
+    query_lockdown_versions,
+)
 
 
 async def test_usbmux_import_failure_warns_once_and_returns_empty(monkeypatch, caplog):
@@ -99,7 +105,7 @@ async def test_browse_hang_raises_actionable_error(monkeypatch):
 class _InfoLockdown:
     """Fake lockdown that answers short_info (no trust probe needed)."""
 
-    short_info = {"DeviceName": "Rishi's iPhone", "ProductType": "iPhone17,2", "ProductVersion": "18.4"}
+    short_info = {"DeviceName": "Rishi's iPhone", "ProductType": "iPhone99,9", "ProductVersion": "18.4"}
 
     def close(self):
         pass
@@ -115,8 +121,20 @@ async def test_query_lockdown_versions_returns_short_info_only(monkeypatch):
     monkeypatch.setattr(_usbmux_mod, "list_devices", lambda: [_MuxDev()])
     versions = await query_lockdown_versions()
     assert versions == {
-        "SERIAL-123": {"name": "Rishi's iPhone", "model": "iPhone17,2", "ios_version": "18.4"},
+        "SERIAL-123": {"name": "Rishi's iPhone", "model": "iPhone99,9", "ios_version": "18.4"},
     }
+
+
+def test_friendly_device_model_maps_known_types():
+    assert friendly_device_model("iPhone10,2") == "iPhone 8 Plus"
+    assert friendly_device_model("iPhone17,2") == "iPhone 16 Pro Max"
+    assert friendly_device_model("iPhone12,1") == "iPhone 11"
+
+
+def test_friendly_device_model_falls_back_to_raw():
+    assert friendly_device_model("iPhone99,9") == "iPhone99,9"
+    assert friendly_device_model("") == "iPhone"
+    assert friendly_device_model(None) == "iPhone"
 
 
 async def test_query_lockdown_versions_skips_untrusted_devices(monkeypatch):

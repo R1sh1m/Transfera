@@ -25,6 +25,8 @@ frontend/vite.config.js
 frontend/python-bin/
 frontend/python-embed.zip
 *.pfx
+*.key
+*.key.pub
 *.tsbuildinfo
 
 

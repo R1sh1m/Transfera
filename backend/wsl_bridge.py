@@ -53,6 +53,17 @@ def _build_error(status: str, detail: str) -> dict:
     return {"status": status, "detail": detail}
 
 
+try:
+    # Shared friendly model names (same table as Windows Tier 1). The bridge
+    # deploys standalone, so fall back to the raw ProductType if the backend
+    # package isn't importable here.
+    from backend.ios_device import friendly_device_model as _friendly_model
+except Exception:
+
+    def _friendly_model(product_type: str | None) -> str:
+        return (product_type or "").strip() or "iPhone"
+
+
 def _classify_lockdown_error(exc: Exception) -> tuple[str, str]:
     """Classify a lockdown/connection exception into a (status, message) pair.
 
@@ -142,7 +153,7 @@ async def list_devices():
                     {
                         "serial": serial,
                         "name": info.get("DeviceName", "Unknown Device"),
-                        "model": info.get("ProductType", "iPhone"),
+                        "model": _friendly_model(info.get("ProductType", "iPhone")),
                         "ios_version": info.get("ProductVersion", "unknown"),
                         "connection_type": getattr(mux_dev, "connection_type", "USB"),
                         "status": status,

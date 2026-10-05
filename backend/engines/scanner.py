@@ -273,6 +273,8 @@ async def _scan_ios_device(
     except Exception:
         logger.warning("Could not open AFC service for EXIF extraction; iOS items will get dates from Hop 2 instead")
 
+    allowed_lower = {p.lower() for p in allowed_paths} if allowed_paths is not None else None
+
     try:
         for fi in device_files:
             if fi.is_dir:
@@ -294,8 +296,8 @@ async def _scan_ios_device(
             source_path = f"{IOS_SOURCE_PREFIX}{serial}{fi.path}"
 
             # Apply allowed_paths filter (selective import)
-            if allowed_paths is not None:
-                if source_path.lower() not in allowed_paths:
+            if allowed_lower is not None:
+                if source_path.lower() not in allowed_lower:
                     continue
 
             # Build FileMetadata from AFC stat info

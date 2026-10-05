@@ -614,6 +614,13 @@ Generated thumbnail for any media item in the library or transfer preview.
 2. Pillow decode + resize (handles HEIC via pillow-heif)
 3. ffmpeg frame extraction (video, 2.0s offset)
 
+**Auth:** grid thumbnails load via `<img src>`, which cannot send the
+`X-Local-Token` header — so the device preview thumbnail endpoints
+(`GET /api/device/thumbnail`, `GET /api/device/ios-thumbnail`) also accept
+`?token=` (constant-time compare, same pattern as the WebSocket `?token=`).
+Listing/transfer endpoints stay header-only. The `getThumbnailUrl` builder
+appends the token automatically.
+
 ### `component.setup-card`
  
 Contextual action card shown on the Dashboard when the app detects optional setup is available (Apple driver installable via winget, WSL bridge not yet configured).

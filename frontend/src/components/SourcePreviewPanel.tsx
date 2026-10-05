@@ -74,6 +74,35 @@ function totalSelectedSize(
   return bytes;
 }
 
+export function getPreviewThumbnailUrl(
+  absPath: string,
+  deviceId?: string | null,
+  size = 200,
+): string {
+  // <img> tags can't send the X-Local-Token header, so the token rides
+  // along as ?token= (accepted by the thumbnail endpoints only).
+  const token = getLocalToken();
+  if (absPath.startsWith("ios://")) {
+    const raw = absPath.slice("ios://".length);
+    const slashIdx = raw.indexOf("/");
+    const devId = deviceId || (slashIdx === -1 ? raw : raw.slice(0, slashIdx));
+    const vPath = slashIdx === -1 ? "/" : "/" + raw.slice(slashIdx + 1);
+    const p = new URLSearchParams({
+      device_id: devId,
+      path: vPath,
+      size: String(size),
+      ...(token ? { token } : {}),
+    });
+    return `${API_BASE_URL}/api/device/ios-thumbnail?${p}`;
+  }
+  const p = new URLSearchParams({
+    path: absPath,
+    size: String(size),
+    ...(token ? { token } : {}),
+  });
+  return `${API_BASE_URL}/api/device/thumbnail?${p}`;
+}
+
 interface MediaThumbCellProps {
   item: MediaPreviewItem;
   isSelected: boolean;
@@ -229,7 +258,9 @@ function MediaThumbCell({
         {item.type === "video" && (
           <div className="px-1.5 py-0.5 rounded-md bg-black/60 backdrop-blur-xs text-white text-[9px] font-medium leading-none flex items-center gap-0.5">
             <Film className="w-2.5 h-2.5" />
-            {item.duration_s != null ? formatDuration(item.duration_s) : "Video"}
+            {item.duration_s != null
+              ? formatDuration(item.duration_s)
+              : "Video"}
           </div>
         )}
         {isLikelyDuplicate && (
@@ -419,15 +450,21 @@ function ImportAllModal({
         {/* Summary */}
         <div className="p-4 border-b border-border bg-muted/20 grid grid-cols-3 gap-4 text-center">
           <div className="space-y-1">
-            <p className="text-2xl font-semibold text-foreground">{data.total}</p>
+            <p className="text-2xl font-semibold text-foreground">
+              {data.total}
+            </p>
             <p className="text-xs text-muted-foreground">Total files</p>
           </div>
           <div className="space-y-1">
-            <p className="text-2xl font-semibold text-action">{formatBytes(data.totalSize)}</p>
+            <p className="text-2xl font-semibold text-action">
+              {formatBytes(data.totalSize)}
+            </p>
             <p className="text-xs text-muted-foreground">Total size</p>
           </div>
           <div className="space-y-1">
-            <p className="text-2xl font-semibold text-foreground">{data.photos} / {data.videos}</p>
+            <p className="text-2xl font-semibold text-foreground">
+              {data.photos} / {data.videos}
+            </p>
             <p className="text-xs text-muted-foreground">Photos / Videos</p>
           </div>
         </div>
@@ -437,7 +474,10 @@ function ImportAllModal({
           {loading ? (
             <div className="grid grid-cols-4 gap-2">
               {Array.from({ length: 12 }).map((_, i) => (
-                <div key={i} className="aspect-square rounded-lg bg-muted animate-pulse" />
+                <div
+                  key={i}
+                  className="aspect-square rounded-lg bg-muted animate-pulse"
+                />
               ))}
             </div>
           ) : data.items.length === 0 ? (
@@ -457,7 +497,7 @@ function ImportAllModal({
                     className="relative aspect-square rounded-lg overflow-hidden bg-muted"
                   >
                     <img
-                      src={`${API_BASE_URL}/api/device/ios-thumbnail?device_id=${item.abs_path.split("ios://")[1]?.split("/")[0]}&path=${encodeURIComponent("/" + item.abs_path.split("ios://")[1]?.split("/").slice(1).join("/"))}&size=150`}
+                      src={getPreviewThumbnailUrl(item.abs_path, null, 150)}
                       alt={item.filename}
                       className="w-full h-full object-cover"
                       loading="lazy"
@@ -467,7 +507,9 @@ function ImportAllModal({
                     </div>
                     <div className="absolute top-1 right-1 flex items-center gap-1">
                       {item.type === "video" && (
-                        <span className="px-1 py-0.5 bg-black/50 text-[9px] rounded">Video</span>
+                        <span className="px-1 py-0.5 bg-black/50 text-[9px] rounded">
+                          Video
+                        </span>
                       )}
                     </div>
                   </div>
@@ -578,7 +620,14 @@ function SourcePreviewPanelInner({
   const gridRef = useRef<HTMLDivElement>(null);
   const thumbQueueRef = useRef<ThumbQueue>(createThumbQueue(4));
 
-  const [isRecursive, setIsRecursive] = useState(false);
+  const isDefaultRecursive = Boolean(
+    deviceSource &&
+      (!deviceSource.device_path ||
+        deviceSource.device_path === "/" ||
+        deviceSource.device_path === "/DCIM" ||
+        deviceSource.device_path.replace(/\/+$/, "") === "/DCIM"),
+  );
+  const [isRecursive, setIsRecursive] = useState(isDefaultRecursive);
   const isImportingAllRef = useRef(false);
   const prevSourceKeyRef = useRef("");
   const currentSourceKey = `${sourcePath || ""}:${deviceSource?.device_id || ""}:${deviceSource?.device_path || ""}`;
@@ -586,10 +635,17 @@ function SourcePreviewPanelInner({
   useEffect(() => {
     if (prevSourceKeyRef.current !== currentSourceKey) {
       prevSourceKeyRef.current = currentSourceKey;
-      setIsRecursive(false);
+      const shouldRecurse = Boolean(
+        deviceSource &&
+          (!deviceSource.device_path ||
+            deviceSource.device_path === "/" ||
+            deviceSource.device_path === "/DCIM" ||
+            deviceSource.device_path.replace(/\/+$/, "") === "/DCIM"),
+      );
+      setIsRecursive(shouldRecurse);
       setPage(1);
     }
-  }, [currentSourceKey]);
+  }, [currentSourceKey, deviceSource]);
 
   function getPreviewUrl(pageNum: number, pageSize: number, sort: string) {
     if (deviceSource) {
@@ -616,19 +672,11 @@ function SourcePreviewPanelInner({
   }
 
   function getThumbnailUrl(item: MediaPreviewItem) {
-    if (deviceSource) {
-      const virtualPath = item.abs_path.replace(
-        `ios://${deviceSource.device_id}`,
-        "",
-      );
-      const p = new URLSearchParams({
-        device_id: deviceSource.device_id,
-        path: virtualPath,
-        size: String(THUMBNAIL_SIZE),
-      });
-      return `${API_BASE_URL}/api/device/ios-thumbnail?${p}`;
-    }
-    return `${API_BASE_URL}/api/device/thumbnail?path=${encodeURIComponent(item.abs_path)}&size=${THUMBNAIL_SIZE}`;
+    return getPreviewThumbnailUrl(
+      item.abs_path,
+      deviceSource?.device_id,
+      THUMBNAIL_SIZE,
+    );
   }
 
   useEffect(() => {
@@ -847,11 +895,18 @@ function SourcePreviewPanelInner({
       selectedRef.current = nextSelected;
       setSelected(nextSelected);
 
+      // Open import modal preview with summary and thumbnail grid
+      setImportAllData({
+        items: loadedItems,
+        total: data.total || loadedItems.length,
+        photos: data.photos || 0,
+        videos: data.videos || 0,
+        totalSize: data.total_size_bytes || 0,
+        path: deviceSource?.device_path || sourcePath || "",
+      });
+
       // Confirm selection to parent
       onSelectionConfirm(allPaths);
-
-      // Notify parent to show toast or start transfer
-      onTransferStart?.(allPaths);
     } catch (err) {
       setPreviewError(
         err instanceof Error ? err.message : "Failed to load preview",

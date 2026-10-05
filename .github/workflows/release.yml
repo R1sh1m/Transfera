@@ -168,20 +168,23 @@ jobs:
         run: npm run tauri:build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Generate and Verify SHA256 Checksums
         shell: pwsh
         run: |
           $releaseDir = "frontend/release"
-          $tauriBundleDir = "frontend/src-tauri/target/release/bundle/nsis"
+          $tauriBundleDir = "frontend/src-tauri/target/release/bundle"
           # The release dir is gitignored and never checked out — create it
           # before collecting (Copy-Item fails with "could not find a part
           # of the path" otherwise).
           New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-          # Collect the Tauri NSIS output. Its default name
-          # (Transfera_<ver>_x64-setup.exe) is the only installer artifact.
-          $tauriExes = Get-ChildItem -Path $tauriBundleDir -Include "*.exe" -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "Transfera*" }
-          $tauriExes | ForEach-Object { Copy-Item $_.FullName (Join-Path $releaseDir $_.Name) -Force; Write-Host "Collected Tauri installer: $($_.Name)" }
+          
+          # Collect the Tauri installer, updater zip, signature, and manifest
+          $assets = Get-ChildItem -Path $tauriBundleDir -Include "*.exe", "*.zip", "*.sig", "latest.json" -File -Recurse -ErrorAction SilentlyContinue
+          $assets | ForEach-Object { Copy-Item $_.FullName (Join-Path $releaseDir $_.Name) -Force; Write-Host "Collected release asset: $($_.Name)" }
+          
           $files = @()
           $files += Get-ChildItem -Path $releaseDir -Include "Transfera_*-setup.exe" -File -Recurse -ErrorAction SilentlyContinue
           if ($files.Count -eq 0) {
@@ -225,6 +228,9 @@ jobs:
         with:
           files: |
             frontend/release/Transfera_*-setup.exe
+            frontend/release/Transfera_*.zip
+            frontend/release/Transfera_*.sig
+            frontend/release/latest.json
             frontend/release/SHA256SUMS.txt
           generate_release_notes: true
           draft: false

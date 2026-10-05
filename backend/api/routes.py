@@ -24,7 +24,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import joinedload
 
 from backend.api import websocket as ws_events
-from backend.api.auth import require_local_token
+from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.api.rate_limit import per_session_rate_limit
 from backend.api.schemas import (
     BatchInfo,
@@ -3582,7 +3582,7 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
 async def get_session_report(
     session_id: int,
     fmt: str = Query("html", pattern="^(html|json)$"),
-    _: None = Depends(require_local_token),
+    _: None = Depends(require_local_token_or_query),
 ):
     """Serve the session report file (HTML or JSON)."""
     async with session_scope() as session:

@@ -16,6 +16,7 @@ import { useSessionList } from "@/lib/queries";
 import { StatusBadge } from "@/pages/DashboardPage";
 import { cn, parseBackendDate } from "@/lib/utils";
 import { isDesktop, openPath } from "@/lib/desktop";
+import { getLocalToken } from "@/lib/api-client";
 import type { SessionInfo } from "@/types/api";
 
 // ---------------------------------------------------------------------------
@@ -83,7 +84,12 @@ function handleOpenReport(session: SessionInfo) {
   if (isDesktop) {
     openPath(session.session_report_path);
   } else {
-    window.open(`/api/sessions/${session.id}/report?fmt=html`, "_blank");
+    const token = getLocalToken();
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
+    window.open(
+      `/api/sessions/${session.id}/report?fmt=html${tokenParam}`,
+      "_blank",
+    );
   }
 }
 

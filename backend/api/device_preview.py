@@ -20,7 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from backend.api.auth import require_local_token
+from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.device_backend import DeviceLockedError, DeviceNotTrustedError, DeviceStatus, WpdDeviceAccessDenied
 from backend.ios_device import read_device_file
 from backend.tier2_manager import get_device_manager
@@ -515,7 +515,7 @@ async def preview_directory(
 async def device_thumbnail(
     path: str = Query(..., description="Absolute path of the source file"),
     size: int = Query(200, ge=32, le=512),
-    _: None = Depends(require_local_token),
+    _: None = Depends(require_local_token_or_query),
 ):
     abs_path = os.path.abspath(path)
 
@@ -741,7 +741,7 @@ async def ios_thumbnail(
     device_id: str = Query(...),
     path: str = Query(..., description="Virtual path on device, e.g. /DCIM/100APPLE/IMG_0042.HEIC"),
     size: int = Query(200, ge=32, le=512),
-    _: None = Depends(require_local_token),
+    _: None = Depends(require_local_token_or_query),
 ):
     if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
         raise HTTPException(status_code=400, detail="Invalid device path")

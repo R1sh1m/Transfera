@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
-from backend.api.auth import require_local_token
+from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.main import create_app
 
 
@@ -22,6 +22,7 @@ def client():
         return None
 
     app.dependency_overrides[require_local_token] = _skip_auth
+    app.dependency_overrides[require_local_token_or_query] = _skip_auth
 
     with TestClient(app) as c:
         yield c
@@ -133,3 +134,23 @@ class TestDevicePreview:
         data = resp.json()
         assert data["total"] == 2
         assert {item["filename"] for item in data["items"]} == {"img1.jpg", "nested.png"}
+
+
+class TestSessionReportAuth:
+    def test_report_auth_rejects_without_token(self):
+        from backend.main import create_app
+
+        raw_app = create_app()
+        with TestClient(raw_app) as unauthed_client:
+            resp = unauthed_client.get("/api/sessions/9999/report?fmt=html")
+            assert resp.status_code == 403
+
+    def test_report_auth_accepts_query_token(self):
+        from backend.config import LOCAL_SECRET_TOKEN
+        from backend.main import create_app
+
+        raw_app = create_app()
+        with TestClient(raw_app) as unauthed_client:
+            # 404 means auth passed and proceeded to lookup non-existent session 9999
+            resp = unauthed_client.get(f"/api/sessions/9999/report?fmt=html&token={LOCAL_SECRET_TOKEN}")
+            assert resp.status_code == 404

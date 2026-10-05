@@ -37,6 +37,7 @@ import {
 import { API_BASE_URL } from "@/lib/api-client";
 import { useHealth } from "@/lib/queries";
 import type { UIState } from "@/store/transfer";
+import AppUpdateNotification from "@/components/AppUpdateNotification";
 
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const DeviceSetupPage = lazy(() => import("@/pages/DeviceSetupPage"));
@@ -572,6 +573,7 @@ export default function App() {
       </PageErrorBoundary>
       <CloseGuardModal />
       <NotificationToast />
+      <AppUpdateNotification />
       <BackendDownScreen />
       <BackendRecoveryWatcher />
       <DeviceWatcher />
