@@ -682,6 +682,30 @@ async def read_device_file(serial: str, path: str) -> bytes:
         return await asyncio.to_thread(afc.get_file_contents, path)
 
 
+async def read_device_file_partial(serial: str, path: str, max_bytes: int) -> bytes | None:
+    """
+    Read only the first *max_bytes* bytes of a file on the iOS device.
+
+    Thumbnail fast path: iOS HEIC/JPEG files embed a small JPEG preview in
+    their EXIF header, which sits in the first ~128 KB. Uses a pooled AFC
+    session (no per-call handshake). Returns None on any failure.
+    """
+    try:
+        async with pooled_afc_service(serial) as afc:
+            handle = await asyncio.to_thread(lambda: afc.fopen(path))
+            try:
+                data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))
+                return data if data else None
+            finally:
+                try:
+                    await asyncio.to_thread(lambda: afc.fclose(handle))
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("read_device_file_partial failed for %s: %s", path, exc)
+        return None
+
+
 async def get_device_info(serial: str) -> dict[str, str]:
     """Get device filesystem info (total capacity, free space, etc.)."""
     async with pooled_afc_service(serial) as afc:

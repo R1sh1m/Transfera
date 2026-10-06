@@ -51,23 +51,12 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
     the first ~128 KB of the file.  Reading 256 KB instead of the full 4–8 MB
     is ~20–30× faster over USB.
 
+    Routes through the unified manager so Tier 1 (pooled AFC), WPD (helper
+    --offset/--length) and Tier 2 (full-read fallback) are all handled.
     Returns bytes on success, None on failure.
     """
     try:
-        import asyncio
-
-        from backend.ios_device import pooled_afc_service
-
-        async with pooled_afc_service(device_id) as afc:
-            handle = await asyncio.to_thread(lambda: afc.fopen(path))
-            try:
-                data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))  # type: ignore[arg-type]
-                return data if data else None
-            finally:
-                try:
-                    await asyncio.to_thread(lambda: afc.fclose(handle))
-                except Exception:
-                    pass
+        return await get_device_manager().read_device_file_partial(device_id, path, max_bytes)
     except Exception as exc:
         logger.debug("_read_device_file_partial failed for %s: %s", path, exc)
         return None

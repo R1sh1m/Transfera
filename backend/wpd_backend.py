@@ -403,6 +403,27 @@ class WpdBackend:
         finally:
             await reader.close()
 
+    async def read_partial(self, serial: str, path: str, max_bytes: int) -> bytes | None:
+        """Read up to *max_bytes* from the start of a file (thumbnail fast path)."""
+        clean_path = path.strip("/") or "."
+        stdout, _ = await self._run(
+            [
+                "read-file",
+                "--device",
+                serial,
+                "--path",
+                clean_path,
+                "--offset",
+                "0",
+                "--length",
+                str(max(0, max_bytes)),
+            ],
+            timeout=_BROWSE_TIMEOUT,
+        )
+        if not stdout:
+            return None
+        return bytes(stdout[:max_bytes]) if len(stdout) > max_bytes else bytes(stdout)
+
     def create_file_reader(self, serial: str, path: str, size: int = 0):  # type: ignore[override]
         """
         Create a streaming async file reader backed by a wpd_helper subprocess.

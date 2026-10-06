@@ -244,6 +244,15 @@ class DeviceBackend(ABC):
         ...
 
     @abstractmethod
+    async def read_partial(self, serial: str, path: str, max_bytes: int) -> bytes | None:
+        """Read up to *max_bytes* from the start of a file (thumbnail fast path).
+
+        Returns None when a prefix read is unsupported or fails; callers
+        fall back to a full read.
+        """
+        ...
+
+    @abstractmethod
     def create_file_reader(self, serial: str, path: str) -> Any:
         """
         Create an async file-like reader for streaming large files.
@@ -296,6 +305,11 @@ class Tier1Backend(DeviceBackend):
 
     async def read_file(self, serial: str, path: str) -> bytes:
         return await _read_tier1(serial, path)
+
+    async def read_partial(self, serial: str, path: str, max_bytes: int) -> bytes | None:
+        from backend.ios_device import read_device_file_partial as _read_partial_tier1
+
+        return await _read_partial_tier1(serial, path, max_bytes)
 
     def create_file_reader(self, serial: str, path: str) -> Any:
         return AFCFileReader(serial, path)
@@ -472,6 +486,18 @@ class Tier2Backend(DeviceBackend):
                     detail = (await resp.text())[:200]
                 raise RuntimeError(f"File read failed (HTTP {resp.status}): {detail}")
             return await resp.read()
+
+    async def read_partial(self, serial: str, path: str, max_bytes: int) -> bytes | None:
+        # No range endpoint on the bridge: full download, prefix-kept.
+        # Same bytes a full thumbnail read would use today, just truncated
+        # before the EXIF/Pillow stage.
+        try:
+            data = await self.read_file(serial, path)
+        except Exception:
+            return None
+        if not data:
+            return None
+        return data[:max_bytes] if len(data) > max_bytes else data
 
     def create_file_reader(self, serial: str, path: str) -> Any:  # type: ignore[override]
         if self._bridge_url is not None:
@@ -1425,6 +1451,21 @@ class DeviceBackendManager:
             return await backend.read_file(serial, p)
 
         return await self._run_operation(serial, "read", _read, normalised_path)
+
+    async def read_device_file_partial(
+        self,
+        serial: str,
+        path: str,
+        max_bytes: int,
+    ) -> bytes | None:
+        """Read a file prefix with automatic 3-step fallback (thumbnail fast path)."""
+
+        normalised_path = path.replace("\\", "/")
+
+        async def _read_partial(backend: DeviceBackend, p: str):
+            return await backend.read_partial(serial, p, max_bytes)
+
+        return await self._run_operation(serial, "read_partial", _read_partial, normalised_path)
 
     def create_file_reader(self, serial: str, path: str) -> Any:
         """

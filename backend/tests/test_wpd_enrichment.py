@@ -87,3 +87,28 @@ async def test_enrichment_skips_ids_without_udid(monkeypatch):
     assert dev.ios_version == "unknown"
     assert dev.model == "Apple Inc."
     mock.assert_awaited_once()
+
+
+async def test_read_partial_passes_range_flags_and_truncates(monkeypatch):
+    seen = {}
+
+    async def _fake_run(self, args, timeout=30):
+        seen["args"] = args
+        return b"0123456789abcdef", b""
+
+    backend = _make_backend(monkeypatch, _helper_payload())
+    monkeypatch.setattr(WpdBackend, "_run", _fake_run)
+    data = await backend.read_partial("SOME-ID", "/DCIM/a.jpg", 4)
+    assert data == b"0123"
+    assert "--length" in seen["args"] and "4" in seen["args"]
+    assert "--offset" in seen["args"] and "0" in seen["args"]
+    assert "DCIM/a.jpg" in seen["args"]
+
+
+async def test_read_partial_empty_is_none(monkeypatch):
+    async def _fake_run(self, args, timeout=30):
+        return b"", b""
+
+    backend = _make_backend(monkeypatch, _helper_payload())
+    monkeypatch.setattr(WpdBackend, "_run", _fake_run)
+    assert await backend.read_partial("SOME-ID", "/DCIM/a.jpg", 8) is None

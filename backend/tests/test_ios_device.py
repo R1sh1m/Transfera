@@ -254,3 +254,36 @@ async def test_afc_pool_evicts_idle_slots(monkeypatch):
     await browse_device_directory("SERIAL-123", "/DCIM")
     assert calls["create"] == 2
     _AFC_POOL.clear()
+
+
+class _FakeAfcPartial(_FakeAfc):
+    def __init__(self, payload: bytes = b"0123456789abcdef"):
+        super().__init__()
+        self._payload = payload
+        self.handles = 0
+
+    def fopen(self, path):
+        self.handles += 1
+        return {"path": path}
+
+    def fread(self, handle, n):
+        return self._payload[:n]
+
+    def fclose(self, handle):
+        pass
+
+
+async def test_read_device_file_partial_uses_pool(monkeypatch):
+    """Prefix reads come back truncated without per-call handshakes."""
+    from backend.ios_device import _AFC_POOL, read_device_file_partial
+
+    _AFC_POOL.clear()
+    calls = _patch_afc(monkeypatch)
+
+    import pymobiledevice3.services.afc as _afc_mod
+
+    monkeypatch.setattr(_afc_mod, "AfcService", lambda **_kw: _FakeAfcPartial())
+    assert await read_device_file_partial("SERIAL-123", "/DCIM/a.jpg", 4) == b"0123"
+    assert await read_device_file_partial("SERIAL-123", "/DCIM/b.jpg", 99) == b"0123456789abcdef"
+    assert calls["create"] == 1
+    _AFC_POOL.clear()

@@ -46,6 +46,7 @@ class _StubBackend:
             return_value=DeviceFileInfo(name="test.txt", path="/DCIM/test.txt", is_dir=False, size=100, mtime=0),
         )
         self.read_file = AsyncMock(return_value=b"file contents")
+        self.read_partial = AsyncMock(return_value=b"part")
         self.list_devices = AsyncMock(
             return_value=[
                 IOSDevice(
@@ -162,6 +163,22 @@ async def test_browse_device_with_special_characters_in_serial():
     stub.browse.assert_awaited_once()
     args = stub.browse.call_args
     assert args.args[0] == real_id, f"Serial with special chars was not forwarded correctly: {args.args[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_read_partial_forwards_serial_path_and_limit():
+    """read_device_file_partial must pass (serial, path, max_bytes) through."""
+    stub = _StubBackend()
+    manager = _make_manager(stub)
+
+    result = await manager.read_device_file_partial("MY_DEVICE", "/DCIM/photo.jpg", 256)
+
+    stub.read_partial.assert_awaited_once()
+    args = stub.read_partial.call_args
+    assert args.args == ("MY_DEVICE", "/DCIM/photo.jpg", 256), (
+        f"Expected read_partial('MY_DEVICE', '/DCIM/photo.jpg', 256), got {args}"
+    )
+    assert result == b"part"
 
 
 async def main():

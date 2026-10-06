@@ -922,6 +922,32 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                     );
                   })}
 
+                  {/* Apple driver blind spot — usbmux sees nothing but WPD has the phone */}
+                  {iosDevices?.driver_status === "ready" &&
+                    readyDevices.some(
+                      (d) =>
+                        d.active_tier === "wpd" &&
+                        /apple|iphone|ipad|vid_05ac/i.test(
+                          `${d.name} ${d.model}`,
+                        ),
+                    ) &&
+                    !readyDevices.some((d) => d.active_tier === "tier1") && (
+                      <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-3.5">
+                        <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                        <div>
+                          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                            iPhone on USB, but the Apple driver can&apos;t see
+                            it
+                          </p>
+                          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                            Unlock your iPhone and unplug/replug it — previews
+                            and transfers are much faster over the Apple driver
+                            than USB fallback.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
                   {/* Prefer Tier 2 setting — only show when Apple driver is not already actively handling devices */}
                   {backendActiveTier !== "tier1" &&
                     readyDevices.every((d) => d.active_tier !== "tier1") && (

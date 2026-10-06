@@ -6,7 +6,7 @@
 // Subcommands:
 //   list-devices
 //   list-folder --device <id> --path <virtual_path>
-//   read-file   --device <id> --path <virtual_path>
+//   read-file   --device <id> --path <virtual_path> [--offset N] [--length N]
 //
 // Build: see CMakeLists.txt or build.bat in this directory.
 // Requires: Windows 10/11 with WPD components (standard install).
@@ -990,7 +990,7 @@ static int DoDebugTest(PCWSTR deviceId, PCWSTR virtualPath) {
 // ---------------------------------------------------------------------------
 // read-file subcommand
 // ---------------------------------------------------------------------------
-static int DoReadFile(PCWSTR deviceId, PCWSTR virtualPath) {
+static int DoReadFile(PCWSTR deviceId, PCWSTR virtualPath, ULONGLONG offset, ULONGLONG length) {
     // Switch stdout to binary mode BEFORE any output or COM calls that could
     // write to stdout. This prevents the C runtime from translating byte
     // sequences that look like line endings (\r\n, \n, \r, 0x1A) — which
@@ -1037,21 +1037,26 @@ static int DoReadFile(PCWSTR deviceId, PCWSTR virtualPath) {
         return 1;
     }
 
-    // Use the optimal transfer size if the driver provides one, otherwise
-    // default to 256 KB. The driver's suggestion is ideal because it's
-    // tuned to the device's USB transfer characteristics. If the driver
-    // doesn't report one (rare but possible), 256 KB is a reasonable
-    // middle ground: large enough to avoid excessive Read() system call
-    // overhead, small enough to avoid memory pressure, and well within
-    // typical USB transfer buffer sizes.
+    // Optional byte range (thumbnail fast path): cap the total bytes
+    // streamed. length == 0 means "to end of stream". NOTE: MTP resource
+    // streams are forward-only (Seek returns E_NOTIMPL), so a nonzero
+    // offset is implemented by reading and discarding — still correct,
+    // just not faster. Thumbnail callers always use offset 0.
     DWORD bufferSize = (optimalTransferSize > 0) ? optimalTransferSize : (256 * 1024);
 
     std::vector<BYTE> buffer(bufferSize);
     ULONG bytesRead = 0;
     size_t totalWritten = 0;
+    ULONGLONG toSkip = offset;
+    ULONGLONG remaining = length;
 
     do {
-        hr = dataStream->Read(buffer.data(), bufferSize, &bytesRead);
+        DWORD toRead = bufferSize;
+        if (toSkip == 0 && length > 0) {
+            if (remaining == 0) break;
+            if (remaining < toRead) toRead = (DWORD)remaining;
+        }
+        hr = dataStream->Read(buffer.data(), toRead, &bytesRead);
         if (FAILED(hr)) {
             _setmode(_fileno(stdout), prevMode);
             ReportError("stream_error", L"Error reading data stream", hr);
@@ -1059,6 +1064,23 @@ static int DoReadFile(PCWSTR deviceId, PCWSTR virtualPath) {
         }
 
         if (bytesRead > 0) {
+            if (toSkip > 0) {
+                ULONGLONG skipNow = bytesRead < toSkip ? bytesRead : (ULONG)toSkip;
+                toSkip -= skipNow;
+                if (skipNow == bytesRead) continue;
+                // Partial chunk straddles the offset: emit the tail.
+                size_t tailOff = (size_t)skipNow;
+                size_t tailLen = (size_t)(bytesRead - skipNow);
+                size_t written = fwrite(buffer.data() + tailOff, 1, tailLen, stdout);
+                if (written != tailLen) {
+                    _setmode(_fileno(stdout), prevMode);
+                    ReportError("write_error", L"Failed to write all bytes to stdout", E_FAIL);
+                    return 1;
+                }
+                totalWritten += written;
+                if (length > 0) remaining -= tailLen;
+                continue;
+            }
             size_t written = fwrite(buffer.data(), 1, bytesRead, stdout);
             if (written != bytesRead) {
                 _setmode(_fileno(stdout), prevMode);
@@ -1066,6 +1088,7 @@ static int DoReadFile(PCWSTR deviceId, PCWSTR virtualPath) {
                 return 1;
             }
             totalWritten += written;
+            if (length > 0) remaining -= bytesRead;
         }
     } while (bytesRead > 0);
 
@@ -1082,6 +1105,8 @@ struct Args {
     std::wstring command;
     std::wstring deviceId;
     std::wstring path;
+    ULONGLONG offset = 0;
+    ULONGLONG length = 0;  // 0 = to end of stream
 };
 
 static int ParseArgs(int argc, wchar_t* argv[], Args& args) {
@@ -1095,6 +1120,10 @@ static int ParseArgs(int argc, wchar_t* argv[], Args& args) {
             args.deviceId = argv[++i];
         } else if ((arg == L"--path" || arg == L"-p") && i + 1 < argc) {
             args.path = argv[++i];
+        } else if (arg == L"--offset" && i + 1 < argc) {
+            args.offset = _wcstoui64(argv[++i], nullptr, 10);
+        } else if (arg == L"--length" && i + 1 < argc) {
+            args.length = _wcstoui64(argv[++i], nullptr, 10);
         } else {
             return -1;
         }
@@ -1121,7 +1150,7 @@ int wmain(int argc, wchar_t* argv[]) {
         fputs("  wpd_helper.exe list-devices\n", stderr);
         fputs("  wpd_helper.exe debug-test --device <device_id> --path <virtual_path>\n", stderr);
         fputs("  wpd_helper.exe list-folder --device <device_id> --path <virtual_path>\n", stderr);
-        fputs("  wpd_helper.exe read-file --device <device_id> --path <virtual_path>\n", stderr);
+        fputs("  wpd_helper.exe read-file --device <device_id> --path <virtual_path> [--offset N] [--length N]\n", stderr);
         return 1;
     }
 
@@ -1144,7 +1173,7 @@ int wmain(int argc, wchar_t* argv[]) {
             ReportError("invalid_args", L"--device and --path are required for read-file");
             return 1;
         }
-        return DoReadFile(args.deviceId.c_str(), args.path.c_str());
+        return DoReadFile(args.deviceId.c_str(), args.path.c_str(), args.offset, args.length);
     } else {
         ReportError("invalid_command", L"Unknown command: " + args.command);
         return 1;
