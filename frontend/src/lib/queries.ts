@@ -587,6 +587,10 @@ export function usePreflightValidate(
         sourceRef
           ? { source_ref: sourceRef, dest_path: destPath! }
           : { source_path: sourcePath || "", dest_path: destPath! },
+        // Device sources walk thousands of files over AFC/USB — the global
+        // 30 s client timeout is routinely too short. Failures surface via
+        // the banner's Retry button instead of hanging the setup flow.
+        { timeout: 120000 },
       );
       return data;
     },

@@ -635,7 +635,8 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                       No devices detected yet
                                     </p>
                                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                                      Connect your iPhone, iPad, Android phone, or Digital Camera using a USB cable.
+                                      Connect your iPhone, iPad, Android phone,
+                                      or Digital Camera using a USB cable.
                                     </p>
                                   </div>
                                 </div>
@@ -659,7 +660,9 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                               <div className="p-3 bg-muted/40 dark:bg-muted/20 border border-border rounded-xl text-xs space-y-2">
                                 <p className="font-semibold text-foreground text-[11px] uppercase tracking-wider flex items-center justify-between">
                                   <span>Device Connection Checklist</span>
-                                  <span className="text-[10px] text-muted-foreground font-normal lowercase">iOS &middot; Android &middot; Cameras</span>
+                                  <span className="text-[10px] text-muted-foreground font-normal lowercase">
+                                    iOS &middot; Android &middot; Cameras
+                                  </span>
                                 </p>
                                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5 text-[11px]">
                                   {/* iPhone / iPad */}
@@ -669,7 +672,9 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                     </p>
                                     <ul className="text-muted-foreground space-y-0.5 list-disc list-inside text-[10.5px]">
                                       <li>Screen unlocked with passcode</li>
-                                      <li>Tap <em>Trust This Computer</em></li>
+                                      <li>
+                                        Tap <em>Trust This Computer</em>
+                                      </li>
                                       <li>Data-capable USB cable</li>
                                     </ul>
                                   </div>
@@ -681,7 +686,10 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                     </p>
                                     <ul className="text-muted-foreground space-y-0.5 list-disc list-inside text-[10.5px]">
                                       <li>Screen unlocked</li>
-                                      <li>USB: <strong>File Transfer (MTP)</strong></li>
+                                      <li>
+                                        USB:{" "}
+                                        <strong>File Transfer (MTP)</strong>
+                                      </li>
                                       <li>Avoid "Charging only" mode</li>
                                     </ul>
                                   </div>
@@ -693,7 +701,9 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                     </p>
                                     <ul className="text-muted-foreground space-y-0.5 list-disc list-inside text-[10.5px]">
                                       <li>Power camera ON</li>
-                                      <li>Set USB Mode to <strong>MTP/PTP</strong></li>
+                                      <li>
+                                        Set USB Mode to <strong>MTP/PTP</strong>
+                                      </li>
                                       <li>Or insert SD card in reader</li>
                                     </ul>
                                   </div>
@@ -750,7 +760,11 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                       Apple Support (For iPhones &amp; iPads)
                                     </p>
                                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                                      Install Apple Mobile Device Support to transfer files from iOS devices. Android phones, digital cameras, and USB drives work natively with built-in Windows drivers.
+                                      Install Apple Mobile Device Support to
+                                      transfer files from iOS devices. Android
+                                      phones, digital cameras, and USB drives
+                                      work natively with built-in Windows
+                                      drivers.
                                     </p>
                                   </div>
                                   <DriverInstallerInline />
@@ -777,7 +791,8 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                     const meta = getDeviceMeta(device);
                     const isSelected =
                       sourceRef?.type === "device" &&
-                      sourceRef.device_id.toLowerCase() === device.serial.toLowerCase();
+                      sourceRef.device_id.toLowerCase() ===
+                        device.serial.toLowerCase();
                     return (
                       <button
                         key={device.serial}
@@ -797,11 +812,17 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                           )}
                         >
                           {meta.iconType === "tablet" ? (
-                            <Tablet className={cn("w-4 h-4", meta.accentColor.text)} />
+                            <Tablet
+                              className={cn("w-4 h-4", meta.accentColor.text)}
+                            />
                           ) : meta.iconType === "camera" ? (
-                            <Camera className={cn("w-4 h-4", meta.accentColor.text)} />
+                            <Camera
+                              className={cn("w-4 h-4", meta.accentColor.text)}
+                            />
                           ) : (
-                            <Smartphone className={cn("w-4 h-4", meta.accentColor.text)} />
+                            <Smartphone
+                              className={cn("w-4 h-4", meta.accentColor.text)}
+                            />
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
@@ -824,7 +845,9 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                             {meta.categoryLabel}
                             {device.ios_version &&
                             device.ios_version.toLowerCase() !== "unknown" &&
-                            !device.ios_version.toLowerCase().includes("android")
+                            !device.ios_version
+                              .toLowerCase()
+                              .includes("android")
                               ? ` · iOS ${device.ios_version}`
                               : null}
                           </p>
@@ -1753,7 +1776,7 @@ function PreflightMetrics({
     ["running", "paused"].includes(s.transfer.status),
   );
   const sourcePath = sourceRef?.type === "local_folder" ? sourceRef.path : null;
-  const { data, isLoading, isError, error } = usePreflightValidate(
+  const { data, isLoading, isError, error, refetch } = usePreflightValidate(
     sourcePath,
     destPath || null,
     sourceRef?.type === "device" ? sourceRef : null,
@@ -1785,11 +1808,18 @@ function PreflightMetrics({
             {isError && !isLoading && (
               <div className="flex items-center gap-3 text-sm text-muted-foreground">
                 <AlertTriangle className="w-4 h-4 text-amber-500" />
-                <span>
+                <span className="flex-1">
                   {(error as any)?.response?.data?.detail ||
                     (error as Error)?.message ||
                     "Unable to calculate disk metrics. Check that both paths exist."}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => refetch()}
+                  className="px-2.5 py-1 text-xs text-primary hover:text-primary/80 border border-border rounded-full transition-colors shrink-0"
+                >
+                  Retry
+                </button>
               </div>
             )}
 
@@ -2175,9 +2205,9 @@ export default function DeviceSetupPage() {
   );
 
   const handleSelectionConfirm = useCallback(
-    (paths: string[]) => {
+    (paths: string[], quiet?: boolean) => {
       setSelectedFiles(paths);
-      if (paths.length === 0) {
+      if (paths.length === 0 && !quiet) {
         showNotification(
           "info",
           "Selection cleared — all files will be transferred.",

@@ -132,3 +132,31 @@ def test_local_thumbnail_query_token(test_client):
     assert bad.status_code == 403
     good = test_client.get("/api/device/thumbnail", params={"path": "/nope.jpg", "token": LOCAL_SECRET_TOKEN})
     assert good.status_code == 200
+
+
+def test_disk_thumb_key_stable_and_sensitive():
+    from backend.api import device_preview as _dp
+
+    k1 = _dp._device_thumb_disk_key("dev", "/DCIM/a.jpg", 200, 100, 1.0)
+    assert k1 == _dp._device_thumb_disk_key("dev", "/DCIM/a.jpg", 200, 100, 1.0)
+    assert k1 != _dp._device_thumb_disk_key("dev", "/DCIM/a.jpg", 200, 101, 1.0)
+    assert k1 != _dp._device_thumb_disk_key("dev", "/DCIM/a.jpg", 200, 100, 2.0)
+    assert k1 != _dp._device_thumb_disk_key("dev", "/DCIM/b.jpg", 200, 100, 1.0)
+
+
+def test_disk_thumb_roundtrip_and_sweep(tmp_path, monkeypatch):
+    import backend.config as _config
+    from backend.api import device_preview as _dp
+
+    monkeypatch.setattr(_config, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(_dp, "_DEVICE_THUMB_DISK_MAX_FILES", 3)
+    assert _dp._read_disk_thumb("nope.jpg") is None
+    payload = b"\xff\xd8" + b"x" * 100
+    _dp._write_disk_thumb("a.jpg", payload)
+    assert _dp._read_disk_thumb("a.jpg") == payload
+    # Over the file cap -> oldest evicted, newest kept.
+    _dp._write_disk_thumb("b.jpg", payload)
+    _dp._write_disk_thumb("c.jpg", payload)
+    _dp._write_disk_thumb("d.jpg", payload)
+    assert _dp._read_disk_thumb("a.jpg") is None
+    assert _dp._read_disk_thumb("d.jpg") == payload

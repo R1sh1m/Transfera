@@ -157,3 +157,100 @@ async def test_query_lockdown_versions_empty_without_usbmux(monkeypatch):
 
     monkeypatch.setattr(_usbmux_mod, "list_devices", lambda: [])
     assert await query_lockdown_versions() == {}
+
+
+class _FakeAfc:
+    """Fake AFC service recording how many instances were created."""
+
+    created = 0
+
+    def __init__(self):
+        type(self).created += 1
+        self.closed = False
+
+    def listdir(self, path):
+        return ["IMG_1.JPG"]
+
+    def stat(self, path):
+        return {"st_ifmt": "S_IFREG", "st_size": 10, "st_mtime": 0}
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePooledLockdown:
+    def close(self):
+        pass
+
+
+def _patch_afc(monkeypatch, lockdown_factory=None):
+    import pymobiledevice3.lockdown as _lockdown_mod
+    import pymobiledevice3.services.afc as _afc_mod
+
+    calls = {"create": 0}
+
+    def _fake_create(*_args, **_kwargs):
+        calls["create"] += 1
+        if lockdown_factory is not None:
+            return lockdown_factory()
+        return _FakePooledLockdown()
+
+    monkeypatch.setattr(_lockdown_mod, "create_using_usbmux", _fake_create)
+    monkeypatch.setattr(_afc_mod, "AfcService", lambda **_kw: _FakeAfc())
+    return calls
+
+
+async def test_afc_pool_reuses_session(monkeypatch):
+    """Three sequential browses pay one handshake, not three."""
+    from backend.ios_device import _AFC_POOL
+
+    _AFC_POOL.clear()
+    _FakeAfc.created = 0
+    calls = _patch_afc(monkeypatch)
+    for _ in range(3):
+        entries = await browse_device_directory("SERIAL-123", "/DCIM")
+        assert [e.name for e in entries] == ["IMG_1.JPG"]
+    assert calls["create"] == 1
+    assert _FakeAfc.created == 1
+    _AFC_POOL.clear()
+
+
+async def test_afc_pool_reconnects_after_failure(monkeypatch):
+    """A failed op drops its slot; the next op reconnects transparently."""
+    from backend.ios_device import _AFC_POOL
+
+    _AFC_POOL.clear()
+    calls = _patch_afc(monkeypatch)
+
+    import pymobiledevice3.services.afc as _afc_mod
+
+    broken = {"fail": True}
+
+    class _FlakyAfc(_FakeAfc):
+        def listdir(self, path):
+            if broken["fail"]:
+                raise RuntimeError("stale handle")
+            return ["IMG_1.JPG"]
+
+    monkeypatch.setattr(_afc_mod, "AfcService", lambda **_kw: _FlakyAfc())
+    with pytest.raises(RuntimeError, match="stale handle"):
+        await browse_device_directory("SERIAL-123", "/DCIM")
+    broken["fail"] = False
+    entries = await browse_device_directory("SERIAL-123", "/DCIM")
+    assert [e.name for e in entries] == ["IMG_1.JPG"]
+    assert calls["create"] == 2
+    _AFC_POOL.clear()
+
+
+async def test_afc_pool_evicts_idle_slots(monkeypatch):
+    """Idle-expired slots are not reused."""
+    import backend.ios_device as _ios_mod
+    from backend.ios_device import _AFC_POOL
+
+    _AFC_POOL.clear()
+    calls = _patch_afc(monkeypatch)
+    monkeypatch.setattr(_ios_mod, "_AFC_IDLE_TTL_SECONDS", 0)
+    await browse_device_directory("SERIAL-123", "/DCIM")
+    await browse_device_directory("SERIAL-123", "/DCIM")
+    assert calls["create"] == 2
+    _AFC_POOL.clear()

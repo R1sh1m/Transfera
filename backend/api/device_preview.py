@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import threading
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -55,10 +56,9 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
     try:
         import asyncio
 
-        from backend.ios_device import _get_afc_service
+        from backend.ios_device import pooled_afc_service
 
-        afc, lockdown = await _get_afc_service(device_id)
-        try:
+        async with pooled_afc_service(device_id) as afc:
             handle = await asyncio.to_thread(lambda: afc.fopen(path))
             try:
                 data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))  # type: ignore[arg-type]
@@ -68,15 +68,6 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
                     await asyncio.to_thread(lambda: afc.fclose(handle))
                 except Exception:
                     pass
-        finally:
-            try:
-                afc.close()
-            except Exception:
-                pass
-            try:
-                lockdown.close()
-            except Exception:
-                pass
     except Exception as exc:
         logger.debug("_read_device_file_partial failed for %s: %s", path, exc)
         return None
@@ -151,6 +142,90 @@ def _put_thumb_cache(key: tuple[str, int], data: bytes) -> None:
         if len(_thumb_cache) >= _THUMB_CACHE_MAX:
             _thumb_cache.popitem(last=False)
         _thumb_cache[key] = data
+
+
+# ---------------------------------------------------------------------------
+# On-disk thumbnail cache (L2 behind the in-memory LRU above)
+# ---------------------------------------------------------------------------
+# Device thumbnails cost a USB round trip each; without persistence every app
+# restart (and every LRU overflow) re-downloads them all. Files are keyed by
+# device + path + size + file size/mtime (exact invalidation, zero extra
+# round trips — the listing already provides size/mtime). Best-effort: cache
+# failures never fail the request. Cap ~500 MB with oldest-first eviction.
+_DEVICE_THUMB_DISK_MAX_BYTES = 500 * 1024 * 1024
+_DEVICE_THUMB_DISK_MAX_FILES = 20000
+
+
+def _device_thumb_disk_dir() -> Path | None:
+    try:
+        from backend.config import CACHE_DIR
+
+        d = Path(CACHE_DIR) / "device_thumbs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception:
+        return None
+
+
+def _device_thumb_disk_key(
+    device_id: str, path: str, size: int, file_size: int | None, file_mtime: float | None
+) -> str:
+    raw = f"{device_id}\x00{path}\x00{size}\x00{file_size}\x00{file_mtime}".encode("utf-8", errors="replace")
+    return hashlib.sha256(raw).hexdigest() + ".jpg"
+
+
+def _read_disk_thumb(key: str) -> bytes | None:
+    try:
+        d = _device_thumb_disk_dir()
+        if d is None:
+            return None
+        p = d / key
+        if not p.is_file():
+            return None
+        data = p.read_bytes()
+        if len(data) <= 10:
+            return None
+        try:
+            p.touch()
+        except OSError:
+            pass
+        return data
+    except Exception:
+        return None
+
+
+def _write_disk_thumb(key: str, data: bytes) -> None:
+    try:
+        d = _device_thumb_disk_dir()
+        if d is None or not data or len(data) <= 10:
+            return
+        (d / key).write_bytes(data)
+        _sweep_disk_thumbs(d)
+    except Exception:
+        pass
+
+
+def _sweep_disk_thumbs(d: Path) -> None:
+    """Oldest-first eviction when over count/size caps. Best-effort."""
+    try:
+        files = [(p.stat().st_mtime, p.stat().st_size, p) for p in d.glob("*.jpg") if p.is_file()]
+    except OSError:
+        return
+    if len(files) <= _DEVICE_THUMB_DISK_MAX_FILES:
+        total = sum(s for _, s, _ in files)
+        if total <= _DEVICE_THUMB_DISK_MAX_BYTES:
+            return
+    files.sort(key=lambda t: t[0])
+    total = sum(s for _, s, _ in files)
+    for _, _, p in files:
+        if len(files) <= _DEVICE_THUMB_DISK_MAX_FILES and total <= _DEVICE_THUMB_DISK_MAX_BYTES:
+            break
+        try:
+            total -= p.stat().st_size
+            p.unlink()
+            files.pop(0)
+        except OSError:
+            break
 
 
 def _get_thumb_cache(key: tuple[str, int]) -> bytes | None:
@@ -741,6 +816,8 @@ async def ios_thumbnail(
     device_id: str = Query(...),
     path: str = Query(..., description="Virtual path on device, e.g. /DCIM/100APPLE/IMG_0042.HEIC"),
     size: int = Query(200, ge=32, le=512),
+    file_size: int | None = Query(None, description="Source file size (cache validation, from listing)"),
+    file_mtime: float | None = Query(None, description="Source file mtime (cache validation, from listing)"),
     _: None = Depends(require_local_token_or_query),
 ):
     if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
@@ -750,6 +827,15 @@ async def ios_thumbnail(
     if cached is not None:
         return Response(
             content=cached,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
+    disk_key = _device_thumb_disk_key(device_id, path, size, file_size, file_mtime)
+    disk_cached = _read_disk_thumb(disk_key)
+    if disk_cached is not None:
+        _put_thumb_cache(cache_key, disk_cached)
+        return Response(
+            content=disk_cached,
             media_type="image/jpeg",
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
@@ -821,6 +907,9 @@ async def ios_thumbnail(
 
     result = jpeg_bytes if (jpeg_bytes and len(jpeg_bytes) > 10) else _generate_gray_fallback()
     _put_thumb_cache(cache_key, result)
+    # Persist real thumbnails (not the gray fallback) for instant revisits.
+    if jpeg_bytes and len(jpeg_bytes) > 10:
+        _write_disk_thumb(disk_key, jpeg_bytes)
     return Response(
         content=result,
         media_type="image/jpeg",

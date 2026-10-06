@@ -14,8 +14,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
+import threading
+import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +452,139 @@ async def _get_afc_service(serial: str):
         raise RuntimeError(f"Failed to open AFC service: {exc}")
 
 
+# ---------------------------------------------------------------------------
+# Pooled AFC sessions (browse/thumbnail hot path)
+# ---------------------------------------------------------------------------
+# Every browse/read used to pay a full usbmux + lockdown + pairing handshake
+# per call (up to 10 s budget each) — thumbnailing a 100-photo folder meant
+# 100 handshakes. The pool keeps up to _AFC_POOL_SIZE live
+# (lockdown, AfcService) pairs per serial. pymobiledevice3 services are not
+# safe for concurrent use, so each slot has its own asyncio.Lock and a
+# caller holds it for the whole op (up to 4-way parallelism per device).
+# Slots idle past _AFC_IDLE_TTL_SECONDS are evicted lazily; a failed op
+# drops its slot so the next caller reconnects transparently.
+_AFC_POOL_SIZE = 4
+_AFC_IDLE_TTL_SECONDS = 120.0
+
+
+@dataclass
+class _PooledAfcSlot:
+    afc: Any
+    lockdown: Any
+    lock: asyncio.Lock
+    last_used: float
+    ephemeral: bool = False
+
+
+_AFC_POOL: dict[str, list[_PooledAfcSlot]] = {}
+_AFC_POOL_GUARD = threading.Lock()
+
+
+def _sweep_idle_afc_slots(serial: str, now: float) -> None:
+    """Close and remove idle-expired slots. Caller must hold _AFC_POOL_GUARD."""
+    slots = _AFC_POOL.get(serial)
+    if not slots:
+        return
+    live: list[_PooledAfcSlot] = []
+    for slot in slots:
+        if slot.lock.locked() or now - slot.last_used < _AFC_IDLE_TTL_SECONDS:
+            live.append(slot)
+            continue
+        for closable in (slot.afc, slot.lockdown):
+            try:
+                closable.close()
+            except Exception:
+                pass
+    if live:
+        _AFC_POOL[serial] = live
+    else:
+        _AFC_POOL.pop(serial, None)
+
+
+async def _acquire_afc_slot(serial: str) -> _PooledAfcSlot:
+    """Hand out a locked slot: pooled reuse, fresh pooled fill, or one-off.
+
+    Falls back to a non-pooled ephemeral connection when all pooled slots
+    are busy (same as legacy behavior) so callers never deadlock waiting.
+    """
+    now = time.monotonic()
+    with _AFC_POOL_GUARD:
+        _sweep_idle_afc_slots(serial, now)
+        slots = _AFC_POOL.get(serial, [])
+        for slot in slots:
+            if not slot.lock.locked():
+                slot.last_used = now
+                locked_slot = slot
+                break
+        else:
+            locked_slot = None
+        needs_new_pooled = locked_slot is None and len(slots) < _AFC_POOL_SIZE
+
+    if locked_slot is not None:
+        await locked_slot.lock.acquire()
+        return locked_slot
+
+    # Connect outside the guard (network I/O must never hold it).
+    afc, lockdown = await _get_afc_service(serial)
+    fresh = _PooledAfcSlot(afc=afc, lockdown=lockdown, lock=asyncio.Lock(), last_used=time.monotonic())
+    await fresh.lock.acquire()
+    if needs_new_pooled:
+        with _AFC_POOL_GUARD:
+            # Re-check under guard: a racer may have filled the pool first.
+            if len(_AFC_POOL.get(serial, [])) < _AFC_POOL_SIZE:
+                _AFC_POOL.setdefault(serial, []).append(fresh)
+                return fresh
+        # Lost the race: use it once, then close (never pool it).
+    fresh.ephemeral = True
+    return fresh
+
+
+def _release_afc_slot(serial: str, slot: _PooledAfcSlot) -> None:
+    slot.last_used = time.monotonic()
+    if slot.ephemeral:
+        for closable in (slot.afc, slot.lockdown):
+            try:
+                closable.close()
+            except Exception:
+                pass
+    try:
+        slot.lock.release()
+    except RuntimeError:
+        pass
+
+
+async def _drop_afc_slot(serial: str, slot: _PooledAfcSlot) -> None:
+    """Forget a suspect slot (op failed mid-use); the next caller reconnects."""
+    with _AFC_POOL_GUARD:
+        slots = _AFC_POOL.get(serial, [])
+        if slot in slots:
+            slots.remove(slot)
+        if not slots:
+            _AFC_POOL.pop(serial, None)
+    for closable in (slot.afc, slot.lockdown):
+        try:
+            closable.close()
+        except Exception:
+            pass
+    try:
+        slot.lock.release()
+    except RuntimeError:
+        pass
+
+
+@asynccontextmanager
+async def pooled_afc_service(serial: str):
+    """Yield a locked AFC service for one op, reusing pooled sessions."""
+    slot = await _acquire_afc_slot(serial)
+    try:
+        yield slot.afc
+    except Exception:
+        await _drop_afc_slot(serial, slot)
+        raise
+    else:
+        _release_afc_slot(serial, slot)
+
+
 async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFileInfo]:
     """
     List contents of a directory on the iOS device.
@@ -463,9 +600,10 @@ async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFi
     -------
     list[DeviceFileInfo]
         Directory entries with name, path, is_dir, size, mtime.
+
+    Uses a pooled AFC session (no per-call handshake).
     """
-    afc, lockdown = await _get_afc_service(serial)
-    try:
+    async with pooled_afc_service(serial) as afc:
         # AFC listdir/stat have no internal timeouts — a stalled device
         # would hang the request past the client's timeout and surface as
         # a bare fetch failure. Bound the whole walk so callers get a
@@ -479,9 +617,6 @@ async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFi
             raise RuntimeError(
                 f"Device stopped responding while listing {path} — reconnect the device and retry."
             ) from exc
-    finally:
-        afc.close()
-        lockdown.close()
 
 
 async def _browse_device_directory_inner(afc, path: str) -> list[DeviceFileInfo]:
@@ -520,9 +655,8 @@ async def _browse_device_directory_inner(afc, path: str) -> list[DeviceFileInfo]
 
 
 async def get_device_file_info(serial: str, path: str) -> DeviceFileInfo:
-    """Get info for a single file/directory on the device."""
-    afc, lockdown = await _get_afc_service(serial)
-    try:
+    """Get info for a single file/directory on the device (pooled session)."""
+    async with pooled_afc_service(serial) as afc:
         info = await asyncio.to_thread(afc.stat, path)
         is_dir = info.get("st_ifmt") == "S_IFDIR"
         size = int(info.get("st_size", 0))
@@ -535,9 +669,6 @@ async def get_device_file_info(serial: str, path: str) -> DeviceFileInfo:
             size=size,
             mtime=mtime_val,
         )
-    finally:
-        afc.close()
-        lockdown.close()
 
 
 async def read_device_file(serial: str, path: str) -> bytes:
@@ -545,23 +676,16 @@ async def read_device_file(serial: str, path: str) -> bytes:
     Read entire file contents from the iOS device.
 
     Use for small to medium files. For large files, use streaming.
+    Uses a pooled AFC session (no per-call handshake).
     """
-    afc, lockdown = await _get_afc_service(serial)
-    try:
+    async with pooled_afc_service(serial) as afc:
         return await asyncio.to_thread(afc.get_file_contents, path)
-    finally:
-        afc.close()
-        lockdown.close()
 
 
 async def get_device_info(serial: str) -> dict[str, str]:
     """Get device filesystem info (total capacity, free space, etc.)."""
-    afc, lockdown = await _get_afc_service(serial)
-    try:
+    async with pooled_afc_service(serial) as afc:
         return await asyncio.to_thread(afc.get_device_info)
-    finally:
-        afc.close()
-        lockdown.close()
 
 
 # ---------------------------------------------------------------------------

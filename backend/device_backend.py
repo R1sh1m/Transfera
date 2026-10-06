@@ -94,6 +94,67 @@ _DEVICE_TIER_FILE = _PREFERENCE_DIR / "device_tier_preferences.json"
 _IOS_UDID_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{8}-[0-9a-fA-F]{8})$")
 _WPD_PATH_PREFIX = "\\\\?\\"
 
+# Bare 40-hex UDID search (WPD PnP IDs embed it among separators, e.g.
+# USB#VID_05AC&PID_12A8#<UDID>#{...}).
+_WPD_UDID_SEARCH_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def _is_apple_wpd_row(serial: str, name: str, model: str) -> bool:
+    """Heuristic: does this WPD row look like an Apple mobile device?"""
+    blob = f"{serial or ''} {name or ''} {model or ''}".lower()
+    return ("apple" in blob) or ("vid_05ac" in blob) or ("iphone" in blob) or ("ipad" in blob)
+
+
+def _drop_shadowed_wpd_rows(
+    devices: list[IOSDevice],
+    row_tiers: dict[str, DeviceAccessTier],
+) -> list[IOSDevice]:
+    """Drop WPD rows shadowed by a READY Tier 1/2 row for the same phone.
+
+    One physical iPhone shows up twice when its WPD PnP id does not embed
+    the UDID (e.g. SWD#WPDBUSENUM form), defeating the UDID-substring check
+    in the listing loop. Tier 1/2 supersede WPD for the same device, so a
+    shadowed WPD row is never usable-extra.
+
+    A WPD row is dropped when it looks like an Apple device AND either:
+      (a) its id embeds a UDID matching a READY non-WPD row (exact), or
+      (b) it is the single Apple WPD row next to a single READY non-WPD
+          Apple row (same-phone heuristic).
+
+    Rule (b) deliberately requires exactly-one-of-each: with two physical
+    iPhones the row counts differ and nothing is dropped. WPD rows are kept
+    whenever no READY Apple row exists (the fallback path).
+    """
+    apple_wpd = [
+        d
+        for d in devices
+        if row_tiers.get(d.serial) == DeviceAccessTier.WPD and _is_apple_wpd_row(d.serial, d.name, d.model)
+    ]
+    if not apple_wpd:
+        return devices
+    ready_nonwpd = [
+        d for d in devices if row_tiers.get(d.serial) != DeviceAccessTier.WPD and d.status == DeviceStatus.READY
+    ]
+    ready_apple = [d for d in ready_nonwpd if _is_apple_wpd_row(d.serial, d.name, d.model)]
+    if not ready_apple:
+        return devices
+
+    drop_serials: set[str] = set()
+    for w in apple_wpd:
+        blob = (w.serial or "").replace("-", "").lower()
+        udid_shadow = any((r.serial or "").replace("-", "").lower() in blob for r in ready_nonwpd if r.serial)
+        lone_shadow = len(apple_wpd) == 1 and len(ready_apple) == 1
+        if udid_shadow or lone_shadow:
+            drop_serials.add(w.serial)
+
+    if drop_serials:
+        logger.info(
+            "DeviceBackend: dropping %d WPD row(s) shadowed by ready Tier 1/2 rows: %s",
+            len(drop_serials),
+            sorted(drop_serials),
+        )
+    return [d for d in devices if d.serial not in drop_serials]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1063,6 +1124,7 @@ class DeviceBackendManager:
         all_found_devices: list[IOSDevice] = []
         primary_tier = DeviceAccessTier.NONE
         known_apple_serials: set[str] = set()
+        row_tiers: dict[str, DeviceAccessTier] = {}
 
         for backend in self._waterfall_order(is_ios_query=False):
             if not backend.is_configured:
@@ -1128,11 +1190,14 @@ class DeviceBackendManager:
                             if apple_serial and apple_serial in d_serial_clean:
                                 is_dup = True
                                 break
-                    elif any((d.serial or "").lower() == (existing.serial or "").lower() for existing in all_found_devices):
+                    elif any(
+                        (d.serial or "").lower() == (existing.serial or "").lower() for existing in all_found_devices
+                    ):
                         is_dup = True
 
                     if not is_dup:
                         all_found_devices.append(d)
+                        row_tiers[d.serial] = backend.tier
                         self._device_tier_map[d.serial] = backend.tier
                         self._device_tier_prefs[d.serial] = backend.tier.value
                         if backend.tier != DeviceAccessTier.WPD:
@@ -1145,6 +1210,12 @@ class DeviceBackendManager:
                     "DeviceBackend: %s found no devices -- checking next backend",
                     backend.tier.value,
                 )
+
+        # One physical iPhone can surface with two rows when its WPD PnP id
+        # does not embed the UDID (SWD#WPDBUSENUM form). Drop WPD rows that a
+        # READY Tier 1/2 row shadows; the tier map stays consistent because
+        # the purge below rebuilds from the kept rows.
+        all_found_devices = _drop_shadowed_wpd_rows(all_found_devices, row_tiers)
 
         if all_found_devices:
             self._classify_serials(all_found_devices)

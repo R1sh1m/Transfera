@@ -663,6 +663,13 @@ The inline media preview panel on the Setup page that appears when a source dire
 - Space or Enter toggles selection on the focused cell
 - Ctrl+A triggers Select all / Deselect all
 
+**Selection scope:**
+- Selection belongs to the current folder — navigating to another folder
+  clears it silently (no toast), so "N selected / 0 B" staleness and
+  sessions built from another folder's paths cannot happen
+- "Select all" / Ctrl+A toggles only the currently visible (filtered) items;
+  Load-more appends to `items`, so multi-page selection within one folder accumulates
+
 ### `component.media-thumb-cell`
 
 A single square cell in the source preview thumbnail grid.

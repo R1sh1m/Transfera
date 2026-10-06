@@ -26,12 +26,13 @@ export interface MediaPreviewItem {
   size_bytes: number;
   duration_s?: number | null;
   modified_at?: string | null;
+  mtime?: number | null;
 }
 
 export interface SourcePreviewPanelProps {
   sourcePath?: string | null;
   deviceSource?: { device_id: string; device_path: string } | null;
-  onSelectionConfirm: (selectedPaths: string[]) => void;
+  onSelectionConfirm: (selectedPaths: string[], quiet?: boolean) => void;
   onTransferStart?: (paths?: string[]) => void;
 }
 
@@ -78,10 +79,21 @@ export function getPreviewThumbnailUrl(
   absPath: string,
   deviceId?: string | null,
   size = 200,
+  fileSize?: number | null,
+  fileMtime?: number | null,
 ): string {
   // <img> tags can't send the X-Local-Token header, so the token rides
   // along as ?token= (accepted by the thumbnail endpoints only).
+  // file_size/file_mtime let the backend validate its on-disk thumbnail
+  // cache without an extra stat round trip.
   const token = getLocalToken();
+  const validation =
+    fileSize != null || fileMtime != null
+      ? {
+          ...(fileSize != null ? { file_size: String(fileSize) } : {}),
+          ...(fileMtime != null ? { file_mtime: String(fileMtime) } : {}),
+        }
+      : {};
   if (absPath.startsWith("ios://")) {
     const raw = absPath.slice("ios://".length);
     const slashIdx = raw.indexOf("/");
@@ -91,6 +103,7 @@ export function getPreviewThumbnailUrl(
       device_id: devId,
       path: vPath,
       size: String(size),
+      ...validation,
       ...(token ? { token } : {}),
     });
     return `${API_BASE_URL}/api/device/ios-thumbnail?${p}`;
@@ -497,7 +510,13 @@ function ImportAllModal({
                     className="relative aspect-square rounded-lg overflow-hidden bg-muted"
                   >
                     <img
-                      src={getPreviewThumbnailUrl(item.abs_path, null, 150)}
+                      src={getPreviewThumbnailUrl(
+                        item.abs_path,
+                        null,
+                        150,
+                        item.size_bytes,
+                        item.mtime ?? null,
+                      )}
                       alt={item.filename}
                       className="w-full h-full object-cover"
                       loading="lazy"
@@ -622,10 +641,10 @@ function SourcePreviewPanelInner({
 
   const isDefaultRecursive = Boolean(
     deviceSource &&
-      (!deviceSource.device_path ||
-        deviceSource.device_path === "/" ||
-        deviceSource.device_path === "/DCIM" ||
-        deviceSource.device_path.replace(/\/+$/, "") === "/DCIM"),
+    (!deviceSource.device_path ||
+      deviceSource.device_path === "/" ||
+      deviceSource.device_path === "/DCIM" ||
+      deviceSource.device_path.replace(/\/+$/, "") === "/DCIM"),
   );
   const [isRecursive, setIsRecursive] = useState(isDefaultRecursive);
   const isImportingAllRef = useRef(false);
@@ -637,15 +656,21 @@ function SourcePreviewPanelInner({
       prevSourceKeyRef.current = currentSourceKey;
       const shouldRecurse = Boolean(
         deviceSource &&
-          (!deviceSource.device_path ||
-            deviceSource.device_path === "/" ||
-            deviceSource.device_path === "/DCIM" ||
-            deviceSource.device_path.replace(/\/+$/, "") === "/DCIM"),
+        (!deviceSource.device_path ||
+          deviceSource.device_path === "/" ||
+          deviceSource.device_path === "/DCIM" ||
+          deviceSource.device_path.replace(/\/+$/, "") === "/DCIM"),
       );
       setIsRecursive(shouldRecurse);
       setPage(1);
+      // Drop the previous folder's selection — its abs_paths can never match
+      // this folder's items (stale "N selected / 0 B" + sessions that find
+      // nothing). Quiet: no "selection cleared" toast on plain navigation.
+      selectedRef.current = new Set();
+      setSelected(new Set());
+      onSelectionConfirm([], true);
     }
-  }, [currentSourceKey, deviceSource]);
+  }, [currentSourceKey, deviceSource, onSelectionConfirm]);
 
   function getPreviewUrl(pageNum: number, pageSize: number, sort: string) {
     if (deviceSource) {
@@ -676,6 +701,8 @@ function SourcePreviewPanelInner({
       item.abs_path,
       deviceSource?.device_id,
       THUMBNAIL_SIZE,
+      item.size_bytes,
+      item.mtime ?? null,
     );
   }
 
