@@ -34,3 +34,26 @@
 
   vcredist_done:
 !macroend
+
+# Stop our own processes before (un)install file operations.
+#
+# The frozen engine keeps exiftool.exe (stay-open) alive after the app
+# closes, and a locked exiftool.exe aborts setup with "Error opening file
+# for writing" (same on uninstall: locked DLLs get left behind).
+# taskkill misses are ignored (exit code unchecked); the Sleep lets file
+# handles release before NSIS copies/removes files.
+!macro NSIS_HOOK_PREINSTALL
+  DetailPrint "Stopping any running Transfera processes..."
+  nsExec::ExecToLog 'taskkill /F /IM transfera.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM transfera-engine.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM exiftool.exe /T'
+  Sleep 2000
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  DetailPrint "Stopping any running Transfera processes..."
+  nsExec::ExecToLog 'taskkill /F /IM transfera.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM transfera-engine.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM exiftool.exe /T'
+  Sleep 2000
+!macroend
