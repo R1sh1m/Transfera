@@ -30,7 +30,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "updater"],
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "category": "Utility",
     "publisher": "Transfera Team",
