@@ -767,6 +767,7 @@ class DeviceBackendManager:
                                 "pymobiledevice3>=5.0,<6.0",
                                 stdout=_asyncio.subprocess.DEVNULL,
                                 stderr=_asyncio.subprocess.DEVNULL,
+                                creationflags=0x08000000 if _sys.platform == "win32" else 0,
                             )
                             rc = await proc.wait()
                             if rc != 0:

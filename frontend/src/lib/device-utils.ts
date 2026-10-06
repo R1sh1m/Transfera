@@ -81,11 +81,15 @@ export function getDeviceMeta(
     modelLower.includes("ipad") ||
     nameLower.includes("ipad")
   ) {
-    const cleanName = name || "Apple iPad";
+    const cleanName = (name || model || "iPad").trim();
+    const displayName =
+      cleanName.toLowerCase().includes("apple") || cleanName.toLowerCase().includes("ipad")
+        ? cleanName
+        : cleanName;
     return {
       category: "ipad",
-      categoryLabel: "Apple iPad",
-      displayName: cleanName.toLowerCase().startsWith("apple") ? cleanName : `Apple ${cleanName}`,
+      categoryLabel: model || "Apple iPad",
+      displayName,
       shortName: model || "iPad",
       brand: "Apple",
       platformBadge: "iPadOS",
@@ -104,8 +108,8 @@ export function getDeviceMeta(
   if (modelLower.includes("ipod") || nameLower.includes("ipod")) {
     return {
       category: "ipod",
-      categoryLabel: "Apple iPod",
-      displayName: name || "Apple iPod",
+      categoryLabel: model || "Apple iPod",
+      displayName: name || model || "iPod",
       shortName: model || "iPod",
       brand: "Apple",
       platformBadge: "iOS",
@@ -149,7 +153,7 @@ export function getDeviceMeta(
 
     return {
       category: "camera",
-      categoryLabel: "Digital Camera",
+      categoryLabel: model || (brand !== "Camera" ? `${brand} Camera` : "Digital Camera"),
       displayName: name || model || "Digital Camera",
       shortName: model || brand,
       brand,
@@ -175,13 +179,21 @@ export function getDeviceMeta(
     (version !== "" && version !== "unknown" && !version.includes("android"));
 
   if (isExplicitApple) {
-    const cleanName = name || "Apple iPhone";
-    const displayName = cleanName.toLowerCase().startsWith("apple")
-      ? cleanName
-      : `Apple ${cleanName}`;
+    const cleanName = (name || model || "iPhone").trim();
+    // Do not prepend "Apple " if name already mentions Apple, iPhone, or is a custom name (e.g. Rishi's iPhone)
+    const displayName =
+      cleanName.toLowerCase().includes("apple") ||
+      cleanName.toLowerCase().includes("iphone") ||
+      cleanName.toLowerCase().includes("ipad") ||
+      cleanName.toLowerCase().includes("ipod")
+        ? cleanName
+        : cleanName.length > 0 && !cleanName.toLowerCase().startsWith("apple")
+          ? cleanName
+          : `Apple ${cleanName}`;
+
     return {
       category: "iphone",
-      categoryLabel: "Apple iPhone",
+      categoryLabel: model || "Apple iPhone",
       displayName,
       shortName: model || "iPhone",
       brand: "Apple",
@@ -222,7 +234,7 @@ export function getDeviceMeta(
 
     return {
       category: "android_tablet",
-      categoryLabel: "Android Tablet",
+      categoryLabel: model || "Android Tablet",
       displayName: displayName.trim(),
       shortName: model || "Android Tablet",
       brand,
@@ -305,7 +317,7 @@ export function getDeviceMeta(
 
   return {
     category: "android_phone",
-    categoryLabel: "Android Smartphone",
+    categoryLabel: model || (androidBrand !== "Android" ? `${androidBrand} Smartphone` : "Android Smartphone"),
     displayName: displayName.trim(),
     shortName: model || "Android",
     brand: androidBrand,

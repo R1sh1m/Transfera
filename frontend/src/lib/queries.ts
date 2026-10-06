@@ -651,6 +651,12 @@ export function useValidatePath(path: string | null) {
 // iOS Device Support
 // ---------------------------------------------------------------------------
 export function useIOSDevices(enabled = true) {
+  // Back off while a transfer runs: every poll costs a usbmux lockdown
+  // handshake per device, which contends with the transfer's own USB
+  // traffic on the same phone. 30 s is plenty for plug/unplug detection.
+  const transferActive = useTransferStore((s) =>
+    ["running", "paused"].includes(s.transfer.status),
+  );
   return useQuery({
     queryKey: ["ios-devices"],
     queryFn: async () => {
@@ -658,7 +664,7 @@ export function useIOSDevices(enabled = true) {
         await apiClient.get<IOSDeviceListResponse>("/ios-devices");
       return data;
     },
-    refetchInterval: 5000,
+    refetchInterval: transferActive ? 30000 : 5000,
     staleTime: 3000,
     enabled,
   });

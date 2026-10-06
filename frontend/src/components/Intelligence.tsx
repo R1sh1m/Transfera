@@ -22,6 +22,7 @@ import { cn, parseBackendDate } from "@/lib/utils";
 import {
   useBackfill,
   useCapabilities,
+  useDownloadModels,
   useDuplicateGroups,
   useModelStatus,
   useMoments,
@@ -79,6 +80,7 @@ function Thumb({
 export function CapabilitiesBadge() {
   const { data } = useCapabilities();
   const backfill = useBackfill();
+  const downloadModels = useDownloadModels();
   const { data: modelStatus } = useModelStatus(false);
   const busy =
     modelStatus?.status === "downloading" ||
@@ -105,9 +107,15 @@ export function CapabilitiesBadge() {
       <span
         className={cn(
           "px-2.5 py-0.5 rounded-pill border border-border text-xs",
-          clipReady ? "text-green-600 border-green-300 dark:border-green-800" : "text-muted-foreground",
+          clipReady
+            ? "text-green-600 border-green-300 dark:border-green-800"
+            : "text-muted-foreground",
         )}
-        title={clipReady ? "On-device AI semantic search active" : "Standard search active"}
+        title={
+          clipReady
+            ? "On-device AI semantic search active"
+            : "Standard search active"
+        }
       >
         {clipReady ? "CLIP on-device" : "Keyword search"} ·{" "}
         {data.faces_available ? "Faces on" : "Faces off"}
@@ -154,6 +162,16 @@ export function CapabilitiesBadge() {
       >
         {backfill.isPending ? "Indexing…" : "Index library"}
       </button>
+      {!clipReady && !downloading && (
+        <button
+          onClick={() => downloadModels.mutate()}
+          disabled={downloadModels.isPending}
+          className="px-3 py-1 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
+          title="Download on-board AI models (~218 MB, one time) to enable semantic search, auto-tags and face grouping"
+        >
+          {downloadModels.isPending ? "Starting…" : "Download AI models"}
+        </button>
+      )}
     </div>
   );
 }
@@ -356,7 +374,9 @@ export function PeoplePanel() {
         <div className="flex items-center gap-2 font-semibold text-foreground mb-1">
           <Users className="w-4 h-4 text-action" /> People
         </div>
-        No face clusters yet. Run <strong className="font-semibold text-foreground">Index library</strong> above to scan your media and group faces automatically.
+        No face clusters yet. Run{" "}
+        <strong className="font-semibold text-foreground">Index library</strong>{" "}
+        above to scan your media and group faces automatically.
       </div>
     );
   return (

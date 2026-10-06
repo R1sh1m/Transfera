@@ -11,6 +11,7 @@ import {
   FolderOpen,
   ExternalLink,
   Copy,
+  RefreshCw,
   Check,
   Calendar,
   Camera,
@@ -73,6 +74,7 @@ export default function MediaDetailModal({
 }: MediaDetailModalProps) {
   const [copied, setCopied] = useState(false);
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+  const [thumbNonce, setThumbNonce] = useState(0);
 
   // Fetch full detail including resolved destination path on disk
   const { data: detail, isLoading } = useMediaItem(item?.id ?? null);
@@ -87,6 +89,7 @@ export default function MediaDetailModal({
     const controller = new AbortController();
     let cancelled = false;
 
+    setThumbUrl(null);
     fetchThumbnail(item.id, item.updated_at, controller.signal).then((url) => {
       if (!cancelled && url) {
         setThumbUrl(url);
@@ -97,7 +100,7 @@ export default function MediaDetailModal({
       cancelled = true;
       controller.abort();
     };
-  }, [item?.id, item?.updated_at]);
+  }, [item?.id, item?.updated_at, thumbNonce]);
 
   // Clean up blob URL on unmount
   useEffect(() => {
@@ -242,6 +245,14 @@ export default function MediaDetailModal({
                 <div className="py-12 flex flex-col items-center justify-center text-muted-foreground">
                   <FileText className="w-12 h-12 mb-2 opacity-40" />
                   <p className="text-xs">Preview not available</p>
+                  <button
+                    type="button"
+                    onClick={() => setThumbNonce((n) => n + 1)}
+                    className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted text-foreground text-xs hover:bg-muted/80 active:scale-[0.95] transition-all"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Retry preview
+                  </button>
                 </div>
               )}
 

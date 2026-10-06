@@ -1800,6 +1800,7 @@ async def _phase_execute_batches(
             )
         else:
             await ws_events.emit_batch_complete(session_id, batch.id, batch.batch_number, "completed")
+        await _rollup_session_item_counters(session_id)
 
     if duplicate_pause_requested:
         async with session_scope() as session:
@@ -1811,6 +1812,42 @@ async def _phase_execute_batches(
         return False
 
     return True
+
+
+async def _rollup_session_item_counters(session_id: int) -> None:
+    """Recompute ts.completed_items/failed_items from item rows + touch.
+
+    Keeps /api/sessions truthful mid-run (they are otherwise only assigned
+    at finalize). Idempotent pure recompute: safe on resume/retry and
+    consistent with finalize. Failed counts only explicitly-failed rows
+    (pending rows are not failures until the finalize step, which uses
+    total-minus-completed once nothing is pending anymore).
+    """
+    from backend.database.models import HopStatus
+
+    async with session_scope() as session:
+        ts = await session.get(TransferSession, session_id)
+        if ts is None:
+            return
+        completed = (
+            await session.execute(
+                select(func.count(MediaItem.id)).where(
+                    MediaItem.session_id == session_id,
+                    MediaItem.final_status == HopStatus.COMPLETED.value,
+                )
+            )
+        ).scalar() or 0
+        failed = (
+            await session.execute(
+                select(func.count(MediaItem.id)).where(
+                    MediaItem.session_id == session_id,
+                    MediaItem.final_status == HopStatus.FAILED.value,
+                )
+            )
+        ).scalar() or 0
+        ts.completed_items = completed
+        ts.failed_items = failed
+        ts.touch()
 
 
 async def _phase_finalize(session_id: int) -> None:

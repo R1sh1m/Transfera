@@ -60,6 +60,12 @@ DCIM_PATH = "/DCIM"
 # timeout and surfaces as a bare fetch failure.
 _TRUST_PROBE_TIMEOUT = 8.0
 _BROWSE_TIMEOUT = 25.0
+# A wedged AFC read must fail the file, never hang the batch/transfer:
+# full reads get a generous budget (large videos on slow links), prefix
+# reads and stats must return quickly.
+_READ_TIMEOUT_SECONDS = 300.0
+_PARTIAL_READ_TIMEOUT_SECONDS = 60.0
+_STAT_TIMEOUT_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +663,10 @@ async def _browse_device_directory_inner(afc, path: str) -> list[DeviceFileInfo]
 async def get_device_file_info(serial: str, path: str) -> DeviceFileInfo:
     """Get info for a single file/directory on the device (pooled session)."""
     async with pooled_afc_service(serial) as afc:
-        info = await asyncio.to_thread(afc.stat, path)
+        info = await asyncio.wait_for(
+            asyncio.to_thread(afc.stat, path),
+            timeout=_STAT_TIMEOUT_SECONDS,
+        )
         is_dir = info.get("st_ifmt") == "S_IFDIR"
         size = int(info.get("st_size", 0))
         mtime = info.get("st_mtime")
@@ -676,10 +685,14 @@ async def read_device_file(serial: str, path: str) -> bytes:
     Read entire file contents from the iOS device.
 
     Use for small to medium files. For large files, use streaming.
-    Uses a pooled AFC session (no per-call handshake).
+    Uses a pooled AFC session (no per-call handshake). Bounded: a stalled
+    read raises TimeoutError (slot dropped) instead of hanging the caller.
     """
     async with pooled_afc_service(serial) as afc:
-        return await asyncio.to_thread(afc.get_file_contents, path)
+        return await asyncio.wait_for(
+            asyncio.to_thread(afc.get_file_contents, path),
+            timeout=_READ_TIMEOUT_SECONDS,
+        )
 
 
 async def read_device_file_partial(serial: str, path: str, max_bytes: int) -> bytes | None:
@@ -688,13 +701,19 @@ async def read_device_file_partial(serial: str, path: str, max_bytes: int) -> by
 
     Thumbnail fast path: iOS HEIC/JPEG files embed a small JPEG preview in
     their EXIF header, which sits in the first ~128 KB. Uses a pooled AFC
-    session (no per-call handshake). Returns None on any failure.
+    session (no per-call handshake). Bounded; returns None on any failure.
     """
     try:
         async with pooled_afc_service(serial) as afc:
-            handle = await asyncio.to_thread(lambda: afc.fopen(path))
+            handle = await asyncio.wait_for(
+                asyncio.to_thread(lambda: afc.fopen(path)),
+                timeout=_PARTIAL_READ_TIMEOUT_SECONDS,
+            )
             try:
-                data = await asyncio.to_thread(lambda: afc.fread(handle, max_bytes))
+                data = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: afc.fread(handle, max_bytes)),
+                    timeout=_PARTIAL_READ_TIMEOUT_SECONDS,
+                )
                 return data if data else None
             finally:
                 try:
@@ -709,7 +728,10 @@ async def read_device_file_partial(serial: str, path: str, max_bytes: int) -> by
 async def get_device_info(serial: str) -> dict[str, str]:
     """Get device filesystem info (total capacity, free space, etc.)."""
     async with pooled_afc_service(serial) as afc:
-        return await asyncio.to_thread(afc.get_device_info)
+        return await asyncio.wait_for(
+            asyncio.to_thread(afc.get_device_info),
+            timeout=_STAT_TIMEOUT_SECONDS,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -736,20 +758,29 @@ class AFCFileReader:
     async def open(self):
         """Open the file handle on the device."""
         self._afc, self._lockdown = await _get_afc_service(self.serial)
-        info = await asyncio.to_thread(self._afc.stat, self.path)
+        info = await asyncio.wait_for(
+            asyncio.to_thread(self._afc.stat, self.path),
+            timeout=_STAT_TIMEOUT_SECONDS,
+        )
         self._size = int(info.get("st_size", 0))
-        self._handle = await asyncio.to_thread(self._afc.fopen, self.path)
+        self._handle = await asyncio.wait_for(
+            asyncio.to_thread(self._afc.fopen, self.path),
+            timeout=_STAT_TIMEOUT_SECONDS,
+        )
         return self
 
     async def read(self, n: int = -1) -> bytes:
-        """Read up to n bytes. -1 reads all remaining."""
+        """Read up to n bytes. -1 reads all remaining. Bounded per call."""
         if self._afc is None or self._handle is None:
             return b""
         if n == -1:
             n = self._size - self._pos
         if n <= 0:
             return b""
-        data = await asyncio.to_thread(self._afc.fread, self._handle, n)
+        data = await asyncio.wait_for(
+            asyncio.to_thread(self._afc.fread, self._handle, n),
+            timeout=_READ_TIMEOUT_SECONDS,
+        )
         self._pos += len(data)
         return data
 

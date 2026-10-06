@@ -254,6 +254,7 @@ def _get_video_duration(path: str) -> float | None:
             capture_output=True,
             text=True,
             timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         import json as _json
 
@@ -325,6 +326,7 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
             ],
             capture_output=True,
             timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode == 0 and len(result.stdout) > 100:
             return result.stdout
@@ -345,6 +347,7 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
             ],
             capture_output=True,
             timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result2.returncode == 0 and len(result2.stdout) > 100:
             return result2.stdout

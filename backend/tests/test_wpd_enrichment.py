@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 import backend.wpd_backend as wpd_backend
 from backend.wpd_backend import WpdBackend
 
@@ -112,3 +114,33 @@ async def test_read_partial_empty_is_none(monkeypatch):
     backend = _make_backend(monkeypatch, _helper_payload())
     monkeypatch.setattr(WpdBackend, "_run", _fake_run)
     assert await backend.read_partial("SOME-ID", "/DCIM/a.jpg", 8) is None
+
+
+async def test_wpd_reader_chunk_timeout(monkeypatch):
+    """A stalled MTP stream raises instead of hanging the batch."""
+    import asyncio as _asyncio
+
+    import backend.wpd_backend as _wpd_mod
+    from backend.wpd_backend import _WpdFileReader
+
+    monkeypatch.setattr(_wpd_mod, "_WPD_CHUNK_TIMEOUT_SECONDS", 0.2)
+
+    async def _hang(_n):
+        await _asyncio.sleep(30)
+        return b""
+
+    class _Stdout:
+        read = staticmethod(_hang)
+
+        def at_eof(self):
+            return False
+
+    class _Proc:
+        stdout = _Stdout()
+        stderr = None
+        returncode = None
+
+    reader = _WpdFileReader("wpd_helper.exe", "SOME-ID", "DCIM/a.jpg")
+    reader._proc = _Proc()
+    with pytest.raises(TimeoutError):
+        await reader.read(10)

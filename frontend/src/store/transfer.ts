@@ -366,7 +366,11 @@ function handleWsEventReducer(
     // the completed count changed, there is nothing new to paint.
     case "hop1_progress": {
       const active = state.transfer.activeBatch;
+      // Late/duplicate events for a previous batch must not corrupt the
+      // current one (WS redelivery + reconnect gaps).
       if (active) {
+        const eventBatchId = (d.batch_id as number) ?? null;
+        if (eventBatchId !== null && eventBatchId !== active.batchId) break;
         const processed = (d.processed as number) ?? 0;
         const total = (d.total as number) ?? active.totalItems;
         const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
@@ -398,6 +402,8 @@ function handleWsEventReducer(
     case "hop1_complete": {
       const active = state.transfer.activeBatch;
       if (active) {
+        const eventBatchId = (d.batch_id as number) ?? null;
+        if (eventBatchId !== null && eventBatchId !== active.batchId) break;
         patch.transfer = {
           ...state.transfer,
           activeBatch: {
@@ -418,6 +424,8 @@ function handleWsEventReducer(
     case "hop2_progress": {
       const active = state.transfer.activeBatch;
       if (active) {
+        const eventBatchId = (d.batch_id as number) ?? null;
+        if (eventBatchId !== null && eventBatchId !== active.batchId) break;
         const processed = (d.processed as number) ?? 0;
         const total = (d.total as number) ?? active.totalItems;
         const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
@@ -448,6 +456,8 @@ function handleWsEventReducer(
     case "hop2_complete": {
       const active = state.transfer.activeBatch;
       if (active) {
+        const eventBatchId = (d.batch_id as number) ?? null;
+        if (eventBatchId !== null && eventBatchId !== active.batchId) break;
         patch.transfer = {
           ...state.transfer,
           activeBatch: {

@@ -41,6 +41,9 @@ _DEFAULT_CHUNK_SIZE = 100 * 1024
 # Subprocess timeouts (seconds)
 _LIST_TIMEOUT = 10
 _BROWSE_TIMEOUT = 15
+# A stalled MTP stream must fail the file, never hang the batch: bound each
+# stdout chunk read (large files stream many chunks; a wedged chunk aborts).
+_WPD_CHUNK_TIMEOUT_SECONDS = 120.0
 
 
 class WpdError(RuntimeError):
@@ -114,7 +117,10 @@ class _WpdFileReader:
             # Stream all remaining data in chunks.
             chunks: list[bytes] = []
             while True:
-                chunk = await self._proc.stdout.read(self._chunk_size)
+                chunk = await asyncio.wait_for(
+                    self._proc.stdout.read(self._chunk_size),
+                    timeout=_WPD_CHUNK_TIMEOUT_SECONDS,
+                )
                 if not chunk:
                     break
                 chunks.append(chunk)
@@ -128,7 +134,10 @@ class _WpdFileReader:
         result = bytearray()
         while len(result) < n:
             remaining = n - len(result)
-            chunk = await self._proc.stdout.read(min(remaining, self._chunk_size))
+            chunk = await asyncio.wait_for(
+                self._proc.stdout.read(min(remaining, self._chunk_size)),
+                timeout=_WPD_CHUNK_TIMEOUT_SECONDS,
+            )
             if not chunk:
                 break
             result.extend(chunk)

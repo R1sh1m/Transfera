@@ -477,6 +477,7 @@ async def backfill_intelligence(
     async with session_scope() as session:
         result = await session.execute(select(MediaItem).where(MediaItem.final_status == "completed").limit(limit))
         items = list(result.scalars().all())
+        sessions: dict[int, TransferSession | None] = {}
         for mi in items:
             scanned += 1
             touched = False
@@ -499,8 +500,32 @@ async def backfill_intelligence(
 
                     from PIL import Image
 
-                    p = Path(mi.source_path) if mi.source_path else None
-                    thumb = generate_thumbnail_bytes(p) if p and p.is_file() else None
+                    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path
+
+                    p: Path | None = None
+                    # Device imports (ios://…) never exist as local paths —
+                    # resolve through the vault (session dest_root + layout),
+                    # Hop 1 cache, then the original source, in that order.
+                    if mi.session_id is not None and mi.session_id not in sessions:
+                        sessions[mi.session_id] = await session.get(TransferSession, mi.session_id)
+                    sess = sessions.get(mi.session_id) if mi.session_id is not None else None
+                    if sess is not None and getattr(sess, "dest_root", None):
+                        from pathlib import Path as _Path
+
+                        entry = {
+                            "source_path": mi.source_path,
+                            "file_name": mi.file_name,
+                            "date_taken": mi.date_taken,
+                            "original_capture_time": mi.original_capture_time,
+                            "created_at": mi.created_at,
+                            "file_size": mi.file_size,
+                            "folder_layout": getattr(sess, "folder_layout", "year/month"),
+                        }
+                        p = resolve_thumbnail_source_path(entry, _Path(sess.dest_root))
+                    if p is None:
+                        _sp = Path(mi.source_path) if mi.source_path else None
+                        p = _sp if _sp and _sp.is_file() else None
+                    thumb = generate_thumbnail_bytes(p) if p else None
                     if thumb:
                         if mi.phash is None:
                             h = dhash_bytes(thumb)
@@ -516,7 +541,7 @@ async def backfill_intelligence(
                                     touched = True
                             except Exception:
                                 pass
-                    if mi.blur_score is None and p and p.is_file():
+                    if mi.blur_score is None and p is not None:
                         s = compute_blur_score(p)
                         if s is not None:
                             mi.blur_score = s
@@ -529,12 +554,32 @@ async def backfill_intelligence(
             # Skipped entirely when models are absent.
             if clip_ready and thumb is None and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
                 # Item already has phash/dims/blur but no embedding yet:
-                # generate thumbnail bytes just for CLIP.
+                # resolve the file the same vault-aware way as above.
                 try:
                     from pathlib import Path as _Path
 
-                    _p = _Path(mi.source_path) if mi.source_path else None
-                    thumb = generate_thumbnail_bytes(_p) if _p and _p.is_file() else None
+                    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path as _resolve
+
+                    _p = None
+                    if mi.session_id is not None:
+                        _sess = sessions.get(mi.session_id)
+                        if _sess is not None and getattr(_sess, "dest_root", None):
+                            _p = _resolve(
+                                {
+                                    "source_path": mi.source_path,
+                                    "file_name": mi.file_name,
+                                    "date_taken": mi.date_taken,
+                                    "original_capture_time": mi.original_capture_time,
+                                    "created_at": mi.created_at,
+                                    "file_size": mi.file_size,
+                                    "folder_layout": getattr(_sess, "folder_layout", "year/month"),
+                                },
+                                _Path(_sess.dest_root),
+                            )
+                    if _p is None:
+                        _sp = _Path(mi.source_path) if mi.source_path else None
+                        _p = _sp if _sp and _sp.is_file() else None
+                    thumb = generate_thumbnail_bytes(_p) if _p else None
                 except Exception as exc:
                     logger.debug("backfill clip thumb skipped %s: %s", mi.id, exc)
                     thumb = None

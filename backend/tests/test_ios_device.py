@@ -174,6 +174,9 @@ class _FakeAfc:
     def stat(self, path):
         return {"st_ifmt": "S_IFREG", "st_size": 10, "st_mtime": 0}
 
+    def get_file_contents(self, path):
+        return b"data"
+
     def close(self):
         self.closed = True
 
@@ -286,4 +289,65 @@ async def test_read_device_file_partial_uses_pool(monkeypatch):
     assert await read_device_file_partial("SERIAL-123", "/DCIM/a.jpg", 4) == b"0123"
     assert await read_device_file_partial("SERIAL-123", "/DCIM/b.jpg", 99) == b"0123456789abcdef"
     assert calls["create"] == 1
+    _AFC_POOL.clear()
+
+
+class _HangingAfc(_FakeAfc):
+    """AFC service whose reads never return (wedged device/link)."""
+
+    def __init__(self):
+        super().__init__()
+        import threading as _threading
+
+        self._gate = _threading.Event()
+
+    def listdir(self, path):
+        self._gate.wait(30)
+        return []
+
+    def get_file_contents(self, path):
+        self._gate.wait(30)
+        return b""
+
+    def fopen(self, path):
+        self._gate.wait(30)
+        return {}
+
+
+async def test_wedged_read_fails_fast_and_recovers(monkeypatch):
+    """A hung read raises TimeoutError, drops the slot, and reconnects."""
+    import backend.ios_device as _ios_mod
+    from backend.ios_device import _AFC_POOL, read_device_file
+
+    _AFC_POOL.clear()
+    calls = _patch_afc(monkeypatch)
+    monkeypatch.setattr(_ios_mod, "_READ_TIMEOUT_SECONDS", 0.2)
+
+    import pymobiledevice3.services.afc as _afc_mod
+
+    monkeypatch.setattr(_afc_mod, "AfcService", lambda **_kw: _HangingAfc())
+    with pytest.raises(TimeoutError):
+        await read_device_file("SERIAL-123", "/DCIM/a.jpg")
+    # Slot dropped on failure...
+    assert _AFC_POOL.get("SERIAL-123", []) == []
+    # ...so the next call reconnects instead of hanging on the corpse.
+    monkeypatch.setattr(_afc_mod, "AfcService", lambda **_kw: _FakeAfc())
+    assert await read_device_file("SERIAL-123", "/DCIM/a.jpg") == b"data"
+    assert calls["create"] == 2
+    _AFC_POOL.clear()
+
+
+async def test_partial_read_timeout_returns_none(monkeypatch):
+    """A hung prefix read degrades to None (thumbnail falls back)."""
+    import backend.ios_device as _ios_mod
+    from backend.ios_device import _AFC_POOL, read_device_file_partial
+
+    _AFC_POOL.clear()
+    _patch_afc(monkeypatch)
+    monkeypatch.setattr(_ios_mod, "_PARTIAL_READ_TIMEOUT_SECONDS", 0.2)
+
+    import pymobiledevice3.services.afc as _afc_mod
+
+    monkeypatch.setattr(_afc_mod, "AfcService", lambda **_kw: _HangingAfc())
+    assert await read_device_file_partial("SERIAL-123", "/DCIM/a.jpg", 8) is None
     _AFC_POOL.clear()

@@ -240,6 +240,19 @@ const LibraryCard = memo(function LibraryCard({
   const isFailed = item.thumbnail_status === "failed";
 
   // Only observe visibility / fetch when a thumbnail can exist.
+  // One delayed retry: a transient failure (DB lock, restart mid-view)
+  // latches noThumb forever per mount — re-arm once after 20 s so backend
+  // healing actually heals open views.
+  const retriedRef = useRef(false);
+  useEffect(() => {
+    retriedRef.current = false;
+  }, [item.id]);
+  useEffect(() => {
+    if (!noThumb || retriedRef.current) return;
+    retriedRef.current = true;
+    const t = setTimeout(() => setNoThumb(false), 20000);
+    return () => clearTimeout(t);
+  }, [noThumb]);
   useEffect(() => {
     const el = cellRef.current;
     if (!el || isFailed || noThumb) return;

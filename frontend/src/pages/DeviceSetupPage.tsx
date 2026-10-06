@@ -842,7 +842,7 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                             </span>
                           </div>
                           <p className="text-[10px] text-muted-foreground truncate">
-                            {meta.categoryLabel}
+                            {device.model || meta.categoryLabel}
                             {device.ios_version &&
                             device.ios_version.toLowerCase() !== "unknown" &&
                             !device.ios_version
