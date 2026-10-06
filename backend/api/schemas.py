@@ -126,6 +126,12 @@ class SessionCreate(BaseModel):
         "year/month",
         description="Destination folder structure: year/month/day, year/month, or flat (all files in root)",
     )
+    batch_size: int | None = Field(
+        None,
+        ge=10,
+        le=500,
+        description="Files per transfer batch (smaller = more responsive progress on flaky links). Defaults to server BATCH_SIZE.",
+    )
 
 
 class SessionInfo(BaseModel):

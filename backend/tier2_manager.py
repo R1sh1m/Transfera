@@ -60,6 +60,14 @@ class UnifiedDeviceManager:
     async def read_device_file(self, serial: str, path: str):
         return await self._backend.read_device_file(serial, path)
 
+    async def read_device_file_partial(
+        self, serial: str, path: str, max_bytes: int
+    ) -> bytes | None:
+        return await self._backend.read_device_file_partial(serial, path, max_bytes)
+
+    def create_file_reader(self, serial: str, path: str):
+        return self._backend.create_file_reader(serial, path)
+
     def create_tier2_afc_reader(self, serial: str, path: str):
         return self._backend.create_tier2_afc_reader(serial, path)
 

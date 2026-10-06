@@ -107,6 +107,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (45, "ALTER TABLE transfer_sessions ADD COLUMN is_prescan BOOLEAN NOT NULL DEFAULT 0"),
     (46, "CREATE INDEX IF NOT EXISTS ix_media_items_session_hop1 ON media_items (session_id, hop1_status)"),
     (47, "CREATE INDEX IF NOT EXISTS ix_media_items_session_hop2 ON media_items (session_id, hop2_status)"),
+    (48, "ALTER TABLE transfer_sessions ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 100"),
 ]
 
 

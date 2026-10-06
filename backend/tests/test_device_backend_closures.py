@@ -181,6 +181,23 @@ async def test_read_partial_forwards_serial_path_and_limit():
     assert result == b"part"
 
 
+@pytest.mark.asyncio
+async def test_unified_device_manager_delegates_read_partial_and_reader(monkeypatch):
+    """UnifiedDeviceManager facade must expose read_device_file_partial and create_file_reader."""
+    from backend.tier2_manager import UnifiedDeviceManager
+
+    stub = _StubBackend()
+    manager = _make_manager(stub)
+    monkeypatch.setattr("backend.tier2_manager.get_device_backend_manager", lambda: manager)
+
+    udm = UnifiedDeviceManager()
+    result = await udm.read_device_file_partial("MY_DEVICE", "/DCIM/photo.jpg", 256)
+    assert result == b"part"
+
+    reader = udm.create_file_reader("MY_DEVICE", "/DCIM/photo.jpg")
+    assert reader is not None
+
+
 async def main():
     tests = [
         test_browse_device_forwards_serial_and_path,

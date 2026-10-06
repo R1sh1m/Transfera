@@ -62,19 +62,6 @@ function formatDuration(seconds?: number | null): string | null {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function totalSelectedSize(
-  items: MediaPreviewItem[],
-  selectedSet: Set<string>,
-): number {
-  let bytes = 0;
-  for (const item of items) {
-    if (selectedSet.has(item.abs_path)) {
-      bytes += item.size_bytes;
-    }
-  }
-  return bytes;
-}
-
 export function getPreviewThumbnailUrl(
   absPath: string,
   deviceId?: string | null,
@@ -624,6 +611,10 @@ function SourcePreviewPanelInner({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [sortBy, setSortBy] = useState("newest");
+  const [pageSize, setPageSize] = useState(100);
+  // Sizes seen on any page — keeps the bottom-bar byte total correct when
+  // the selection spans pages (items only holds the current page).
+  const [knownSizes, setKnownSizes] = useState<Map<string, number>>(new Map());
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
   const [importAllData, setImportAllData] = useState<{
@@ -738,8 +729,8 @@ function SourcePreviewPanelInner({
       setFocusedIndex(null);
     }
 
-    const pageSize = isRecursive ? _PREVIEW_MAX_FILES : 100;
-    const url = getPreviewUrl(page, pageSize, sortBy);
+    const effPageSize = isRecursive ? _PREVIEW_MAX_FILES : pageSize;
+    const url = getPreviewUrl(page, effPageSize, sortBy);
 
     fetch(url, {
       signal: controller.signal,
@@ -762,9 +753,17 @@ function SourcePreviewPanelInner({
       })
       .then((data) => {
         if (cancelled) return;
-        setItems((prev) =>
-          page === 1 ? data.items || [] : [...prev, ...(data.items || [])],
-        );
+        // Replace, don't append: pages are navigated, not grown. This
+        // bounds the DOM and the concurrent thumbnail work per page.
+        const freshItems = data.items || [];
+        setItems(freshItems);
+        setKnownSizes((prev) => {
+          const next = new Map(prev);
+          for (const it of freshItems) {
+            if (it?.abs_path != null) next.set(it.abs_path, it.size_bytes || 0);
+          }
+          return next;
+        });
         if (page === 1) setFocusedIndex(null);
         setMetadata({
           total: data.total || 0,
@@ -790,6 +789,7 @@ function SourcePreviewPanelInner({
     deviceSource?.device_id,
     deviceSource?.device_path,
     page,
+    pageSize,
     sortBy,
     isRecursive,
     retryNonce,
@@ -1023,7 +1023,33 @@ function SourcePreviewPanelInner({
   }, [focusedIndex]);
 
   const selectedCount = selected.size;
-  const selectedBytes = totalSelectedSize(items, selected);
+  const selectedBytes = useMemo(() => {
+    const lookup = new Map(knownSizes);
+    for (const it of items) lookup.set(it.abs_path, it.size_bytes);
+    let bytes = 0;
+    for (const p of selected) bytes += lookup.get(p) ?? 0;
+    return bytes;
+  }, [items, knownSizes, selected]);
+
+  const goToPage = useCallback(
+    (n: number) => {
+      const clamped = Math.max(1, Math.min(totalPages, n));
+      if (clamped === page) return;
+      thumbQueueRef.current.reset();
+      setFocusedIndex(null);
+      setPage(clamped);
+      gridRef.current?.scrollIntoView({ block: "nearest" });
+    },
+    [page, totalPages],
+  );
+
+  const pageList = useMemo(() => {
+    // Windowed page numbers: 1 … p-1 p p+1 … N
+    const pages = new Set<number>([1, totalPages, page - 1, page, page + 1]);
+    return [...pages]
+      .filter((p) => p >= 1 && p <= totalPages)
+      .sort((a, b) => a - b);
+  }, [page, totalPages]);
 
   if (!sourcePath && !deviceSource) return null;
 
@@ -1096,6 +1122,19 @@ function SourcePreviewPanelInner({
             </div>
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
               <SlidersHorizontal className="w-3 h-3 shrink-0" />
+              <PillSelect
+                value={String(pageSize)}
+                onChange={(val) => {
+                  setPageSize(Number(val) || 100);
+                  setPage(1);
+                }}
+                options={[
+                  { value: "25", label: "25 / page" },
+                  { value: "50", label: "50 / page" },
+                  { value: "100", label: "100 / page" },
+                ]}
+                align="right"
+              />
               <PillSelect
                 value={sortBy}
                 onChange={(val) => {
@@ -1247,15 +1286,51 @@ function SourcePreviewPanelInner({
           )}
         </AnimatePresence>
 
-        {/* Load more button */}
-        {!loading && page < totalPages && (
-          <button
-            type="button"
-            onClick={() => setPage((p) => p + 1)}
-            className="w-full py-2 text-xs font-normal text-primary hover:text-primary/80 transition-colors border border-border rounded-lg"
-          >
-            Load more ({metadata.total - items.length} remaining)
-          </button>
+        {/* Pagination — pages are navigated, not grown, so the DOM and
+            the concurrent thumbnail work stay bounded per page while the
+            selection (and its byte total) spans pages */}
+        {!loading && !previewError && totalPages > 1 && (
+          <div className="flex items-center justify-center gap-1.5 pt-1">
+            <button
+              type="button"
+              onClick={() => goToPage(page - 1)}
+              disabled={page <= 1}
+              className="px-2.5 py-1 text-xs rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-default"
+            >
+              ‹ Prev
+            </button>
+            {pageList.map((p, i, arr) => (
+              <span key={p} className="flex items-center gap-1.5">
+                {i > 0 && p - (arr[i - 1] ?? p) > 1 && (
+                  <span className="text-xs text-muted-foreground">…</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => goToPage(p)}
+                  aria-current={p === page ? "page" : undefined}
+                  className={cn(
+                    "min-w-7 px-2 py-1 text-xs rounded-full transition-colors",
+                    p === page
+                      ? "bg-action text-white"
+                      : "text-muted-foreground hover:text-foreground hover:bg-muted border border-transparent",
+                  )}
+                >
+                  {p}
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => goToPage(page + 1)}
+              disabled={page >= totalPages}
+              className="px-2.5 py-1 text-xs rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-default"
+            >
+              Next ›
+            </button>
+            <span className="text-[11px] text-muted-foreground ml-1">
+              Page {page} of {totalPages}
+            </span>
+          </div>
         )}
 
         {/* Bottom action bar */}

@@ -160,3 +160,20 @@ def test_disk_thumb_roundtrip_and_sweep(tmp_path, monkeypatch):
     _dp._write_disk_thumb("d.jpg", payload)
     assert _dp._read_disk_thumb("a.jpg") is None
     assert _dp._read_disk_thumb("d.jpg") == payload
+
+
+def test_extract_frame_garbage_returns_none():
+    from backend.api import device_preview as _dp
+
+    assert _dp._extract_frame_from_bytes(b"", 200, ".mp4") is None
+    assert _dp._extract_frame_from_bytes(b"\x00" * 50, 200, ".mp4") is None
+    # Random bytes are not a video container (ffmpeg may be absent too).
+    assert _dp._extract_frame_from_bytes(bytes(range(256)) * 40, 200, ".mp4") is None
+
+
+def test_embedded_thumbnail_no_exiftool(monkeypatch):
+    import backend.engines.metadata_extractor as _me
+
+    monkeypatch.setattr(_me, "_bootstrap_exiftool", lambda: None)
+    # Binary session start fails without an exe -> None, no spawn attempted.
+    assert _me.extract_embedded_thumbnail_bytes("whatever.jpg") is None

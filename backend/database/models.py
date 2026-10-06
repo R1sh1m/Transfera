@@ -213,6 +213,9 @@ class TransferSession(Base):
     current_batch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_batches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # --- Batch sizing (files per TransferBatch; user-tunable per session) ---
+    batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+
     # --- Volume tracking ---
     total_bytes_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
 

@@ -379,19 +379,27 @@ async def _scan_ios_device(
     return inserted_ids
 
 
-async def _walk_ios_directory(serial: str, path: str) -> list:
+async def _walk_ios_directory(serial: str, path: str, _sem: asyncio.Semaphore | None = None) -> list:
     """
     Recursively walk an iOS device directory via unified manager.
 
     Returns a flat list of DeviceFileInfo for all files found.
+
+    Subdirectories fan out concurrently, bounded by a semaphore (4, matching
+    the AFC session pool): unbounded fan-out would stampede usbmuxd with one
+    handshake per folder and starve the transfer streaming off the device.
     """
     from backend.ios_device import DeviceFileInfo
     from backend.tier2_manager import get_device_manager
 
+    if _sem is None:
+        _sem = asyncio.Semaphore(4)
+
     all_files: list[DeviceFileInfo] = []
     manager = get_device_manager()
     try:
-        entries = await manager.browse_device(serial, path)
+        async with _sem:
+            entries = await manager.browse_device(serial, path)
     except Exception as exc:
         logger.warning("Failed to browse %s on device %s: %s", path, serial, exc)
         return all_files
@@ -407,7 +415,7 @@ async def _walk_ios_directory(serial: str, path: str) -> list:
             all_files.append(entry)
 
     if subdirs:
-        tasks = [_walk_ios_directory(serial, sd) for sd in subdirs]
+        tasks = [_walk_ios_directory(serial, sd, _sem) for sd in subdirs]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for res in results:
             if isinstance(res, BaseException):

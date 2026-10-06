@@ -107,6 +107,7 @@ export interface SessionCreate {
   only_new_since_last_import?: boolean;
   selected_files?: string[] | null;
   folder_layout?: FolderLayout;
+  batch_size?: number | null;
 }
 
 // --- Device Preview ----------------------------------------------------------

@@ -137,6 +137,17 @@ def test_friendly_device_model_falls_back_to_raw():
     assert friendly_device_model(None) == "iPhone"
 
 
+def test_canonical_device_serial():
+    from backend.ios_device import canonical_device_serial
+
+    udid = "A" * 40
+    assert canonical_device_serial(udid) == udid.lower()
+    assert canonical_device_serial(f"\\\\?\\USB#VID_05AC&PID_12A8#{udid}#{{guid}}") == udid.lower()
+    assert canonical_device_serial("SWD#WPDBUSENUM#{guid}#0000") == "SWD#WPDBUSENUM#{guid}#0000"
+    assert canonical_device_serial("") == ""
+    assert canonical_device_serial(None) == ""
+
+
 async def test_query_lockdown_versions_skips_untrusted_devices(monkeypatch):
     """Lockdown failures (untrusted/locked) omit the device instead of raising."""
 

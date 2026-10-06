@@ -1,6 +1,7 @@
 """
 Transfera v2 — Batch Manager
-Chunks sorted media_items into strict 100-file TransferBatch rows.
+Chunks sorted media_items into TransferBatch rows (default 100 files each;
+per-session override via TransferSession.batch_size).
 """
 
 from __future__ import annotations
@@ -24,29 +25,40 @@ logger = logging.getLogger(__name__)
 async def create_batches(
     session_id: int,
     item_ids: Sequence[int],
+    batch_size: int | None = None,
 ) -> list[int]:
     """
-    Partition *item_ids* into ``BATCH_SIZE``-sized chunks, insert a
-    ``TransferBatch`` row for each chunk, and assign the batch FK to
-    every ``MediaItem`` in that chunk.
+    Partition *item_ids* into sized chunks, insert a ``TransferBatch`` row
+    for each chunk, and assign the batch FK to every ``MediaItem`` in that
+    chunk.
+
+    Size precedence: explicit *batch_size* arg, else the session's stored
+    ``batch_size``, else the global ``BATCH_SIZE`` default. Clamped to
+    10..500 (tiny batches are chatty, huge batches stall progress events).
+    Buffer-size usages of ``BATCH_SIZE`` elsewhere are unaffected.
 
     Returns a list of created ``TransferBatch.id`` values (ordered).
     """
     if not item_ids:
         return []
 
-    num_batches = ceil(len(item_ids) / BATCH_SIZE)
-    created_ids: list[int] = []
+    size = batch_size or BATCH_SIZE
 
     async with session_scope() as session:
         # Verify session exists
         ts = await session.get(TransferSession, session_id)
         if ts is None:
             raise ValueError(f"TransferSession {session_id} does not exist")
+        if batch_size is None:
+            size = ts.batch_size or BATCH_SIZE
+        size = max(10, min(500, size))
+
+        num_batches = ceil(len(item_ids) / size)
+        created_ids: list[int] = []
 
         for batch_num in range(1, num_batches + 1):
-            start = (batch_num - 1) * BATCH_SIZE
-            end = start + BATCH_SIZE
+            start = (batch_num - 1) * size
+            end = start + size
             chunk = item_ids[start:end]
 
             batch = TransferBatch(

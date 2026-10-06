@@ -154,6 +154,7 @@ _regen_generation = 0
 _regen_gen_lock = threading.Lock()
 from backend.ios_device import (
     DeviceStatus,
+    canonical_device_serial,
     check_driver_status,
     is_ios_support_available,
     parse_ios_source,
@@ -1006,6 +1007,7 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
             transfer_mode=req.transfer_mode,
             only_new_mode=req.only_new_since_last_import,
             folder_layout=req.folder_layout,
+            batch_size=req.batch_size or BATCH_SIZE,
         )
         session.add(ts)
         await session.flush()
@@ -1473,11 +1475,40 @@ async def _phase_scan_and_create_batches(
                 session_id,
                 len(selected_set),
             )
+            # Re-author stored selection onto the live serial: the tier may
+            # have flapped between selection (UDID) and scan (PnP id embedding
+            # the same UDID) or vice versa. Same-scheme only — AFC and MTP
+            # expose different folder namespaces, which no string rewrite
+            # can reconcile.
+            if source_root:
+                for scheme in ("ios://", "wpd://"):
+                    if source_root.startswith(scheme):
+                        live_serial = source_root[len(scheme) :].split("/", 1)[0]
+                        rewritten: set[str] = set()
+                        for p in selected_set:
+                            if p.startswith(scheme):
+                                old_serial = p[len(scheme) :].split("/", 1)[0]
+                                rest = p[len(scheme) + len(old_serial) :]
+                                if canonical_device_serial(old_serial) == canonical_device_serial(live_serial):
+                                    rewritten.add(f"{scheme}{live_serial}{rest}")
+                                else:
+                                    rewritten.add(p)
+                            else:
+                                rewritten.add(p)
+                        if rewritten != selected_set:
+                            logger.info(
+                                "Session %d: re-authored %d selected path(s) onto live serial",
+                                session_id,
+                                len(selected_set),
+                            )
+                        selected_set = rewritten
+                        break
 
     cutoff_datetime = None
     if only_new_mode and source_root.startswith("ios://"):
         serial, _ = parse_ios_source(source_root)
-        cutoff_datetime = await get_cutoff_datetime(serial)
+        # Canonicalize so cutoffs survive Tier 1 <-> WPD serial flips.
+        cutoff_datetime = await get_cutoff_datetime(canonical_device_serial(serial))
         if cutoff_datetime is not None:
             logger.info(
                 "Session %d: incremental mode active, cutoff=%s",
@@ -1959,11 +1990,14 @@ async def _phase_finalize(session_id: int) -> None:
                 serial, _ = parse_ios_source(ts.source_root)
                 new_cutoff = await compute_cutoff_from_session(session_id)
                 if new_cutoff is not None:
+                    # Canonical serial: the next session may arrive via the
+                    # other tier (UDID vs PnP id embedding it).
+                    serial = canonical_device_serial(serial)
                     device_name = None
                     try:
                         raw_devices: list = await asyncio.to_thread(_list_ios_devices_backend)  # type: ignore[arg-type]
                         for d in raw_devices:
-                            if d.serial == serial:
+                            if canonical_device_serial(d.serial) == serial:
                                 device_name = d.name
                                 break
                     except Exception:

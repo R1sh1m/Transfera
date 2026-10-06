@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -851,3 +852,22 @@ def is_wpd_device_id(device_id: str) -> bool:
     Real iOS UDIDs are 40-char hex strings or "0000XXXX-XXXXXXXX" format.
     """
     return device_id.startswith("\\\\?\\") or "vid_" in device_id
+
+
+_UDID_SEARCH_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def canonical_device_serial(serial: str | None) -> str:
+    """Stable identity for a device across Tier 1 / WPD serial formats.
+
+    A WPD PnP id often embeds the 40-hex UDID among separators; extracting
+    it keeps cutoff keys, selection matching, and tier prefs stable when
+    the serving tier flaps. Ids without an embedded UDID (SWD#WPDBUSENUM
+    form) are returned unchanged.
+    """
+    if not serial:
+        return ""
+    match = _UDID_SEARCH_RE.search(serial)
+    if match:
+        return match.group(0).lower()
+    return serial

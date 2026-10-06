@@ -15,6 +15,7 @@ import {
   HardDrive,
   X,
   CheckCircle2,
+  ChevronDown,
   AlertCircle,
   AlertTriangle,
   Info,
@@ -142,6 +143,19 @@ const notifIcons: Record<
 function NotificationToast() {
   const notification = useTransferStore((s) => s.ui.notification);
   const clearNotification = useTransferStore((s) => s.clearNotification);
+  const [expanded, setExpanded] = useState(false);
+
+  // Notifications dismiss themselves after 100 s; a new notification
+  // restarts the clock and collapses any expanded text.
+  useEffect(() => {
+    if (!notification) return;
+    setExpanded(false);
+    const t = setTimeout(clearNotification, 100_000);
+    return () => clearTimeout(t);
+  }, [notification, clearNotification]);
+
+  const message = notification?.message ?? "";
+  const long = message.length > 180;
 
   return (
     <AnimatePresence>
@@ -150,15 +164,45 @@ function NotificationToast() {
           initial={{ opacity: 0, y: 20, x: 20 }}
           animate={{ opacity: 1, y: 0, x: 0 }}
           exit={{ opacity: 0, y: 20 }}
-          className="fixed bottom-4 right-4 z-50 glass rounded-lg p-3 flex items-center gap-3 max-w-sm"
+          onClick={() => {
+            if (long) setExpanded((e) => !e);
+          }}
+          title={
+            long
+              ? expanded
+                ? "Click to collapse"
+                : "Click to expand"
+              : undefined
+          }
+          className={cn(
+            "fixed bottom-4 right-4 z-50 glass rounded-lg p-3 flex items-center gap-3 max-w-md",
+            long && "cursor-pointer",
+          )}
         >
           {notifIcons[notification.type]}
-          <p className="text-sm text-foreground flex-1">
-            {notification.message}
+          <p
+            className={cn(
+              "text-sm text-foreground flex-1 break-words [overflow-wrap:anywhere]",
+              !expanded && "line-clamp-3",
+              expanded && "max-h-[40vh] overflow-y-auto",
+            )}
+          >
+            {message}
           </p>
+          {long && (
+            <ChevronDown
+              className={cn(
+                "w-3.5 h-3.5 shrink-0 text-muted-foreground transition-transform",
+                expanded && "rotate-180",
+              )}
+            />
+          )}
           <button
-            onClick={clearNotification}
-            className="p-1 rounded hover:bg-muted text-muted-foreground"
+            onClick={(e) => {
+              e.stopPropagation();
+              clearNotification();
+            }}
+            className="p-1 rounded hover:bg-muted text-muted-foreground shrink-0"
           >
             <X className="w-3 h-3" />
           </button>

@@ -43,6 +43,7 @@ async def test_migrations_fresh_db() -> None:
             ("transfer_sessions", "folder_layout"),
             ("transfer_sessions", "selected_files_json"),
             ("transfer_sessions", "is_prescan"),
+            ("transfer_sessions", "batch_size"),
             ("media_items", "thumbnail_status"),
             ("media_items", "original_capture_time"),
             ("media_items", "phash"),

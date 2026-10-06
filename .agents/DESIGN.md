@@ -648,7 +648,7 @@ The inline media preview panel on the Setup page that appears when a source dire
 | Filter + sort row | Left: three filter pills (All / Photos with Image icon / Videos with Film icon), active pill `bg-primary text-primary-foreground`, inactive `bg-muted text-muted-foreground`. Right: sort dropdown (6 options) with SlidersHorizontal icon |
 | Pre-scan banner | Conditional — blue-tinted bar (`bg-blue-50 dark:bg-blue-950/40`) when prescan finds likely duplicates. Text: "X files already appear to be in your library." Right: "Select only new files" button (`bg-blue-600`) |
 | Thumbnail grid | 4-column grid, `gap-0.5`, each cell `aspect-square rounded-lg overflow-hidden cursor-pointer`. Contains `component.media-thumb-cell` instances |
-| Load more | "Load more (X remaining)" button at `w-full`, `text-primary`, `border border-border rounded-lg` — only shown when `page < totalPages` |
+| Pagination | Prev / windowed numbers / Next + per-page selector (25/50/100) instead of grow-forever — pages replace items (bounded DOM + bounded concurrent thumbnails); selection and byte totals span pages |
 | Bottom action bar | Left: selection count (`text-xs font-medium`) + total size / placeholder text (`text-xs text-muted-foreground`). Right: "Transfer selected" button with Upload icon — `bg-action text-white` when items selected, `bg-muted text-muted-foreground opacity-40 cursor-default` when 0 selected |
 
 **States:**

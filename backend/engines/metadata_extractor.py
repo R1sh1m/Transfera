@@ -878,6 +878,107 @@ class _ExifToolSession:
 _exiftool_session = _ExifToolSession()
 
 
+class _ExifToolBinarySession:
+    """
+    Persistent ExifTool process for raw binary extraction (embedded JPEGs).
+
+    Same stay-open mechanics as :class:`_ExifToolSession`, but each command
+    runs ``-b -ThumbnailImage <path>`` and the raw bytes (which may contain
+    ``\\n``) are accumulated until the exact ``{ready}`` sentinel line. The
+    sentinel line itself is discarded; embedded newlines inside the payload
+    are preserved because ``readline`` keeps its delimiter.
+    """
+
+    _SENTINEL = b"{ready}\n"
+
+    def __init__(self) -> None:
+        self._lock = _threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._stdout_queue: _queue.Queue[bytes] = _queue.Queue()
+        self._reader_thread: _threading.Thread | None = None
+
+    def _start(self) -> bool:
+        exe = _bootstrap_exiftool()
+        if not exe:
+            return False
+        try:
+            self._proc = subprocess.Popen(
+                [exe, "-stay_open", "True", "-@", "-"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self._stdout_queue = _queue.Queue()
+            self._reader_thread = _threading.Thread(
+                target=_ExifToolSession._read_stdout_loop,
+                args=(self, self._proc.stdout, self._stdout_queue),
+                daemon=True,
+                name="exiftool-binary-reader",
+            )
+            self._reader_thread.start()
+            return True
+        except OSError as exc:
+            logger.warning("ExifTool binary stay_open failed to start: %s", exc)
+            self._proc = None
+            return False
+
+    def _ensure_running(self) -> bool:
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        return self._start()
+
+    def extract_thumbnail(self, path: Path) -> bytes | None:
+        """Return embedded JPEG bytes for *path*, or None."""
+        with self._lock:
+            if not self._ensure_running():
+                return None
+            assert self._proc is not None and self._proc.stdin is not None
+            cmd_block = f"-b\n-ThumbnailImage\n{path}\n-execute\n"
+            try:
+                self._proc.stdin.write(cmd_block.encode("utf-8"))
+                self._proc.stdin.flush()
+            except OSError:
+                self._proc = None
+                return None
+            buf = _io.BytesIO()
+            while True:
+                try:
+                    line = self._stdout_queue.get(timeout=10.0)
+                except _queue.Empty:
+                    logger.warning("ExifTool binary command timed out; recycling session")
+                    try:
+                        if self._proc:
+                            self._proc.kill()
+                    except Exception:
+                        pass
+                    self._proc = None
+                    return None
+                if not line:
+                    self._proc = None
+                    return None
+                if line == self._SENTINEL:
+                    break
+                buf.write(line)
+            data = buf.getvalue()
+            return data if len(data) > 100 else None
+
+
+_binary_session = _ExifToolBinarySession()
+
+
+def extract_embedded_thumbnail_bytes(file_path: str | Path) -> bytes | None:
+    """Embedded JPEG thumbnail via the persistent binary session.
+
+    Falls back to None (callers keep their one-shot/Pillow fallbacks) when
+    ExifTool is unavailable or the file has no embedded preview.
+    """
+    try:
+        return _binary_session.extract_thumbnail(Path(file_path))
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Filesystem fallback
 # ---------------------------------------------------------------------------

@@ -155,11 +155,19 @@ def _extract_embedded_thumbnail(file_path: Path) -> bytes | None:
     Only called for formats that can structurally contain embedded thumbnails
     (JPEG, HEIC, RAW formats) — never for PNG/BMP/GIF/WebP/TIFF.
     """
-    from backend.engines.metadata_extractor import _bootstrap_exiftool
+    from backend.engines.metadata_extractor import _bootstrap_exiftool, extract_embedded_thumbnail_bytes
 
     exe = _bootstrap_exiftool()
     if not exe:
         return None
+
+    # Prefer the persistent binary session (no ~500 ms spawn per file).
+    try:
+        via_session = extract_embedded_thumbnail_bytes(file_path)
+        if via_session:
+            return via_session
+    except Exception:
+        pass
 
     try:
         result = subprocess.run(

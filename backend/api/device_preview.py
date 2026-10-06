@@ -304,6 +304,55 @@ def _generate_photo_thumbnail(path: str, size: int) -> bytes | None:
                 pass
 
 
+def _extract_frame_from_bytes(data: bytes, size: int, suffix: str) -> bytes | None:
+    """Extract one JPEG frame from in-memory video bytes (single ffmpeg spawn).
+
+    Used for device video prefixes: fast input seek, no duration probe.
+    Returns None when the prefix lacks decodable frames (e.g. moov at EOF).
+    """
+    if not data or len(data) <= 100:
+        return None
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss",
+                "0.5",
+                "-i",
+                tmp_path,
+                "-vframes",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "mjpeg",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
+            return result.stdout
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("ffmpeg frame extraction failed: %s", exc)
+    except Exception as exc:
+        logger.debug("ffmpeg frame extraction error: %s", exc)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return None
+
+
 def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
     """Generate thumbnail for a video using ffmpeg."""
     try:
@@ -373,33 +422,40 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
         # Fast path: try to extract embedded thumbnail from partial byte buffer.
         # Most iOS HEIC/JPEG files embed a ~30-80 KB JPEG preview in their EXIF
         # header, which is present in the first 128 KB of the file.
+        # Uses the persistent binary ExifTool session (no per-file spawn);
+        # the prefix bytes go through a small temp file (~256 KB write).
         try:
-            import subprocess as _sp
+            from backend.engines.metadata_extractor import extract_embedded_thumbnail_bytes
 
-            from backend.engines.metadata_extractor import _bootstrap_exiftool
+            embedded: bytes | None = None
+            if data and len(data) >= 4096:
+                import tempfile as _tempfile
 
-            exe = _bootstrap_exiftool()
-            if exe and len(data) >= 4096:  # Only worth trying on real data
-                result = _sp.run(
-                    [exe, "-b", "-ThumbnailImage", "-Charset", "utf8", "-"],
-                    input=data,
-                    capture_output=True,
-                    timeout=5,
-                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
-                )
-                if result.returncode == 0 and result.stdout and len(result.stdout) > 500:
-                    # Validate and resize the embedded thumbnail
-                    from PIL.Image import Resampling
+                _tmp_path = ""
+                try:
+                    with _tempfile.NamedTemporaryFile(suffix=".heic", delete=False) as _tmp:
+                        _tmp.write(data)
+                        _tmp_path = _tmp.name
+                    embedded = extract_embedded_thumbnail_bytes(_tmp_path)
+                finally:
+                    if _tmp_path:
+                        try:
+                            os.unlink(_tmp_path)
+                        except OSError:
+                            pass
+            if embedded and len(embedded) > 500:
+                # Validate and resize the embedded thumbnail
+                from PIL.Image import Resampling
 
-                    thumb_img = Image.open(_io.BytesIO(result.stdout))
-                    thumb_img = ImageOps.exif_transpose(thumb_img) or thumb_img
-                    thumb_img.thumbnail((size, size), Resampling.LANCZOS)
-                    if thumb_img.mode not in ("RGB",):
-                        thumb_img = thumb_img.convert("RGB")
-                    buf = _io.BytesIO()
-                    thumb_img.save(buf, format="JPEG", quality=82)
-                    thumb_img.close()
-                    return buf.getvalue()
+                thumb_img = Image.open(_io.BytesIO(embedded))
+                thumb_img = ImageOps.exif_transpose(thumb_img) or thumb_img
+                thumb_img.thumbnail((size, size), Resampling.LANCZOS)
+                if thumb_img.mode not in ("RGB",):
+                    thumb_img = thumb_img.convert("RGB")
+                buf = _io.BytesIO()
+                thumb_img.save(buf, format="JPEG", quality=82)
+                thumb_img.close()
+                return buf.getvalue()
         except Exception:
             pass  # Fall through to full Pillow decode
 
@@ -870,29 +926,19 @@ async def ios_thumbnail(
                     logger.debug("iOS full-read thumbnail error for %s: %s", path, exc)
 
         else:
-            # Video: must download full file for ffmpeg frame extraction
-            # Cap at 200MB to avoid RAM DoS from a malicious/compromised client
-            suffix = ext or ".mp4"
+            # Video fast path: read only the first 8 MB and extract one
+            # frame with a single input-seek ffmpeg spawn (no duration
+            # probe, no full download). Phone videos with the moov box up
+            # front (faststart) resolve immediately; others fall back to
+            # the video badge instead of downloading hundreds of MB.
+            _VIDEO_PREFIX_BYTES = 8 * 1024 * 1024
+            prefix_bytes: bytes | None = None
             try:
-                file_bytes = await read_device_file(device_id, path)
-                if file_bytes is not None and len(file_bytes) > 200 * 1024 * 1024:
-                    logger.warning("iOS video too large for thumbnail: %s", path)
-                    file_bytes = None
+                prefix_bytes = await _read_device_file_partial(device_id, path, max_bytes=_VIDEO_PREFIX_BYTES)
             except Exception as exc:
-                logger.debug("iOS video file read error for %s: %s", path, exc)
-                file_bytes = None
-
-            if file_bytes:
-                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                    tmp.write(file_bytes)
-                    tmp_path = tmp.name
-                try:
-                    jpeg_bytes = _generate_video_thumbnail(tmp_path, size)
-                finally:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                logger.debug("iOS video prefix read failed for %s: %s", path, exc)
+            if prefix_bytes and len(prefix_bytes) > 4096:
+                jpeg_bytes = _extract_frame_from_bytes(prefix_bytes, size, ext or ".mp4")
 
     except Exception as exc:
         logger.debug("iOS thumbnail error for %s: %s", path, exc)

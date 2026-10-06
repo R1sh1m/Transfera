@@ -2120,6 +2120,9 @@ export default function DeviceSetupPage() {
   const [transferMode, setTransferMode] = useState<TransferMode>(
     storeTransferMode || defaultTransferMode,
   );
+  // Files per transfer batch (server clamps 10..500, default 100).
+  // Smaller batches = more responsive progress + cheaper retries on flaky links.
+  const [batchSize, setBatchSize] = useState(100);
 
   const { data: config, isLoading: configLoading } = useConfig();
   const createSession = useCreateSession();
@@ -2268,6 +2271,7 @@ export default function DeviceSetupPage() {
           only_new_since_last_import: isIOSDevice && onlyNewMode,
           folder_layout: folderLayout,
           selected_files: files.length > 0 ? files : null,
+          batch_size: batchSize,
         });
         initTransfer(session);
         resetSetup();
@@ -2286,6 +2290,7 @@ export default function DeviceSetupPage() {
       isIOSDevice,
       onlyNewMode,
       folderLayout,
+      batchSize,
       createSession,
       initTransfer,
       resetSetup,
@@ -2582,6 +2587,34 @@ export default function DeviceSetupPage() {
               : folderLayout === "year/month"
                 ? `Documents/PDFs/${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, "0")}/Report.pdf`
                 : `Documents/PDFs/${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, "0")}/${String(new Date().getDate()).padStart(2, "0")}/Report.pdf`}
+          </div>
+        </div>
+
+        {/* Batch size */}
+        <div>
+          <label className="text-sm font-semibold text-foreground mb-2 block">
+            Batch Size
+          </label>
+          <div className="inline-flex gap-0.5 bg-muted rounded-lg p-0.5">
+            {[25, 50, 100, 200].map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setBatchSize(n)}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-normal rounded-md transition-all",
+                  batchSize === n
+                    ? "bg-background text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <div className="mt-1.5 text-xs text-muted-foreground">
+            Files per batch. Smaller batches give more responsive progress and
+            cheaper retries on flaky links.
           </div>
         </div>
 
