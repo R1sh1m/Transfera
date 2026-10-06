@@ -223,6 +223,44 @@ jobs:
               }
           }
 
+      - name: Generate Updater Manifest (latest.json)
+        # The v2 updater installs the full NSIS installer directly (no zip
+        # wrapping): latest.json points url at the setup.exe and carries the
+        # decoded minisign signature. Fails loudly when the .sig is missing
+        # so we never publish a release the in-app updater cannot use.
+        shell: pwsh
+        run: |
+          $releaseDir = "frontend/release"
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $exe = Get-ChildItem -Path $releaseDir -Filter "Transfera_*-setup.exe" -File | Select-Object -First 1
+          if (-not $exe) { Write-Error "No setup exe found for updater manifest"; exit 1 }
+          $sigPath = "$($exe.FullName).sig"
+          if (-not (Test-Path $sigPath)) { Write-Error "Missing updater signature $($exe.Name).sig"; exit 1 }
+          $sigRaw = (Get-Content $sigPath -Raw).Trim()
+          if ($sigRaw.Contains("untrusted comment:")) {
+            $sigText = $sigRaw
+          } else {
+            $sigText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($sigRaw)).Trim()
+          }
+          if (-not $sigText.Contains("untrusted comment:")) { Write-Error "Updater signature has unexpected format"; exit 1 }
+          $url = "https://github.com/R1sh1m/Transfera/releases/download/$tag/$($exe.Name)"
+          $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $platform = [ordered]@{ signature = $sigText; url = $url }
+          $manifest = [ordered]@{
+            version = $version
+            notes = "Transfera $version — see the GitHub release for details."
+            pub_date = $pubDate
+            platforms = [ordered]@{
+              "windows-x86_64" = $platform
+              "windows-x86_64-nsis" = $platform
+            }
+          }
+          $out = Join-Path $releaseDir "latest.json"
+          ($manifest | ConvertTo-Json -Depth 5) | Set-Content -Path $out -Encoding utf8NoBOM
+          Write-Host "Wrote $out for version $version"
+          Get-Content $out
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
