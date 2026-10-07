@@ -278,21 +278,49 @@ def _generate_gray_fallback() -> bytes:
 
 
 def _generate_photo_thumbnail(path: str, size: int) -> bytes | None:
-    """Generate thumbnail for a photo using Pillow."""
+    """Generate thumbnail for a photo using EXIF embedded preview fast-path, then Pillow."""
+    ext = os.path.splitext(path)[1].lower()
+
+    # Fast path 1: Extract embedded JPEG thumbnail from EXIF (JPEG, HEIC, RAW files)
+    if ext in (".jpg", ".jpeg", ".heic", ".heif", ".cr2", ".cr3", ".nef", ".arw", ".dng"):
+        try:
+            from backend.engines.metadata_extractor import extract_embedded_thumbnail_bytes
+
+            embedded = extract_embedded_thumbnail_bytes(Path(path))
+            if embedded and len(embedded) > 500:
+                from PIL import Image, ImageOps
+                from PIL.Image import Resampling
+
+                thumb_img = Image.open(_io.BytesIO(embedded))
+                thumb_img = ImageOps.exif_transpose(thumb_img) or thumb_img
+                thumb_img.thumbnail((size, size), Resampling.BILINEAR)
+                if thumb_img.mode not in ("RGB",):
+                    thumb_img = thumb_img.convert("RGB")
+                buf = _io.BytesIO()
+                thumb_img.save(buf, format="JPEG", quality=80)
+                thumb_img.close()
+                return buf.getvalue()
+        except Exception:
+            pass
+
+    # Fast path 2: Pillow decode with draft mode for JPEG and fast bilinear resampling
     img = None
     try:
         from PIL import Image, ImageOps
         from PIL.Image import Resampling
 
         img = Image.open(path)
+        if ext in (".jpg", ".jpeg"):
+            try:
+                img.draft("RGB", (size * 2, size * 2))
+            except Exception:
+                pass
         img = ImageOps.exif_transpose(img) or img
-        img.thumbnail((size, size), Resampling.LANCZOS)
+        img.thumbnail((size, size), Resampling.BILINEAR)
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
-        import io
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
         return buf.getvalue()
     except Exception:
         return None
@@ -354,15 +382,17 @@ def _extract_frame_from_bytes(data: bytes, size: int, suffix: str) -> bytes | No
 
 
 def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
-    """Generate thumbnail for a video using ffmpeg."""
+    """Generate thumbnail for a video using ffmpeg with fast input seeking."""
     try:
+        # Fast input-seeking (-ss BEFORE -i) seeks directly to keyframe in milliseconds
         result = subprocess.run(
             [
                 "ffmpeg",
-                "-i",
-                path,
                 "-ss",
                 "00:00:01",
+                "-noaccurate_seek",
+                "-i",
+                path,
                 "-frames:v",
                 "1",
                 "-vf",
@@ -374,7 +404,7 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
                 "pipe:1",
             ],
             capture_output=True,
-            timeout=10,
+            timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode == 0 and len(result.stdout) > 100:
@@ -382,6 +412,8 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
         result2 = subprocess.run(
             [
                 "ffmpeg",
+                "-ss",
+                "00:00:00",
                 "-i",
                 path,
                 "-frames:v",
@@ -395,7 +427,7 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
                 "pipe:1",
             ],
             capture_output=True,
-            timeout=10,
+            timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result2.returncode == 0 and len(result2.stdout) > 100:
@@ -449,11 +481,11 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
 
                 thumb_img = Image.open(_io.BytesIO(embedded))
                 thumb_img = ImageOps.exif_transpose(thumb_img) or thumb_img
-                thumb_img.thumbnail((size, size), Resampling.LANCZOS)
+                thumb_img.thumbnail((size, size), Resampling.BILINEAR)
                 if thumb_img.mode not in ("RGB",):
                     thumb_img = thumb_img.convert("RGB")
                 buf = _io.BytesIO()
-                thumb_img.save(buf, format="JPEG", quality=82)
+                thumb_img.save(buf, format="JPEG", quality=80)
                 thumb_img.close()
                 return buf.getvalue()
         except Exception:
@@ -463,11 +495,11 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
 
         img = Image.open(_io.BytesIO(data))
         img = ImageOps.exif_transpose(img) or img
-        img.thumbnail((size, size), Resampling.LANCZOS)
+        img.thumbnail((size, size), Resampling.BILINEAR)
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         buf = _io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=80)
         return buf.getvalue()
     except Exception:
         return None
@@ -638,6 +670,8 @@ async def preview_directory(
 async def device_thumbnail(
     path: str = Query(..., description="Absolute path of the source file"),
     size: int = Query(200, ge=32, le=512),
+    file_size: int | None = Query(None, description="Source file size (cache validation)"),
+    file_mtime: float | None = Query(None, description="Source file mtime (cache validation)"),
     _: None = Depends(require_local_token_or_query),
 ):
     abs_path = os.path.abspath(path)
@@ -646,9 +680,16 @@ async def device_thumbnail(
         return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
 
     try:
-        if os.path.isfile(abs_path) and os.path.getsize(abs_path) > 200 * 1024 * 1024:
-            return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+        if file_size is None or file_mtime is None:
+            st = os.stat(abs_path)
+            if file_size is None:
+                file_size = st.st_size
+            if file_mtime is None:
+                file_mtime = st.st_mtime
     except OSError:
+        return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+
+    if file_size and file_size > 200 * 1024 * 1024:
         return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
 
     ext = os.path.splitext(abs_path)[1].lower()
@@ -664,7 +705,17 @@ async def device_thumbnail(
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
 
-    # Offload CPU-bound Pillow decode + JPEG encode to the thread pool so the
+    disk_key = _device_thumb_disk_key("local", abs_path, size, file_size, file_mtime)
+    disk_cached = _read_disk_thumb(disk_key)
+    if disk_cached is not None:
+        _put_thumb_cache(cache_key, disk_cached)
+        return Response(
+            content=disk_cached,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
+
+    # Offload CPU-bound decode + encode to the thread pool so the
     # event loop stays free for other requests during thumbnail generation.
     import asyncio
 
@@ -673,12 +724,15 @@ async def device_thumbnail(
     else:
         jpeg_bytes = await asyncio.to_thread(_generate_video_thumbnail, abs_path, size)
 
-    if jpeg_bytes is None:
-        jpeg_bytes = _generate_gray_fallback()
+    is_real = bool(jpeg_bytes and len(jpeg_bytes) > 10)
+    result = jpeg_bytes if is_real else _generate_gray_fallback()
 
-    _put_thumb_cache(cache_key, jpeg_bytes)
+    _put_thumb_cache(cache_key, result)
+    if is_real:
+        _write_disk_thumb(disk_key, result)
+
     return Response(
-        content=jpeg_bytes,
+        content=result,
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400, immutable"},
     )

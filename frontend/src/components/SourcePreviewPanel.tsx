@@ -163,7 +163,7 @@ function MediaThumbCell({
           observer.unobserve(el);
         }
       },
-      { root: scrollContainer, rootMargin: "1200px" },
+      { root: scrollContainer, rootMargin: "400px" },
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -238,6 +238,8 @@ function MediaThumbCell({
         <img
           src={imgSrc}
           alt={item.filename}
+          loading="lazy"
+          decoding="async"
           onLoad={handleLoad}
           onError={handleError}
           className={cn(
@@ -488,10 +490,12 @@ function ImportAllModal({
           ) : (
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                Showing all {data.items.length} files (newest first):
+                {data.items.length > 32
+                  ? `Showing preview of first 32 of ${data.items.length} files (newest first):`
+                  : `Showing all ${data.items.length} files (newest first):`}
               </p>
               <div className="grid grid-cols-4 gap-2 max-h-[50vh] overflow-y-auto">
-                {data.items.map((item) => (
+                {data.items.slice(0, 32).map((item) => (
                   <div
                     key={item.abs_path}
                     className="relative aspect-square rounded-lg overflow-hidden bg-muted"
@@ -507,6 +511,7 @@ function ImportAllModal({
                       alt={item.filename}
                       className="w-full h-full object-cover"
                       loading="lazy"
+                      decoding="async"
                     />
                     <div className="absolute bottom-0 left-0 right-0 p-1 bg-gradient-to-t from-black/70 to-transparent text-[10px] text-white truncate">
                       {item.filename}
@@ -628,7 +633,7 @@ function SourcePreviewPanelInner({
 
   const abortRef = useRef<AbortController | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  const thumbQueueRef = useRef<ThumbQueue>(createThumbQueue(4));
+  const thumbQueueRef = useRef<ThumbQueue>(createThumbQueue(8));
 
   const isDefaultRecursive = Boolean(
     deviceSource &&
@@ -729,7 +734,8 @@ function SourcePreviewPanelInner({
       setFocusedIndex(null);
     }
 
-    const effPageSize = isRecursive ? _PREVIEW_MAX_FILES : pageSize;
+    // Always respect user-selected page size (default 100) — bounds DOM and thumbnail queue
+    const effPageSize = pageSize;
     const url = getPreviewUrl(page, effPageSize, sortBy);
 
     fetch(url, {
@@ -907,14 +913,14 @@ function SourcePreviewPanelInner({
       const allPaths = loadedItems.map((item) => item.abs_path);
 
       setIsRecursive(true);
-      setItems(loadedItems);
+      setItems(loadedItems.slice(0, pageSize));
       setMetadata({
         total: data.total || loadedItems.length,
         photos: data.photos || 0,
         videos: data.videos || 0,
         total_size_bytes: data.total_size_bytes || 0,
       });
-      setTotalPages(data.pages || 1);
+      setTotalPages(Math.max(1, Math.ceil((data.total || loadedItems.length) / pageSize)));
       setPage(1);
 
       // Select all items by default
@@ -942,20 +948,20 @@ function SourcePreviewPanelInner({
       isImportingAllRef.current = false;
       setLoading(false);
     }
-  }, [deviceSource, sourcePath, sortBy, onSelectionConfirm, onTransferStart]);
+  }, [deviceSource, sourcePath, sortBy, pageSize, onSelectionConfirm, onTransferStart]);
 
   const handleConfirmImportAll = useCallback(() => {
     if (!importAllData) return;
     const allPaths = importAllData.items.map((i) => i.abs_path);
     setIsRecursive(true);
-    setItems(importAllData.items);
+    setItems(importAllData.items.slice(0, pageSize));
     setMetadata({
       total: importAllData.total,
       photos: importAllData.photos,
       videos: importAllData.videos,
       total_size_bytes: importAllData.totalSize,
     });
-    setTotalPages(1);
+    setTotalPages(Math.max(1, Math.ceil(importAllData.total / pageSize)));
     setPage(1);
     const nextSelected = new Set(allPaths);
     selectedRef.current = nextSelected;
@@ -963,7 +969,7 @@ function SourcePreviewPanelInner({
     setImportAllData(null);
     onSelectionConfirm(allPaths);
     onTransferStart?.(allPaths);
-  }, [importAllData, onSelectionConfirm, onTransferStart]);
+  }, [importAllData, pageSize, onSelectionConfirm, onTransferStart]);
 
   const handleCancelImportAll = useCallback(() => {
     setImportAllData(null);
@@ -1057,31 +1063,57 @@ function SourcePreviewPanelInner({
     <>
       <div className="space-y-2">
         {/* Header bar */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-normal text-foreground">
+            <span className="text-xs font-semibold text-foreground">
               Source preview
             </span>
-            {!loading && (
+            {!loading && metadata.total > 0 && (
               <span className="text-xs text-muted-foreground">
-                {metadata.total} files &middot;{" "}
+                {metadata.total} file{metadata.total !== 1 ? "s" : ""} &middot;{" "}
                 {formatBytes(metadata.total_size_bytes)}
                 {isRecursive && " (all subfolders)"}
               </span>
             )}
           </div>
           {!loading && items.length > 0 && (
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={handleSelectAll}
-                className="text-xs font-normal text-primary hover:text-primary/80 transition-colors"
+                className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors"
               >
-                {allVisibleSelected ? "Deselect all" : "Select all"}
+                {allVisibleSelected ? "Deselect page" : `Select page (${visibleItems.length})`}
               </button>
-              <span className="text-[11px] text-muted-foreground">
-                (Ctrl+A)
-              </span>
+              {selectedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const paths = Array.from(selected);
+                    onSelectionConfirm(paths);
+                    onTransferStart?.(paths);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 bg-action hover:bg-action/90 text-white rounded-pill text-xs font-normal active:scale-[0.95] transition-all"
+                  title={`Transfer ${selectedCount} selected file${selectedCount !== 1 ? "s" : ""}`}
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Transfer selected ({selectedCount})
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleImportAll}
+                className={cn(
+                  "inline-flex items-center gap-1.5 px-3 py-1 rounded-pill text-xs font-normal active:scale-[0.95] transition-all",
+                  selectedCount === 0
+                    ? "bg-action hover:bg-action/90 text-white"
+                    : "border border-border text-foreground hover:bg-muted",
+                )}
+                title={`Import all ${metadata.total} files without scrolling`}
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Import all ({metadata.total})
+              </button>
             </div>
           )}
         </div>
@@ -1262,7 +1294,7 @@ function SourcePreviewPanelInner({
                 onBlur={handleGridBlur}
                 role="grid"
                 aria-label={`Source preview — ${items.length} files`}
-                className="grid grid-cols-4 gap-0.5 focus-visible:outline-none"
+                className="grid grid-cols-4 gap-1 focus-visible:outline-none max-h-[460px] overflow-y-auto rounded-xl border border-border/40 p-1.5 bg-muted/10 scroll-smooth"
               >
                 {visibleItems.map((item, index) => (
                   <MediaThumbCell
@@ -1337,32 +1369,42 @@ function SourcePreviewPanelInner({
         <div className="flex items-center justify-between pt-1">
           <div>
             <p className="text-xs font-normal text-foreground">
-              {selectedCount > 0 ? `${selectedCount} selected` : "0 selected"}
+              {selectedCount > 0 ? `${selectedCount} selected` : `0 of ${items.length} selected`}
             </p>
             <p className="text-xs text-muted-foreground">
               {selectedCount > 0
                 ? `${formatBytes(selectedBytes)} to transfer`
-                : "Select files to transfer"}
+                : `${metadata.total} total files in folder (${formatBytes(metadata.total_size_bytes)})`}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              const paths = Array.from(selected);
-              onSelectionConfirm(paths);
-              onTransferStart?.(paths);
-            }}
-            disabled={selectedCount === 0}
-            className={cn(
-              "flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal transition-all",
-              selectedCount > 0
-                ? "bg-action text-white hover:bg-action/90 active:scale-[0.95]"
-                : "bg-muted text-muted-foreground cursor-default opacity-40",
-            )}
-          >
-            <Upload className="w-3.5 h-3.5" />
-            Start transfer
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleImportAll}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-pill text-xs font-normal border border-border text-foreground hover:bg-muted active:scale-[0.95] transition-all"
+            >
+              <Upload className="w-3.5 h-3.5 text-action" />
+              Import all ({metadata.total})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const paths = Array.from(selected);
+                onSelectionConfirm(paths);
+                onTransferStart?.(paths);
+              }}
+              disabled={selectedCount === 0}
+              className={cn(
+                "inline-flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal transition-all",
+                selectedCount > 0
+                  ? "bg-action text-white hover:bg-action/90 active:scale-[0.95]"
+                  : "bg-muted text-muted-foreground cursor-default opacity-40",
+              )}
+            >
+              <Upload className="w-3.5 h-3.5" />
+              Start transfer {selectedCount > 0 ? `(${selectedCount})` : ""}
+            </button>
+          </div>
         </div>
       </div>
       <ImportAllModal
