@@ -20,7 +20,7 @@ HOST: str = "127.0.0.1"
 # /api/health and the FastAPI metadata). Bump together with package.json /
 # tauri.conf.json / Cargo.toml / pyproject.toml — enforced by
 # test_version_single_source.py in CI.
-APP_VERSION: str = "2.8.2"
+APP_VERSION: str = "2.8.3"
 
 # ---------------------------------------------------------------------------
 # Processing
