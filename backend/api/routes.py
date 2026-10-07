@@ -86,6 +86,7 @@ from backend.api.source_types import (
 )
 from backend.api.websocket import manager as ws_manager
 from backend.config import (
+    APP_VERSION,
     AUDIO_EXTENSIONS,
     BATCH_SIZE,
     CACHE_DIR,
@@ -219,7 +220,7 @@ def _cleanup_session_state(session_id: int) -> None:
 @router.get("/health")
 async def health_check() -> dict:
     """Return service health status for frontend polling and startup detection."""
-    return {"status": "ok", "version": "2.8.0", "active_transfers": len(_active_tasks)}
+    return {"status": "ok", "version": APP_VERSION, "active_transfers": len(_active_tasks)}
 
 
 @router.get("/transfers/active")

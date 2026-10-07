@@ -25,7 +25,7 @@ from backend.api.intelligence_routes import curation_router, trash_router
 from backend.api.intelligence_routes import router as intelligence_router
 from backend.api.routes import _run_transfer_background, router, ws_transfer
 from backend.api.tier2_routes import router as tier2_router
-from backend.config import CACHE_DIR, HOST, LOG_DIR, LOG_FORMAT, PORT
+from backend.config import APP_VERSION, CACHE_DIR, HOST, LOG_DIR, LOG_FORMAT, PORT
 from backend.config import LOG_LEVEL as _LOG_LEVEL
 from backend.database.manager import create_all_tables, dispose_engine, session_scope
 from backend.engines.recovery import recover_interrupted_batches
@@ -316,7 +316,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Transfera v2",
         description="Local media backup engine",
-        version="2.8.0",
+        version=APP_VERSION,
         lifespan=lifespan,
     )
 
@@ -395,7 +395,7 @@ def create_app() -> FastAPI:
             return {
                 "name": "Transfera Backend API",
                 "status": "active",
-                "version": "2.8.0",
+                "version": APP_VERSION,
                 "note": "Frontend not built — run 'npm run build' in frontend/",
             }
 

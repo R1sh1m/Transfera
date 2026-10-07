@@ -16,6 +16,12 @@ from pathlib import Path
 PORT: int = 47821
 HOST: str = "127.0.0.1"
 
+# Single source of truth for the backend version string (reported by
+# /api/health and the FastAPI metadata). Bump together with package.json /
+# tauri.conf.json / Cargo.toml / pyproject.toml — enforced by
+# test_version_single_source.py in CI.
+APP_VERSION: str = "2.8.2"
+
 # ---------------------------------------------------------------------------
 # Processing
 # ---------------------------------------------------------------------------
