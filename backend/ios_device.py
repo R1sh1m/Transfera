@@ -61,6 +61,16 @@ DCIM_PATH = "/DCIM"
 # timeout and surfaces as a bare fetch failure.
 _TRUST_PROBE_TIMEOUT = 8.0
 _BROWSE_TIMEOUT = 25.0
+# Resilience for the flaky Windows usbmux path: right after plug/unlock the
+# phone shows up in WPD instantly but usbmux needs another second or two to
+# enumerate it, and a busy usbmux can briefly return [] or refuse the
+# lockdown handshake. A couple of quick retries turn those transient misses
+# into a stable Tier 1 row instead of a USB-fallback flicker.
+_LIST_EMPTY_RETRIES = 2
+_LIST_EMPTY_RETRY_DELAY = 0.4
+_LOCKDOWN_TIMEOUT = 2.0
+_LOCKDOWN_RETRIES = 1
+_DRIVER_SOCKET_TIMEOUT = 2.0
 # A wedged AFC read must fail the file, never hang the batch/transfer:
 # full reads get a generous budget (large videos on slow links), prefix
 # reads and stats must return quickly.
@@ -224,34 +234,101 @@ async def list_ios_devices() -> list[IOSDevice]:
             logger.debug("pymobiledevice3 usbmux import still failing: %s", exc)
         return []
 
-    try:
-        mux_devices = list_devices()
-    except ConnectionFailedToUsbmuxdError:
-        logger.info(
-            "usbmuxd not running — Apple Mobile Device Support driver not detected. "
-            "Install iTunes or Apple Devices from the Microsoft Store."
-        )
-        return []
-    except ConnectionError:
-        logger.info("usbmuxd connection refused — no Apple driver detected")
-        return []
-    except Exception as exc:
-        logger.warning("Failed to list usbmux devices: %s", exc)
-        return []
+    mux_devices: list | None = None
+    for _attempt in range(_LIST_EMPTY_RETRIES + 1):
+        try:
+            mux_devices = list_devices()
+            break
+        except ConnectionFailedToUsbmuxdError:
+            logger.info(
+                "usbmuxd not running — Apple Mobile Device Support driver not detected. "
+                "Install iTunes or Apple Devices from the Microsoft Store."
+            )
+            return []
+        except ConnectionError:
+            logger.info("usbmuxd connection refused — no Apple driver detected")
+            return []
+        except Exception as exc:
+            if _attempt < _LIST_EMPTY_RETRIES:
+                logger.debug(
+                    "list_devices attempt %d failed (%s) — retrying",
+                    _attempt + 1,
+                    exc,
+                )
+                await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+                continue
+            logger.warning("Failed to list usbmux devices: %s", exc)
+            return []
 
     if not mux_devices:
-        logger.debug("usbmux returned 0 devices")
-        return []
+        # Transient enumeration race: WPD sees the phone instantly while
+        # usbmux needs another second or two after plug/unlock. One poll
+        # returning [] must not flip the UI to USB fallback, so retry
+        # briefly before accepting "no devices".
+        for _retry in range(_LIST_EMPTY_RETRIES):
+            await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+            try:
+                mux_devices = list_devices()
+            except (ConnectionFailedToUsbmuxdError, ConnectionError):
+                break
+            except Exception as exc:
+                logger.debug("usbmux empty-list retry failed: %s", exc)
+                break
+            if mux_devices:
+                logger.info(
+                    "usbmux found %d device(s) after empty-list retry",
+                    len(mux_devices),
+                )
+                break
+        if not mux_devices:
+            logger.debug("usbmux returned 0 devices")
+            return []
 
     logger.info("usbmux found %d connected device(s)", len(mux_devices))
+
+    async def _create_lockdown_with_retry(serial: str):
+        last_exc: Exception | None = None
+        for _attempt in range(_LOCKDOWN_RETRIES + 1):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(create_using_usbmux, serial=serial, autopair=False),
+                    timeout=_LOCKDOWN_TIMEOUT,
+                )
+            except TimeoutError as exc:
+                last_exc = exc
+                if _attempt < _LOCKDOWN_RETRIES:
+                    logger.debug(
+                        "Device %s lockdown handshake timed out (attempt %d) — retrying",
+                        serial,
+                        _attempt + 1,
+                    )
+                    await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+                    continue
+                raise
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                # Trust/pairing failures are deterministic — no retry.
+                if "not paired" in exc_str or "trust" in exc_str:
+                    raise
+                if _attempt < _LOCKDOWN_RETRIES:
+                    logger.debug(
+                        "Device %s lockdown failed (%s, attempt %d) — retrying",
+                        serial,
+                        exc,
+                        _attempt + 1,
+                    )
+                    await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+                    last_exc = exc
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise TimeoutError(f"lockdown handshake failed for {serial}")
 
     async def _get_device_info_task(mux_dev) -> IOSDevice:
         serial = mux_dev.serial
         try:
-            lockdown = await asyncio.wait_for(
-                asyncio.to_thread(create_using_usbmux, serial=serial, autopair=False),
-                timeout=2.0,
-            )
+            lockdown = await _create_lockdown_with_retry(serial)
             try:
                 info = lockdown.short_info
                 device_name = info.get("DeviceName", "Unknown iPhone")
@@ -398,12 +475,14 @@ def check_driver_status() -> str:
     except Exception:
         return "no_pymobiledevice3"
 
-    # Quick non-blocking check: try to connect to usbmuxd socket
+    # Quick non-blocking check: try to connect to usbmuxd socket.
+    # 0.5 s proved too tight on slow machines — a busy usbmuxd would miss
+    # the deadline and the UI would flicker to USB fallback for one poll.
     import socket
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(0.5)
+        sock.settimeout(_DRIVER_SOCKET_TIMEOUT)
         # usbmuxd on Windows listens on 127.0.0.1:27015
         sock.connect(("127.0.0.1", 27015))
         sock.close()

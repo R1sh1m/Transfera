@@ -1179,9 +1179,11 @@ class DeviceBackendManager:
 
             if devices:
                 # If a backend found devices, but all of them are in non-ready states
-                # (locked, not trusted, or error), and we have fallback backends available,
-                # we should continue checking the fallback backends to see if they can
-                # access the device in a ready/usable state (e.g. WPD backend).
+                # (locked, not trusted, or error), still keep those rows while
+                # probing fallbacks for a usable connection (e.g. WPD backend).
+                # Dropping them hid a transient Tier 1 LOCKED (trust-probe
+                # timeout under load) and left only the WPD row + blind-spot
+                # banner, even though the phone was unlocked.
                 all_non_ready = all(
                     d.status in (DeviceStatus.NOT_TRUSTED, DeviceStatus.LOCKED, DeviceStatus.ERROR) for d in devices
                 )
@@ -1203,11 +1205,10 @@ class DeviceBackendManager:
                     if has_alternatives:
                         logger.info(
                             "DeviceBackend: %s found devices but all are in non-ready states %s. "
-                            "Checking fallback backends for a usable connection.",
+                            "Keeping those rows and checking fallback backends for a usable connection.",
                             backend.tier.value,
                             [d.status.value for d in devices],
                         )
-                        continue
 
                 for d in devices:
                     is_dup = False

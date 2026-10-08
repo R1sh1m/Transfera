@@ -934,7 +934,7 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                     !readyDevices.some((d) => d.active_tier === "tier1") && (
                       <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-3.5">
                         <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                        <div>
+                        <div className="flex-1 min-w-0">
                           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
                             iPhone on USB, but the Apple driver can&apos;t see
                             it
@@ -942,8 +942,24 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                           <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
                             Unlock your iPhone and unplug/replug it — previews
                             and transfers are much faster over the Apple driver
-                            than USB fallback.
+                            than USB fallback. This sometimes clears on its own;
+                            retrying re-probes the driver without replugging.
                           </p>
+                          <button
+                            type="button"
+                            onClick={() => recoverMutation.mutate()}
+                            disabled={recoverMutation.isPending}
+                            className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-pill text-xs font-normal active:scale-[0.95] transition-all"
+                          >
+                            {recoverMutation.isPending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3 h-3" />
+                            )}
+                            {recoverMutation.isPending
+                              ? "Retrying…"
+                              : "Retry Apple driver"}
+                          </button>
                         </div>
                       </div>
                     )}
