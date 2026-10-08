@@ -24,6 +24,7 @@
     "notification:allow-notify",
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
-    "process:allow-restart"
+    "process:allow-restart",
+    "updater:default"
   ]
 }

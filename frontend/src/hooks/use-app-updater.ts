@@ -16,6 +16,21 @@ export type UpdateStatus =
   | "up-to-date"
   | "error";
 
+// Tauri plugin rejections cross the IPC boundary as plain values, not Error
+// instances — `err instanceof Error` is false for them and the real message
+// was being replaced by the generic fallback (invisible failures).
+function updaterErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string" && err) return err;
+  try {
+    const s = JSON.stringify(err);
+    if (s && s !== "{}" && s !== "null") return s;
+  } catch {
+    /* fall through */
+  }
+  return fallback;
+}
+
 export function useAppUpdater(autoCheck: boolean = true) {
   const [status, setStatus] = useState<UpdateStatus>("idle");
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -50,6 +65,22 @@ export function useAppUpdater(autoCheck: boolean = true) {
         updateHandleRef.current = null;
         setUpdateInfo(null);
         setStatus("up-to-date");
+        if (manual) {
+          // Visible proof the check itself worked (fetch + parse +
+          // compare all succeeded); otherwise a healthy "no update"
+          // looks identical to a silent failure.
+          let current = "";
+          try {
+            const { getVersion } = await import("@tauri-apps/api/app");
+            current = ` (v${await getVersion()})`;
+          } catch {
+            /* browser dev shell — omit version */
+          }
+          const { useTransferStore } = await import("@/store/transfer");
+          useTransferStore
+            .getState()
+            .showNotification("success", `You're up to date${current}.`);
+        }
       }
     } catch (err) {
       console.warn("[updater] Update check failed:", err);
@@ -57,7 +88,7 @@ export function useAppUpdater(autoCheck: boolean = true) {
       if (manual) {
         setStatus("error");
         setErrorMessage(
-          err instanceof Error ? err.message : "Failed to check for updates.",
+          updaterErrorMessage(err, "Failed to check for updates."),
         );
       } else {
         setStatus("idle");
@@ -83,7 +114,10 @@ export function useAppUpdater(autoCheck: boolean = true) {
         } else if (event.event === "Progress") {
           downloadedBytes += event.data?.chunkLength || 0;
           if (totalBytes > 0) {
-            const pct = Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+            const pct = Math.min(
+              100,
+              Math.round((downloadedBytes / totalBytes) * 100),
+            );
             setDownloadProgress(pct);
           }
         } else if (event.event === "Finished") {
@@ -99,9 +133,7 @@ export function useAppUpdater(autoCheck: boolean = true) {
     } catch (err) {
       console.error("[updater] Download or install failed:", err);
       setStatus("error");
-      setErrorMessage(
-        err instanceof Error ? err.message : "Failed to install update.",
-      );
+      setErrorMessage(updaterErrorMessage(err, "Failed to install update."));
     }
   }, []);
 

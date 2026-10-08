@@ -1,6 +1,8 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { Sparkles, Download, RefreshCw, X, AlertCircle } from "lucide-react";
+import { useEffect } from "react";
 import { useAppUpdater } from "@/hooks/use-app-updater";
+import { useTransferStore } from "@/store/transfer";
 
 export default function AppUpdateNotification() {
   const {
@@ -8,9 +10,16 @@ export default function AppUpdateNotification() {
     updateInfo,
     downloadProgress,
     errorMessage,
+    checkForUpdates,
     downloadAndInstall,
     dismiss,
   } = useAppUpdater(true);
+  // External manual triggers (e.g. Dashboard "Check for updates"): run the
+  // manual check path so failures surface visibly instead of vanishing.
+  const updateCheckNonce = useTransferStore((s) => s.ui.updateCheckNonce);
+  useEffect(() => {
+    if (updateCheckNonce > 0) checkForUpdates(true);
+  }, [updateCheckNonce, checkForUpdates]);
 
   if (status === "idle" || status === "checking" || status === "up-to-date") {
     return null;
@@ -36,17 +45,22 @@ export default function AppUpdateNotification() {
             </div>
             <div>
               <p className="text-xs font-semibold leading-tight text-foreground">
-                {status === "available" && `Transfera v${updateInfo?.version} is available`}
+                {status === "available" &&
+                  `Transfera v${updateInfo?.version} is available`}
                 {status === "downloading" && `Downloading update...`}
                 {status === "ready" && `Update installed!`}
                 {status === "error" && `Update failed`}
               </p>
               <p className="text-[11px] text-muted-foreground mt-0.5 leading-tight">
-                {status === "available" && "An in-place update is ready to install."}
+                {status === "available" &&
+                  "An in-place update is ready to install."}
                 {status === "downloading" &&
-                  (downloadProgress !== null ? `${downloadProgress}% completed` : "Please wait...")}
+                  (downloadProgress !== null
+                    ? `${downloadProgress}% completed`
+                    : "Please wait...")}
                 {status === "ready" && "Relaunching Transfera now..."}
-                {status === "error" && (errorMessage || "Could not complete update.")}
+                {status === "error" &&
+                  (errorMessage || "Could not complete update.")}
               </p>
             </div>
           </div>

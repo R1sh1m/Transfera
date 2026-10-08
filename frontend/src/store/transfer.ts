@@ -105,6 +105,7 @@ export interface UIState {
   setupMoveConfirmed: boolean;
   setupOnlyNewMode: boolean;
   setupFolderLayout: FolderLayout;
+  updateCheckNonce: number;
   wsError: string | null;
   lastCompletedSessionId: number | null;
   lastRegeneratedSessionId: number | null;
@@ -159,6 +160,7 @@ export interface TransferStore {
     message: string,
   ) => void;
   clearNotification: () => void;
+  requestUpdateCheck: () => void;
   setServerDown: (down: boolean) => void;
   setSetupSourcePath: (path: string) => void;
   setSetupDestPath: (path: string) => void;
@@ -246,6 +248,7 @@ const initialUI: UIState = {
   setupMoveConfirmed: false,
   setupOnlyNewMode: false,
   setupFolderLayout: "year/month",
+  updateCheckNonce: 0,
   wsError: null,
   lastCompletedSessionId: null,
   lastRegeneratedSessionId: null,
@@ -760,6 +763,14 @@ export const useTransferStore = create<TransferStore>()(
 
       clearNotification: () =>
         set((s) => ({ ui: { ...s.ui, notification: null } })),
+
+      // Bumps a counter the AppUpdateNotification listens for, so any
+      // surface (e.g. Dashboard) can trigger a manual update check through
+      // the single shared updater instance.
+      requestUpdateCheck: () =>
+        set((s) => ({
+          ui: { ...s.ui, updateCheckNonce: s.ui.updateCheckNonce + 1 },
+        })),
 
       setServerDown: (down) =>
         set((s) => ({ ui: { ...s.ui, serverDown: down } })),
