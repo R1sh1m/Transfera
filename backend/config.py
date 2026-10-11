@@ -79,6 +79,12 @@ PACKAGED_EXIFTOOL_DIR: Path = BACKEND_ROOT / "bin" / "exiftool"
 # resources/ at build time. The bootstrapper in engines/metadata_extractor.py
 # checks this path first (Tier 1 before the writable AppData copy).
 PACKAGED_EXIFTOOL_EXE: Path = SIDECAR_RESOURCE_DIR / "exiftool.exe"
+# AI model weights shipped as Tauri resources. The release build stages all
+# model files (MobileCLIP image/text + tokenizer, SCRFD + ArcFace) into
+# resources/models/ at build time. The ensure paths in engines/intelligence.py
+# and engines/clip.py copy missing files from here into the writable AppData
+# models dir on first run (Tier 1 before any on-demand download).
+PACKAGED_MODELS_DIR: Path = SIDECAR_RESOURCE_DIR / "models"
 
 
 def _resolve_wpd_helper() -> Path:

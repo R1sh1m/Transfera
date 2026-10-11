@@ -65,6 +65,10 @@ Write-Host "  Ensuring PyInstaller is up to date..." -ForegroundColor DarkCyan
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
+    Write-Host "  Ensuring frozen-bundle dependencies (AI runtime)..." -ForegroundColor DarkCyan
+    & $VenvPython -m pip install -r (Join-Path $Root "backend\requirements.txt") -q 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Error "requirements.txt install failed"; exit 1 }
+
     & $VenvPython -m pip install --upgrade pyinstaller -q 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Error "pyinstaller install failed"; exit 1 }
 

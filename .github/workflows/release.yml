@@ -101,6 +101,43 @@ jobs:
           .venv\Scripts\python -c "from backend.engines.metadata_extractor import _download_exiftool; import sys; p=_download_exiftool('backend/bin/exiftool'); print('preseded:', p); sys.exit(0 if p and p.is_file() else 1)"
           if (Test-Path backend/bin/exiftool/exiftool.exe) { Write-Host "ExifTool pre-seed verified." } else { Write-Error "ExifTool pre-seed missing!"; exit 1 }
 
+      - name: Pre-seed AI models (offline installer support)
+        # Downloads the 5 on-board AI model files into backend/data/models/
+        # so the resource-staging step below can ship them inside the
+        # installer. First-run download remains as fallback. Fail-closed:
+        # a release without models would silently ship a model-less
+        # installer (~400 MB of weights must be present).
+        # Canonical names/URLs mirror backend/engines/clip.py MODEL_SPECS
+        # and backend/engines/intelligence.py FACE_MODEL_SPECS.
+        run: |
+          $modelsDir = "backend/data/models"
+          New-Item -ItemType Directory -Path $modelsDir -Force | Out-Null
+          $files = @(
+            @{ Name = "mobileclip_s0_image.onnx"; Url = "https://huggingface.co/Xenova/mobileclip_s0/resolve/main/onnx/vision_model.onnx"; Expected = 45500000 },
+            @{ Name = "mobileclip_s0_text.onnx"; Url = "https://huggingface.co/Xenova/mobileclip_s0/resolve/main/onnx/text_model.onnx"; Expected = 170000000 },
+            @{ Name = "mobileclip_s0_tokenizer.json"; Url = "https://huggingface.co/Xenova/mobileclip_s0/resolve/main/tokenizer.json"; Expected = 2200000 },
+            @{ Name = "scrfd_10g.onnx"; Url = "https://huggingface.co/DavidHoa/buffalo_l/resolve/9d7dfbba11e47cf2bf1aa92eb61f53172aae07e9/det_10g.onnx"; Expected = 16000000 },
+            @{ Name = "arcface_r50.onnx"; Url = "https://huggingface.co/DavidHoa/buffalo_l/resolve/9d7dfbba11e47cf2bf1aa92eb61f53172aae07e9/w600k_r50.onnx"; Expected = 166000000 }
+          )
+          foreach ($f in $files) {
+            $dest = Join-Path $modelsDir $f.Name
+            if (-not (Test-Path $dest)) {
+              Write-Host "Downloading $($f.Name) from $($f.Url) ..."
+              Invoke-WebRequest -Uri $f.Url -OutFile $dest -UseBasicParsing
+            } else {
+              Write-Host "$($f.Name) already present, verifying size."
+            }
+          }
+          foreach ($f in $files) {
+            $dest = Join-Path $modelsDir $f.Name
+            if (-not (Test-Path $dest)) { Write-Error "$($f.Name) pre-seed missing!"; exit 1 }
+            $size = (Get-Item $dest).Length
+            if ($size -lt 1MB) { Write-Error "$($f.Name) suspiciously small ($size bytes)!"; exit 1 }
+            if (($size -lt ($f.Expected / 2)) -or ($size -gt ($f.Expected * 2))) { Write-Error "$($f.Name) size $size bytes outside 0.5x-2x of expected $($f.Expected)!"; exit 1 }
+            Write-Host "$($f.Name) verified ($([math]::Round($size/1MB,1)) MB)."
+          }
+          Write-Host "AI model pre-seed verified."
+
       - name: Prepare Code Signing
         # Exports the cert for a Tauri `bundle.windows.signCommand` wired at
         # release time (follow-up with the updater work). Unsigned builds
@@ -132,11 +169,13 @@ jobs:
           if ($stagedCount -lt 10) { Write-Error "Sidecar _internal runtime incomplete ($stagedCount files)!"; exit 1 }
           Write-Host "Sidecar staged: $engineExe ($([math]::Round((Get-Item $engineExe).Length/1MB,1)) MB exe, $stagedCount runtime files)"
 
-      - name: Stage Tauri Resources (wpd_helper + ExifTool runtime)
+      - name: Stage Tauri Resources (wpd_helper + ExifTool runtime + AI models)
         # resources/ holds the runtime helper binaries the frozen sidecar
         # resolves via backend.config.SIDECAR_RESOURCE_DIR.
         # ExifTool v13.59+ ships as a stub exe + exiftool_files/ Perl runtime
         # tree — both must land in resources/ for the launcher to work.
+        # The 5 on-board AI model files (~400 MB, pre-seeded above) ship as
+        # resources/models/ so first launch works fully offline.
         # The smoke test runs the staged exe to confirm it resolves its runtime.
         # NOTE: resources/ and binaries/ are gitignored (*.exe excluded) so
         # they don't exist after a fresh checkout — create them first.
@@ -154,6 +193,23 @@ jobs:
            }
           & frontend/src-tauri/resources/exiftool.exe -ver
           if ($LASTEXITCODE -ne 0) { Write-Error "ExifTool smoke test failed!"; exit 1 }
+          New-Item -ItemType Directory -Path frontend/src-tauri/resources/models -Force | Out-Null
+          Copy-Item backend/data/models/mobileclip_s0_image.onnx frontend/src-tauri/resources/models/ -Force
+          Copy-Item backend/data/models/mobileclip_s0_text.onnx frontend/src-tauri/resources/models/ -Force
+          Copy-Item backend/data/models/mobileclip_s0_tokenizer.json frontend/src-tauri/resources/models/ -Force
+          Copy-Item backend/data/models/scrfd_10g.onnx frontend/src-tauri/resources/models/ -Force
+          Copy-Item backend/data/models/arcface_r50.onnx frontend/src-tauri/resources/models/ -Force
+          $modelFiles = @("mobileclip_s0_image.onnx", "mobileclip_s0_text.onnx", "mobileclip_s0_tokenizer.json", "scrfd_10g.onnx", "arcface_r50.onnx")
+          $modelTotal = 0
+          foreach ($m in $modelFiles) {
+            $p = Join-Path "frontend/src-tauri/resources/models" $m
+            if (-not (Test-Path $p)) { Write-Error "Staged model missing: $m!"; exit 1 }
+            $len = (Get-Item $p).Length
+            if ($len -eq 0) { Write-Error "Staged model empty: $m!"; exit 1 }
+            $modelTotal += $len
+          }
+          if ($modelTotal -lt 300MB) { Write-Error "Staged models total too small ($([math]::Round($modelTotal/1MB,1)) MB, expected >300MB)!"; exit 1 }
+          Write-Host "AI models staged: 5 files, $([math]::Round($modelTotal/1MB,1)) MB total."
           if ((Get-Item frontend/src-tauri/resources/wpd_helper.exe).Length -eq 0) { Write-Error "wpd_helper.exe staging is empty!"; exit 1 }
           Write-Host "Tauri resources staged and verified."
 

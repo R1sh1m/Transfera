@@ -1262,8 +1262,12 @@ export function useModelStatus(downloading: boolean) {
       >("/intelligence/models/status");
       return data;
     },
-    // Poll fast while a download is in flight, slow otherwise.
-    refetchInterval: downloading ? 2000 : 60000,
+    // Poll fast while a download is in flight or the last fetch reported an
+    // error (so recovery is seen quickly), slow otherwise.
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return downloading || s === "error" ? 2000 : 60000;
+    },
     retry: 1,
   });
 }
@@ -1285,6 +1289,8 @@ export function useDownloadModels() {
       qc.invalidateQueries({ queryKey: ["intelligence-capabilities"] });
     },
     onError: (error) => {
+      qc.invalidateQueries({ queryKey: ["intelligence-models-status"] });
+      qc.invalidateQueries({ queryKey: ["intelligence-capabilities"] });
       useTransferStore
         .getState()
         .showNotification("error", extractErrorMessage(error));

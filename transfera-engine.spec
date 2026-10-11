@@ -34,10 +34,24 @@ try:
 except Exception as exc:  # noqa: BLE001 - directory is not an importable package
     print(f"pywin32_system32 DLL collection skipped: {exc}")
 
+# Frozen AI runtime (onnxruntime/tokenizers/numpy ship in the bundle from day
+# one): backend/engines/clip.py ensure_ai_packages() returns False immediately
+# when sys.frozen and ai_packages_missing() needs onnxruntime + tokenizers
+# importable — if these don't survive freezing, AI is permanently broken in
+# the installed app. Hidden imports alone can miss native provider libs
+# (*.dll/*.pyd) and bundled data, so collect dynamic libs explicitly (same
+# pattern as the pywin32 block above).
+ai_binaries: list = []
+for _ai_pkg in ("onnxruntime", "tokenizers", "numpy"):
+    try:
+        ai_binaries += collect_dynamic_libs(_ai_pkg)
+    except Exception as exc:  # noqa: BLE001 - optional collection, hiddenimports still cover pure-python
+        print(f"AI runtime dynamic-lib collection skipped for {_ai_pkg}: {exc}")
+
 a = Analysis(
     ["backend/main.py"],
     pathex=[],
-    binaries=[*pywin32_binaries],
+    binaries=[*pywin32_binaries, *ai_binaries],
     datas=[
         # On-demand AI runtime manifest: backend/engines/clip.py resolves it
         # via BACKEND_ROOT (MEIPASS when frozen). The AI wheels themselves
@@ -94,10 +108,16 @@ a = Analysis(
         "pydantic",
         "email_validator",
         "multipart",
-        # On-board AI runtime (bundled from day one — weights stay on-demand)
+        # On-board AI runtime (bundled from day one — weights stay on-demand).
+        # Frozen-import check: clip.ensure_ai_packages() skips pip when
+        # sys.frozen and clip.ai_packages_missing() needs onnxruntime +
+        # tokenizers importable, so every entry here must survive freezing.
         "onnxruntime",
+        *collect_submodules("onnxruntime"),
         "tokenizers",
+        *collect_submodules("tokenizers"),
         "numpy",
+        *collect_submodules("numpy"),
     ],
     hookspath=[],
     hooksconfig={},

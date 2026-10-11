@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -50,8 +51,14 @@ MODEL_SPECS: tuple[tuple[str, str, int], ...] = (
     (TOKENIZER_FILE, "tokenizer.json", 2_200_000),
 )
 
-_READ_TIMEOUT = 600
+# Per-file network policy: urllib exposes a single timeout covering both
+# connect and read, so both budgets are ~30s via the same knob.
+_CONNECT_TIMEOUT = 30
+_READ_TIMEOUT = 30
 _DOWNLOAD_CHUNK = 1024 * 256
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_BASE = 2.0  # sleep = base ** attempt (1s, 2s, 4s ...)
+_STALLED_AFTER = 120  # seconds without progress before status reports stalled
 
 _sessions_lock = threading.Lock()
 _image_session = None  # onnxruntime InferenceSession | None
@@ -61,8 +68,44 @@ _tokenizer = None  # tokenizers.Tokenizer | None
 # Background model-download state (read by the status endpoint).
 # RLock (not Lock): start_background_download() calls download_status()
 # while already holding it — a plain Lock would deadlock same-thread.
-_download_state: dict = {"status": "idle", "downloaded_bytes": 0, "error": None}
+# started_at/last_activity are time.time() floats (None when never started);
+# last_activity is touched on every received chunk so a stuck thread is
+# detectable via download_status()'s stalled check.
+_download_state: dict = {
+    "status": "idle",
+    "downloaded_bytes": 0,
+    "error": None,
+    "started_at": None,
+    "last_activity": None,
+}
 _download_lock = threading.RLock()
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _touch() -> None:
+    with _download_lock:
+        _download_state["last_activity"] = _now()
+
+
+def _resume_baseline_bytes() -> int:
+    """Sum of existing .part bytes for still-missing models (resume credit)."""
+    try:
+        root = _models_root()
+    except Exception:
+        return 0
+    total = 0
+    for name, _, _ in MODEL_SPECS:
+        part = root / name
+        part = part.with_suffix(part.suffix + ".part")
+        try:
+            if part.is_file():
+                total += part.stat().st_size
+        except OSError:
+            pass
+    return total
 
 
 def download_status() -> dict:
@@ -79,6 +122,19 @@ def download_status() -> dict:
         with _download_lock:
             _download_state["status"] = "ready"
         state["status"] = "ready"
+        return state
+    # Heartbeat: a download thread that made no progress for _STALLED_AFTER
+    # while still claiming "downloading" is stuck (e.g. wedged socket that
+    # outlived per-read timeouts). Surface it so the frontend can offer retry.
+    if state.get("status") == "downloading":
+        last = state.get("last_activity")
+        if isinstance(last, (int, float)) and (_now() - last) > _STALLED_AFTER:
+            with _download_lock:
+                if _download_state.get("status") == "downloading":
+                    _download_state["status"] = "error"
+                    _download_state["error"] = "stalled — retry"
+            state["status"] = "error"
+            state["error"] = "stalled — retry"
     return state
 
 
@@ -87,14 +143,20 @@ def start_background_download() -> dict:
     import threading as _threading
 
     with _download_lock:
-        if _download_state["status"] == "downloading":
+        if _download_state["status"] in ("downloading", "installing-packages"):
             return download_status()
         if not missing_models():
             _download_state["status"] = "ready"
             return download_status()
         _download_state["status"] = "downloading"
-        _download_state["downloaded_bytes"] = 0
+        # Progress truth: only reset the counter when starting fresh. When
+        # .part files exist we resume, so credit bytes already on disk.
+        resume_bytes = _resume_baseline_bytes()
+        _download_state["downloaded_bytes"] = resume_bytes
         _download_state["error"] = None
+        now = _now()
+        _download_state["started_at"] = now
+        _download_state["last_activity"] = now
 
     def _run() -> None:
         try:
@@ -105,6 +167,12 @@ def start_background_download() -> dict:
                     _download_state["status"] = "error"
                     _download_state["error"] = "AI library install failed"
                 return
+            with _download_lock:
+                # ensure_ai_packages() flips status to installing-packages;
+                # flip back so heartbeat/stalled logic sees the weights phase.
+                if _download_state.get("status") == "installing-packages":
+                    _download_state["status"] = "downloading"
+                _download_state["last_activity"] = _now()
             ok = ensure_models()
             with _download_lock:
                 _download_state["status"] = "ready" if ok else "error"
@@ -177,6 +245,7 @@ def ensure_ai_packages(timeout: int = 600) -> bool:
     try:
         with _download_lock:
             _download_state["status"] = "installing-packages"
+            _download_state["last_activity"] = _now()
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", str(req)],
             capture_output=True,
@@ -198,41 +267,165 @@ def ensure_ai_packages(timeout: int = 600) -> bool:
         return False
 
 
+def _download_one_file(name: str, rel: str, root: Path) -> bool:
+    """Download a single model file with resume + retries.
+
+    Keeps the ``.part`` temp file across attempts/restarts and resumes via
+    ``Range`` when the server answers 206; falls back to a full rewrite when
+    resume is unsupported. Returns True on success. On exhausted retries,
+    records ``"<name>: <HTTP/OS error>"`` (200 chars) in _download_state.
+    """
+    url = f"{HF_BASE}/{rel}"
+    dest = root / name
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        resume_from = tmp.stat().st_size if tmp.is_file() else 0
+    except OSError:
+        resume_from = 0
+
+    last_err: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        # Re-stat: a previous attempt in this loop may have grown .part.
+        try:
+            resume_from = tmp.stat().st_size if tmp.is_file() else 0
+        except OSError:
+            resume_from = 0
+        headers = {"User-Agent": "Transfera/2.0"}
+        if resume_from > 0:
+            headers["Range"] = f"bytes={resume_from}-"
+        logger.info(
+            "Downloading CLIP model %s (%s)%s attempt %d/%d",
+            name,
+            url,
+            f" resuming at {resume_from} bytes" if resume_from else "",
+            attempt + 1,
+            _MAX_RETRIES,
+        )
+        try:
+            req = Request(url, headers=headers)
+            # Single urllib timeout covers connect + read (~30s each budget).
+            with urlopen(req, timeout=_CONNECT_TIMEOUT) as resp:
+                code = getattr(resp, "status", None)
+                try:
+                    if code is None and hasattr(resp, "getcode"):
+                        code = resp.getcode()
+                except Exception:
+                    code = None
+                resumed = resume_from > 0 and code == 206
+                if resume_from > 0 and not resumed:
+                    # Server ignored Range: full rewrite, so un-count the
+                    # previously credited partial bytes to keep progress true.
+                    with _download_lock:
+                        _download_state["downloaded_bytes"] = max(0, _download_state["downloaded_bytes"] - resume_from)
+                    resume_from = 0
+                mode = "ab" if resumed else "wb"
+                new_bytes = 0
+                with open(tmp, mode) as fh:
+                    while True:
+                        chunk = resp.read(_DOWNLOAD_CHUNK)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        new_bytes += len(chunk)
+                        with _download_lock:
+                            # Counts every spec incl. tokenizer (no per-type skip).
+                            _download_state["downloaded_bytes"] += len(chunk)
+                            _download_state["last_activity"] = _now()
+            full_size = resume_from + new_bytes
+            if full_size < 1_000_000:
+                raise OSError(f"suspiciously small download ({full_size} bytes)")
+            tmp.replace(dest)
+            logger.info("CLIP model ready: %s (%.1f MB)", name, full_size / 1e6)
+            return True
+        except Exception as exc:  # noqa: BLE001 — per-file retry + error text
+            last_err = exc
+            logger.warning(
+                "CLIP model download failed for %s (attempt %d/%d): %s",
+                name,
+                attempt + 1,
+                _MAX_RETRIES,
+                exc,
+            )
+            with _download_lock:
+                _download_state["last_activity"] = _now()
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF_BASE**attempt)
+    # Retries exhausted: keep .part on disk for a future resume, and record
+    # which file + why so the status endpoint can show it.
+    with _download_lock:
+        _download_state["error"] = f"{name}: {last_err}"[:200] if last_err else f"{name}: download failed"[:200]
+    return False
+
+
+def _seed_from_bundle(root: Path, missing: list[str]) -> None:
+    """Copy missing model files from the packaged bundle into *root*.
+
+    Local duplicate of the seed helper in engines/intelligence.py (kept
+    duplicate so intelligence.py never imports clip.py). Same guards:
+    skip 0-byte placeholders, size sanity check >1MB, best-effort with
+    debug log. Silent when the bundle ships no models.
+    """
+    try:
+        import shutil
+
+        from backend.config import PACKAGED_MODELS_DIR
+    except Exception:
+        return
+    for name in list(missing):
+        try:
+            dest = root / name
+            if dest.is_file():
+                continue
+            src = PACKAGED_MODELS_DIR / name
+            try:
+                if not src.is_file() or src.stat().st_size < 1_000_000:
+                    continue
+            except OSError:
+                continue
+            try:
+                shutil.copy2(src, dest)
+            except OSError as exc:
+                logger.debug("Bundle model seed failed for %s: %s", name, exc)
+                continue
+            try:
+                if dest.stat().st_size < 1_000_000:
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    continue
+            except OSError:
+                pass
+            logger.debug("Seeded CLIP model from bundle: %s", name)
+        except Exception:
+            logger.debug("Bundle model seed skipped for %s", name, exc_info=True)
+
+
 def ensure_models() -> bool:
     """Download any missing model files. Returns True when all present."""
     missing = missing_models()
     if not missing:
         return True
     root = _models_root()
+    # Tier 1: first-run seed from the packaged bundle (resources/models/).
+    # Only what is still missing afterwards falls through to download.
+    _seed_from_bundle(root, missing)
+    missing = missing_models()
+    if not missing:
+        return True
+    # Progress truth: if .part bytes exist on disk but the in-memory counter
+    # was lost (backend restart), credit them once via max() — never double
+    # count bytes already credited by start_background_download().
+    baseline = _resume_baseline_bytes()
+    if baseline > 0:
+        with _download_lock:
+            if _download_state["downloaded_bytes"] < baseline:
+                _download_state["downloaded_bytes"] = baseline
+            _download_state["last_activity"] = _now()
     spec_by_name = {name: (path, size) for name, path, size in MODEL_SPECS}
     for name in missing:
         rel, _expected = spec_by_name[name]
-        url = f"{HF_BASE}/{rel}"
-        dest = root / name
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        logger.info("Downloading CLIP model %s (%s)", name, url)
-        try:
-            req = Request(url, headers={"User-Agent": "Transfera/2.0"})
-            total = 0
-            with urlopen(req, timeout=_READ_TIMEOUT) as resp, open(tmp, "wb") as fh:
-                while True:
-                    chunk = resp.read(_DOWNLOAD_CHUNK)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    total += len(chunk)
-                    with _download_lock:
-                        _download_state["downloaded_bytes"] += len(chunk)
-            if total < 1_000_000:
-                raise OSError(f"suspiciously small download ({total} bytes)")
-            tmp.replace(dest)
-            logger.info("CLIP model ready: %s (%.1f MB)", name, total / 1e6)
-        except Exception as exc:
-            logger.warning("CLIP model download failed for %s: %s", name, exc)
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+        if not _download_one_file(name, rel, root):
             return False
     return not missing_models()
 

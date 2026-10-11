@@ -155,6 +155,24 @@ export function CapabilitiesBadge() {
           </span>
         </span>
       )}
+      {modelStatus?.status === "error" && (
+        <span className="flex items-center gap-2">
+          <span
+            className="px-2 py-0.5 rounded-pill border border-border text-xs text-muted-foreground max-w-64 truncate"
+            title={modelStatus.error ?? "AI model download failed"}
+          >
+            {modelStatus.error ?? "AI model download failed"}
+          </span>
+          <button
+            onClick={() => downloadModels.mutate()}
+            disabled={downloadModels.isPending}
+            className="px-3 py-1 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
+            title="Retry downloading on-board AI models"
+          >
+            {downloadModels.isPending ? "Starting…" : "Retry"}
+          </button>
+        </span>
+      )}
       <button
         onClick={() => backfill.mutate()}
         disabled={backfill.isPending}

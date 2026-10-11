@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+import shutil
+import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,6 +30,35 @@ logger = logging.getLogger(__name__)
 MODELS_SUBDIR = Path("models")
 FACE_MODELS = ("scrfd_10g.onnx", "arcface_r50.onnx")
 CLIP_MODELS = ("mobileclip_s0_image.onnx", "mobileclip_s0_text.onnx")
+# Tokenizer shipped alongside the CLIP encoders (owned by clip.py's
+# MODEL_SPECS; listed here so the bundle seed covers all 5 packaged files
+# without importing clip.py).
+TOKENIZER_MODEL = "mobileclip_s0_tokenizer.json"
+_ALL_SEEDABLE_MODELS = FACE_MODELS + CLIP_MODELS + (TOKENIZER_MODEL,)
+
+# Face-model weights source (insightface buffalo_l HuggingFace mirror, pinned revision).
+# Canonical on-disk names (FACE_MODELS) are Transfera's stable names; the
+# upstream buffalo_l assets use detector/recognizer names, mapped below.
+# Base URL is a single configurable constant so a future mirror can
+# replace it without touching download logic. Pinned HF revision replaces
+# the former GitHub release assets (v0.7 tag, now 404).
+FACE_MODEL_BASE = "https://huggingface.co/DavidHoa/buffalo_l/resolve/9d7dfbba11e47cf2bf1aa92eb61f53172aae07e9"
+FACE_MODEL_SPECS: tuple[tuple[str, str, int], ...] = (
+    # (canonical name, release asset, expected bytes, informational)
+    ("scrfd_10g.onnx", "det_10g.onnx", 16_000_000),
+    ("arcface_r50.onnx", "w600k_r50.onnx", 166_000_000),
+)
+
+_FACE_READ_TIMEOUT = 600
+_FACE_DOWNLOAD_CHUNK = 1024 * 256
+_FACE_MAX_RETRIES = 3
+
+# Background face-download state — same shape as clip._download_state
+# ({status, downloaded_bytes, error} + ready/missing/total_bytes in the
+# status snapshot) so callers can treat both uniformly. Separate object;
+# clip.py is never imported or modified here.
+_face_download_state: dict = {"status": "idle", "downloaded_bytes": 0, "error": None}
+_face_download_lock = threading.RLock()
 
 
 def models_dir() -> Path:
@@ -47,6 +79,168 @@ def _onnx_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def missing_face_models() -> list[str]:
+    """Canonical face-model filenames not yet present on disk."""
+    try:
+        ensure_seeded_from_bundle()
+    except Exception:
+        pass
+    md = models_dir()
+    return [m for m in FACE_MODELS if not (md / m).is_file()]
+
+
+def ensure_seeded_from_bundle() -> None:
+    """Copy missing model files from the packaged bundle into ``models_dir()``.
+
+    First-run seeding for frozen builds: the release stages all model files
+    into ``resources/models/`` (see ``PACKAGED_MODELS_DIR`` in backend/config.py)
+    and the writable models dir lives under AppData. Any file already present
+    is left untouched; 0-byte placeholders never shadow real files (same rule
+    as ``_resolve_wpd_helper`` in backend/config.py). Best-effort: any failure
+    just leaves the file missing so the on-demand download path applies.
+    Silent when the bundle ships no models (dev machines without staging).
+    """
+    try:
+        from backend.config import PACKAGED_MODELS_DIR
+    except Exception:
+        return
+    try:
+        dest_dir = models_dir()
+    except Exception:
+        return
+    for name in _ALL_SEEDABLE_MODELS:
+        try:
+            dest = dest_dir / name
+            if dest.is_file():
+                continue
+            src = PACKAGED_MODELS_DIR / name
+            try:
+                if not src.is_file() or src.stat().st_size < 1_000_000:
+                    continue
+            except OSError:
+                continue
+            try:
+                shutil.copy2(src, dest)
+            except OSError as exc:
+                logger.debug("Bundle model seed failed for %s: %s", name, exc)
+                continue
+            try:
+                if dest.stat().st_size < 1_000_000:
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                    continue
+            except OSError:
+                pass
+            logger.debug("Seeded model from bundle: %s", name)
+        except Exception:
+            logger.debug("Bundle model seed skipped for %s", name, exc_info=True)
+
+
+def face_download_status() -> dict:
+    """Snapshot of face-model presence + any in-progress download.
+
+    Mirrors clip.download_status() shape: {status, downloaded_bytes,
+    error, ready, missing, total_bytes}.
+    """
+    with _face_download_lock:
+        state = dict(_face_download_state)
+    missing = missing_face_models()
+    state["ready"] = not missing
+    state["missing"] = missing
+    state["total_bytes"] = sum(size for _, _, size in FACE_MODEL_SPECS)
+    if state["status"] == "downloading" and state["ready"]:
+        with _face_download_lock:
+            _face_download_state["status"] = "ready"
+        state["status"] = "ready"
+    return state
+
+
+def ensure_face_models() -> bool:
+    """Download any missing face-model files. Returns True when all present.
+
+    Mirrors clip.ensure_models() conventions: User-Agent header, chunked
+    read with timeout, .part temp file + atomic replace, small-file sanity
+    check, per-file retry with backoff. Never raises; failure just leaves
+    faces_available False with keyword/phash paths intact.
+    """
+    from urllib.request import Request, urlopen
+
+    missing = missing_face_models()
+    if not missing:
+        return True
+    md = models_dir()
+    spec_by_name = {name: (asset, size) for name, asset, size in FACE_MODEL_SPECS}
+    for name in missing:
+        asset, _expected = spec_by_name[name]
+        url = f"{FACE_MODEL_BASE}/{asset}"
+        dest = md / name
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        ok = False
+        for attempt in range(1, _FACE_MAX_RETRIES + 1):
+            logger.info("Downloading face model %s (%s) attempt %d/%d", name, url, attempt, _FACE_MAX_RETRIES)
+            try:
+                req = Request(url, headers={"User-Agent": "Transfera/2.0"})
+                total = 0
+                with urlopen(req, timeout=_FACE_READ_TIMEOUT) as resp, open(tmp, "wb") as fh:
+                    while True:
+                        chunk = resp.read(_FACE_DOWNLOAD_CHUNK)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        total += len(chunk)
+                        with _face_download_lock:
+                            _face_download_state["downloaded_bytes"] += len(chunk)
+                if total < 1_000_000:
+                    raise OSError(f"suspiciously small download ({total} bytes)")
+                tmp.replace(dest)
+                logger.info("Face model ready: %s (%.1f MB)", name, total / 1e6)
+                ok = True
+                break
+            except Exception as exc:
+                logger.warning("Face model download failed for %s (attempt %d): %s", name, attempt, exc)
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if attempt < _FACE_MAX_RETRIES:
+                    time.sleep(attempt * 2)
+        if not ok:
+            return False
+    return not missing_face_models()
+
+
+def start_background_face_download() -> dict:
+    """Kick off face-model download in a daemon thread (idempotent)."""
+    import threading as _threading
+
+    with _face_download_lock:
+        if _face_download_state["status"] == "downloading":
+            return face_download_status()
+        if not missing_face_models():
+            _face_download_state["status"] = "ready"
+            return face_download_status()
+        _face_download_state["status"] = "downloading"
+        _face_download_state["downloaded_bytes"] = 0
+        _face_download_state["error"] = None
+
+    def _run() -> None:
+        try:
+            ok = ensure_face_models()
+            with _face_download_lock:
+                _face_download_state["status"] = "ready" if ok else "error"
+                if not ok and not _face_download_state["error"]:
+                    _face_download_state["error"] = "download failed, see logs"
+        except Exception as exc:
+            with _face_download_lock:
+                _face_download_state["status"] = "error"
+                _face_download_state["error"] = str(exc)[:200]
+
+    _threading.Thread(target=_run, daemon=True, name="face-download").start()
+    return face_download_status()
 
 
 def get_capabilities() -> dict:

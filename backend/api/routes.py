@@ -2716,11 +2716,21 @@ async def regenerate_thumbnails(_: None = Depends(require_local_token)):
             select(MediaItem)
             .options(joinedload(MediaItem.session))
             .where(MediaItem.thumbnail_path.is_(None))
-            .where(MediaItem.thumbnail_status != "failed")
             .where(MediaItem.final_status == HopStatus.COMPLETED.value)
         )
         result = await session.execute(q)
         items = list(result.unique().scalars().all())
+
+        # Reset previously-failed items so the worker re-attempts them
+        # and status polling reports "pending" instead of stale "failed".
+        retried = 0
+        for item in items:
+            if item.thumbnail_status == "failed":
+                item.thumbnail_status = "pending"
+                retried += 1
+        if retried:
+            await session.commit()
+            logger.info("Thumbnail regen: retrying %d previously-failed items", retried)
 
         # Extract all data needed by the background thread while the session is still open.
         item_data = [

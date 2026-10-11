@@ -45,6 +45,7 @@
       "resources/exiftool.exe",
       "resources/exiftool_files",
       "resources/transfera-engine",
+      "resources/models",
       "resources/VC_redist.x64.exe"
     ],
     "windows": {

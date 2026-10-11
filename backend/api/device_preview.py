@@ -15,6 +15,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -271,6 +272,325 @@ def _get_thumb_cache(key: tuple[str, int]) -> bytes | None:
             return None
         _thumb_cache.move_to_end(key)
         return _thumb_cache[key]
+
+
+# ---------------------------------------------------------------------------
+# Server-side listing cache for GET /api/device/ios-preview
+# ---------------------------------------------------------------------------
+# The recursive /DCIM walk fans out over AFC/Tier-1 (thousands of files, one
+# USB round trip per folder) and dominated page-1 latency. This cache stores
+# the enumerated + sorted item list per request shape so page 1 serves
+# without a full walk.
+#
+# Key: (device_id, path, recursive, sort_by).
+# Validation: exact snapshot of a single cheap top-level browse
+#   (count + sha256 of name/size/mtime/is_dir rows) — no extra round trips
+#   beyond that one browse. A matching snapshot means the cached items are
+#   current even past the TTL.
+# Freshness: short TTL (_LISTING_TTL_S) + stale-while-revalidate — a stale
+#   hit serves the cached page immediately and triggers one background
+#   refresh (deduped via _listing_refresh_inflight).
+# Invalidation: entries for devices absent from list_devices() are purged
+#   on every request (covers disconnect; a reconnect then misses and walks
+#   fresh). A background refresh re-checks presence before storing.
+# Memory: each list is capped at _PREVIEW_MAX_FILES items and the cache
+#   holds at most _LISTING_MAX_KEYS keys (oldest-first eviction).
+# Threading: all cache/inflight access under _listing_cache_lock, mirroring
+#   the _thumb_cache_lock pattern.
+_LISTING_TTL_S = 45.0
+_LISTING_MAX_KEYS = 16
+
+
+class _ListingCacheEntry:
+    __slots__ = ("items", "photos", "videos", "total_size", "snapshot", "cached_at")
+
+    def __init__(
+        self,
+        items: list,
+        photos: int,
+        videos: int,
+        total_size: int,
+        snapshot: tuple | None,
+        cached_at: float,
+    ) -> None:
+        self.items = items
+        self.photos = photos
+        self.videos = videos
+        self.total_size = total_size
+        self.snapshot = snapshot
+        self.cached_at = cached_at
+
+
+_listing_cache: OrderedDict[tuple, _ListingCacheEntry] = OrderedDict()
+_listing_cache_lock = threading.Lock()
+_listing_refresh_inflight: set[tuple] = set()
+
+
+def _listing_cache_key(device_id: str, path: str, recursive: bool, sort_by: str) -> tuple:
+    return (device_id, path, bool(recursive), sort_by)
+
+
+def _listing_snapshot_of(entries: list) -> tuple[int, str]:
+    """Exact, cheap snapshot of one directory listing level.
+
+    Computed from already-fetched entries (no extra round trips): any
+    rename/add/remove/size/mtime change alters the digest.
+    """
+    try:
+        rows: list[str] = []
+        for e in entries:
+            try:
+                rows.append(
+                    f"{getattr(e, 'name', '')}\x00{getattr(e, 'size', 0)}"
+                    f"\x00{getattr(e, 'mtime', 0)}\x00{int(bool(getattr(e, 'is_dir', False)))}"
+                )
+            except Exception:
+                continue
+        rows.sort()
+        digest = hashlib.sha256("\x01".join(rows).encode("utf-8", errors="replace")).hexdigest()
+        return (len(rows), digest)
+    except Exception:
+        return (0, "")
+
+
+async def _listing_quick_snapshot(manager: Any, device_id: str, path: str) -> tuple[int, str] | None:
+    """Single top-level browse used to validate a cached recursive listing.
+
+    One AFC round trip vs a full recursive walk. Returns None when the
+    browse itself fails (caller treats the cache as unvalidated, not wrong).
+    """
+    try:
+        top_entries = await manager.browse_device(device_id, path)
+    except Exception as exc:
+        logger.debug("ios-preview snapshot browse failed for %s:%s: %s", device_id, path, exc)
+        return None
+    return _listing_snapshot_of(top_entries)
+
+
+def _listing_cache_get(key: tuple) -> _ListingCacheEntry | None:
+    with _listing_cache_lock:
+        return _listing_cache.get(key)
+
+
+def _listing_touch(key: tuple, now: float) -> None:
+    with _listing_cache_lock:
+        ent = _listing_cache.get(key)
+        if ent is not None:
+            ent.cached_at = now
+            _listing_cache.move_to_end(key)
+
+
+def _listing_store(
+    key: tuple,
+    items: list,
+    photos: int,
+    videos: int,
+    total_size: int,
+    snapshot: tuple[int, str] | None,
+    now: float,
+) -> None:
+    with _listing_cache_lock:
+        while len(_listing_cache) >= _LISTING_MAX_KEYS and key not in _listing_cache:
+            _listing_cache.popitem(last=False)
+        _listing_cache[key] = _ListingCacheEntry(items, photos, videos, total_size, snapshot, now)
+        _listing_cache.move_to_end(key)
+
+
+def _listing_drop(key: tuple) -> None:
+    with _listing_cache_lock:
+        _listing_cache.pop(key, None)
+
+
+def _listing_purge_disconnected(current_serials: set) -> None:
+    """Drop cached listings for devices no longer present.
+
+    Called on every ios-preview request: a disconnect purges immediately,
+    so a later reconnect misses and walks fresh.
+    """
+    with _listing_cache_lock:
+        stale_keys = [k for k in _listing_cache if k[0] not in current_serials]
+        for k in stale_keys:
+            _listing_cache.pop(k, None)
+    if stale_keys:
+        logger.debug("ios-preview listing cache purged %d entries for disconnected devices", len(stale_keys))
+
+
+def _build_ios_preview_items(
+    entries: list, *, device_id: str, path: str, recursive: bool, sort_by: str
+) -> tuple[list, int, int, int]:
+    """Filter + shape + sort raw device entries into preview items.
+
+    Semantics identical to the inline endpoint logic: skip dirs for flat
+    listings, keep only supported media extensions, sort per sort_by.
+    The item list is capped at _PREVIEW_MAX_FILES to bound memory (mirrors
+    the local /preview cap); camera rolls below the cap are unaffected.
+    Returns (items, photos, videos, total_size_bytes).
+    """
+    items: list[dict] = []
+    total_photos = 0
+    total_videos = 0
+    total_size = 0
+
+    for entry in entries:
+        if not recursive and entry.is_dir:
+            continue
+        fname = entry.name
+        ext = os.path.splitext(fname)[1].lower()
+        if ext not in PREVIEW_EXTENSIONS:
+            continue
+        device_abs = f"{path.rstrip('/')}/{fname}" if not recursive else entry.path
+        item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
+        size_bytes = entry.size
+        mtime = entry.mtime
+        items.append(
+            {
+                "id": _file_id(f"{device_id}:{device_abs}"),
+                "filename": fname,
+                "abs_path": f"ios://{device_id}{device_abs}",
+                "type": item_type,
+                "size_bytes": size_bytes,
+                "mtime": mtime,
+                "duration_s": None,
+                "thumbnail_ready": False,
+            }
+        )
+        total_size += size_bytes
+        if item_type == "photo":
+            total_photos += 1
+        else:
+            total_videos += 1
+        if len(items) >= _PREVIEW_MAX_FILES:
+            break
+
+    reverse = sort_by in ("newest", "size_desc", "name_desc")
+    key_fn = (
+        (lambda x: x["mtime"])
+        if sort_by in ("newest", "oldest")
+        else (lambda x: x["size_bytes"])
+        if sort_by in ("size_desc", "size_asc")
+        else (lambda x: x["filename"].lower())
+    )
+    items.sort(key=key_fn, reverse=reverse)
+    return items, total_photos, total_videos, total_size
+
+
+async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive: bool) -> list:
+    """Full device fetch (recursive walk or single browse) with HTTP error mapping."""
+    try:
+        if recursive:
+            from backend.engines.scanner import _walk_ios_directory
+
+            return await _walk_ios_directory(device_id, path)
+        return await manager.browse_device(device_id, path)
+    except DeviceLockedError as exc:
+        raise HTTPException(
+            status_code=423,
+            detail={"status": "locked", "message": exc.message},
+        )
+    except DeviceNotTrustedError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"status": "not_trusted", "message": exc.message},
+        )
+    except WpdDeviceAccessDenied as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "wpd_denied",
+                "message": str(exc),
+            },
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "not_found",
+                "message": f"Path not found on device: {path}",
+            },
+        )
+    except Exception as exc:
+        error_text = str(exc)
+        exc_lower = error_text.lower()
+        if "locked" in exc_lower or "lock" in exc_lower:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "status": "locked",
+                    "message": "Your iPhone is locked. Please unlock it and "
+                    "tap 'Trust This Computer' when prompted, then try again.",
+                },
+            )
+        if "trust" in exc_lower or "pair" in exc_lower or "paired" in exc_lower:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "status": "not_trusted",
+                    "message": "Please tap 'Trust This Computer' on your "
+                    "iPhone and enter your passcode, then try again.",
+                },
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": f"Could not list device folder {path}: {error_text}"},
+        )
+
+
+def _maybe_refresh_ios_listing(key: tuple, device_id: str, path: str, recursive: bool, sort_by: str) -> bool:
+    """Schedule one deduped background refresh for a stale cache entry."""
+    with _listing_cache_lock:
+        if key in _listing_refresh_inflight:
+            return False
+        _listing_refresh_inflight.add(key)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        with _listing_cache_lock:
+            _listing_refresh_inflight.discard(key)
+        return False
+    loop.create_task(_refresh_ios_listing(key, device_id, path, recursive, sort_by))
+    return True
+
+
+async def _refresh_ios_listing(key: tuple, device_id: str, path: str, recursive: bool, sort_by: str) -> None:
+    """Background re-walk for a stale entry; never raises."""
+    try:
+        mgr = get_device_manager()
+        try:
+            devices, _ = await mgr.list_devices()
+            if device_id not in {getattr(d, "serial", None) for d in devices}:
+                _listing_drop(key)
+                return
+        except Exception:
+            pass
+        if recursive:
+            from backend.engines.scanner import _walk_ios_directory
+
+            entries = await _walk_ios_directory(device_id, path)
+        else:
+            try:
+                entries = await mgr.browse_device(device_id, path)
+            except Exception as exc:
+                logger.debug("ios-preview background refresh browse failed: %s", exc)
+                return
+        snap = await _listing_quick_snapshot(mgr, device_id, path)
+        if snap is None and not recursive:
+            snap = _listing_snapshot_of(entries)
+        items, photos, videos, total = _build_ios_preview_items(
+            entries, device_id=device_id, path=path, recursive=recursive, sort_by=sort_by
+        )
+        _listing_store(key, items, photos, videos, total, snap, time.monotonic())
+        logger.debug(
+            "ios-preview background refresh done device=%s path=%s recursive=%s items=%d",
+            device_id,
+            path,
+            recursive,
+            len(items),
+        )
+    except Exception as exc:
+        logger.debug("ios-preview background refresh failed for %s:%s: %s", device_id, path, exc)
+    finally:
+        with _listing_cache_lock:
+            _listing_refresh_inflight.discard(key)
 
 
 # ---------------------------------------------------------------------------
@@ -865,108 +1185,104 @@ async def ios_preview_directory(
             },
         )
 
+    req_t0 = time.perf_counter()
+    cache_key = _listing_cache_key(device_id, path, recursive, sort_by)
     try:
-        if recursive:
-            from backend.engines.scanner import _walk_ios_directory
+        _listing_purge_disconnected({getattr(d, "serial", None) for d in devices})
+    except Exception:
+        pass
 
-            entries = await _walk_ios_directory(device_id, path)
-        else:
-            entries = await manager.browse_device(device_id, path)
-    except DeviceLockedError as exc:
-        raise HTTPException(
-            status_code=423,
-            detail={"status": "locked", "message": exc.message},
-        )
-    except DeviceNotTrustedError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"status": "not_trusted", "message": exc.message},
-        )
-    except WpdDeviceAccessDenied as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "status": "wpd_denied",
-                "message": str(exc),
-            },
-        )
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "status": "not_found",
-                "message": f"Path not found on device: {path}",
-            },
-        )
-    except Exception as exc:
-        error_text = str(exc)
-        exc_lower = error_text.lower()
-        if "locked" in exc_lower or "lock" in exc_lower:
-            raise HTTPException(
-                status_code=423,
-                detail={
-                    "status": "locked",
-                    "message": "Your iPhone is locked. Please unlock it and "
-                    "tap 'Trust This Computer' when prompted, then try again.",
-                },
-            )
-        if "trust" in exc_lower or "pair" in exc_lower or "paired" in exc_lower:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "status": "not_trusted",
-                    "message": "Please tap 'Trust This Computer' on your "
-                    "iPhone and enter your passcode, then try again.",
-                },
-            )
-        raise HTTPException(
-            status_code=400,
-            detail={"status": "error", "message": f"Could not list device folder {path}: {error_text}"},
-        )
-
-    items: list[dict] = []
+    items: list[dict] | None = None
     total_photos = 0
     total_videos = 0
     total_size = 0
+    cache_status = "miss"
+    walk_ms = 0.0
+    snap_ms = 0.0
 
-    for entry in entries:
-        if not recursive and entry.is_dir:
-            continue
-        fname = entry.name
-        ext = os.path.splitext(fname)[1].lower()
-        if ext not in PREVIEW_EXTENSIONS:
-            continue
-        device_abs = f"{path.rstrip('/')}/{fname}" if not recursive else entry.path
-        item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
-        size_bytes = entry.size
-        mtime = entry.mtime
-        items.append(
-            {
-                "id": _file_id(f"{device_id}:{device_abs}"),
-                "filename": fname,
-                "abs_path": f"ios://{device_id}{device_abs}",
-                "type": item_type,
-                "size_bytes": size_bytes,
-                "mtime": mtime,
-                "duration_s": None,
-                "thumbnail_ready": False,
-            }
-        )
-        total_size += size_bytes
-        if item_type == "photo":
-            total_photos += 1
+    if recursive:
+        # Fast path: serve the cached item list when a single cheap
+        # top-level browse validates it — no full walk. Stale entries
+        # still serve immediately with a background refresh.
+        cached = _listing_cache_get(cache_key)
+        if cached is not None:
+            _s0 = time.perf_counter()
+            snap = await _listing_quick_snapshot(manager, device_id, path)
+            snap_ms = (time.perf_counter() - _s0) * 1000.0
+            age = time.monotonic() - cached.cached_at
+            if snap is not None and snap == cached.snapshot:
+                items, total_photos, total_videos, total_size = (
+                    cached.items,
+                    cached.photos,
+                    cached.videos,
+                    cached.total_size,
+                )
+                cache_status = "hit"
+                _listing_touch(cache_key, time.monotonic())
+            else:
+                # Stale (snapshot changed) or unvalidatable-but-aged: serve
+                # the cached page now, refresh in the background.
+                items, total_photos, total_videos, total_size = (
+                    cached.items,
+                    cached.photos,
+                    cached.videos,
+                    cached.total_size,
+                )
+                if snap is None and age <= _LISTING_TTL_S:
+                    cache_status = "hit-unvalidated"
+                else:
+                    cache_status = "stale"
+                    _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
+        if items is None:
+            _w0 = time.perf_counter()
+            entries = await _fetch_ios_entries(manager, device_id, path, True)
+            walk_ms = (time.perf_counter() - _w0) * 1000.0
+            items, total_photos, total_videos, total_size = _build_ios_preview_items(
+                entries, device_id=device_id, path=path, recursive=True, sort_by=sort_by
+            )
+            _s0 = time.perf_counter()
+            snap = await _listing_quick_snapshot(manager, device_id, path)
+            snap_ms += (time.perf_counter() - _s0) * 1000.0
+            _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+    else:
+        # Flat listing is already a single browse; snapshot-validate it
+        # against the cache so repeat sorts/pages skip the rebuild.
+        _w0 = time.perf_counter()
+        entries = await _fetch_ios_entries(manager, device_id, path, False)
+        walk_ms = (time.perf_counter() - _w0) * 1000.0
+        snap = _listing_snapshot_of(entries)
+        cached = _listing_cache_get(cache_key)
+        if cached is not None and cached.snapshot == snap:
+            items, total_photos, total_videos, total_size = (
+                cached.items,
+                cached.photos,
+                cached.videos,
+                cached.total_size,
+            )
+            cache_status = "hit"
+            _listing_touch(cache_key, time.monotonic())
         else:
-            total_videos += 1
+            items, total_photos, total_videos, total_size = _build_ios_preview_items(
+                entries, device_id=device_id, path=path, recursive=False, sort_by=sort_by
+            )
+            _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
 
-    reverse = sort_by in ("newest", "size_desc", "name_desc")
-    key_fn = (
-        (lambda x: x["mtime"])
-        if sort_by in ("newest", "oldest")
-        else (lambda x: x["size_bytes"])
-        if sort_by in ("size_desc", "size_asc")
-        else (lambda x: x["filename"].lower())
+    assert items is not None
+    total_ms = (time.perf_counter() - req_t0) * 1000.0
+    logger.debug(
+        "ios-preview device=%s path=%s recursive=%s sort=%s page=%d cache=%s "
+        "walk_ms=%.1f snapshot_ms=%.1f total_ms=%.1f items=%d",
+        device_id,
+        path,
+        recursive,
+        sort_by,
+        page,
+        cache_status,
+        walk_ms,
+        snap_ms,
+        total_ms,
+        len(items),
     )
-    items.sort(key=key_fn, reverse=reverse)
 
     total = len(items)
     pages = max(1, math.ceil(total / page_size))
