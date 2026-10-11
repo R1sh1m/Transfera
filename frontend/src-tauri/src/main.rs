@@ -722,7 +722,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .cloned()
         .expect("window icon must be bundled");
     let open = MenuItem::with_id(app, "open", "Open Transfera", true, None::<&str>)?;
-    let check_updates = MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
+    let check_updates = MenuItem::with_id(
+        app,
+        "check_updates",
+        "Check for Updates...",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &check_updates, &quit])?;
     TrayIconBuilder::with_id("main")
