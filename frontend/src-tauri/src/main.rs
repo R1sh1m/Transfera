@@ -722,8 +722,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .cloned()
         .expect("window icon must be bundled");
     let open = MenuItem::with_id(app, "open", "Open Transfera", true, None::<&str>)?;
+    let check_updates = MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &check_updates, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .tooltip("Transfera")
@@ -734,6 +735,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = w.show();
                     let _ = w.unminimize();
                     let _ = w.set_focus();
+                }
+            }
+            "check_updates" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                    let _ = w.emit("app:check-updates", ());
                 }
             }
             "quit" => {

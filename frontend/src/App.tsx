@@ -39,6 +39,8 @@ import { API_BASE_URL } from "@/lib/api-client";
 import { useHealth } from "@/lib/queries";
 import type { UIState } from "@/store/transfer";
 import AppUpdateNotification from "@/components/AppUpdateNotification";
+import UpdateSettingsModal from "@/components/UpdateSettingsModal";
+import { useUpdaterLifecycle } from "@/hooks/use-updater-lifecycle";
 
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const DeviceSetupPage = lazy(() => import("@/pages/DeviceSetupPage"));
@@ -52,6 +54,11 @@ import { useDeviceWatcher } from "@/hooks/use-device-watcher";
 
 function DeviceWatcher() {
   useDeviceWatcher();
+  return null;
+}
+
+function UpdaterWatcher() {
+  useUpdaterLifecycle();
   return null;
 }
 
@@ -618,9 +625,11 @@ export default function App() {
       <CloseGuardModal />
       <NotificationToast />
       <AppUpdateNotification />
+      <UpdateSettingsModal />
       <BackendDownScreen />
       <BackendRecoveryWatcher />
       <DeviceWatcher />
+      <UpdaterWatcher />
     </QueryClientProvider>
   );
 }

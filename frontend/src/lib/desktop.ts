@@ -292,3 +292,7 @@ export async function forceExit(): Promise<void> {
 export function onRequestClose(cb: () => void): () => void {
   return onTauriEvent("app:request-close", cb);
 }
+
+export function onCheckUpdates(cb: () => void): () => void {
+  return onTauriEvent("app:check-updates", cb);
+}

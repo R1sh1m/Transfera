@@ -34,7 +34,9 @@ import {
   Terminal,
   Pencil,
   Check,
+  Sparkles,
 } from "lucide-react";
+import { useUpdaterStore } from "@/store/updater";
 import {
   useSessionList,
   useRecovery,
@@ -775,8 +777,14 @@ function BackendStatusCard() {
   } = useHealth();
   const wsConnected = useTransferStore((s) => s.wsConnected);
   const sessionId = useTransferStore((s) => s.transfer.sessionId);
-  const requestUpdateCheck = useTransferStore((s) => s.requestUpdateCheck);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  const updaterStatus = useUpdaterStore((s) => s.status);
+  const updateInfo = useUpdaterStore((s) => s.updateInfo);
+  const downloadProgress = useUpdaterStore((s) => s.downloadProgress);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const installAndRestart = useUpdaterStore((s) => s.installAndRestart);
+  const setIsSettingsOpen = useUpdaterStore((s) => s.setIsSettingsOpen);
 
   // Tauri shell version (differs from backend health version during dev).
   useEffect(() => {
@@ -830,19 +838,71 @@ function BackendStatusCard() {
           </div>
         </div>
       </div>
-      {health?.version && (
-        <span className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-          v{health.version}
-        </span>
+
+      {/* Updater interactive pill states */}
+      {updaterStatus === "downloaded" && (
+        <button
+          type="button"
+          onClick={() => installAndRestart()}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-action text-white text-[11px] font-medium hover:bg-action/90 active:scale-[0.95] transition-all shadow-xs shrink-0"
+          title="Update downloaded! Click to restart Transfera."
+        >
+          <Sparkles className="w-3 h-3 text-white" />
+          <span>Restart to Update</span>
+        </button>
       )}
+
+      {updaterStatus === "downloading" && (
+        <button
+          type="button"
+          onClick={() => setIsSettingsOpen(true)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-action/10 text-action text-[11px] font-medium hover:bg-action/20 transition-all shrink-0"
+          title="Downloading update in background..."
+        >
+          <RefreshCw className="w-3 h-3 animate-spin" />
+          <span>Updating ({downloadProgress ?? 0}%)</span>
+        </button>
+      )}
+
+      {updaterStatus === "available" && (
+        <button
+          type="button"
+          onClick={() => setIsSettingsOpen(true)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-action/10 text-action text-[11px] font-medium hover:bg-action/20 active:scale-[0.95] transition-all shrink-0"
+          title={`Transfera v${updateInfo?.version} is available. Click to review and install.`}
+        >
+          <Sparkles className="w-3 h-3" />
+          <span>v{updateInfo?.version} ready</span>
+        </button>
+      )}
+
+      {/* App Version badge */}
+      {health?.version && (
+        <button
+          type="button"
+          onClick={() => setIsSettingsOpen(true)}
+          className="text-[10px] font-normal text-muted-foreground bg-muted hover:bg-muted/80 px-1.5 py-0.5 rounded transition-colors"
+          title="Click to view update settings and release info"
+        >
+          v{health.version}
+        </button>
+      )}
+
+      {/* Manual Check / Settings trigger */}
       <button
         type="button"
-        onClick={requestUpdateCheck}
-        title={`Check for updates${appVersion ? ` (app v${appVersion})` : ""} — runs the update check and shows the result`}
-        className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
+        onClick={() => checkForUpdates(true)}
+        disabled={updaterStatus === "checking" || updaterStatus === "downloading"}
+        title={`Check for updates${appVersion ? ` (app v${appVersion})` : ""} — runs update check`}
+        className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0 disabled:opacity-50"
         aria-label="Check for updates"
       >
-        <RefreshCw className="w-3.5 h-3.5" />
+        <RefreshCw
+          className={cn(
+            "w-3.5 h-3.5",
+            updaterStatus === "checking" && "animate-spin text-action",
+          )}
+        />
       </button>
     </div>
   );
