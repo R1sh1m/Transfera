@@ -4530,7 +4530,7 @@ dependencies = [
 
 [[package]]
 name = "transfera"
-version = "2.8.6"
+version = "2.8.7"
 dependencies = [
  "serde",
  "serde_json",
