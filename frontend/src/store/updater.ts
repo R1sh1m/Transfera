@@ -98,7 +98,11 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
   checkForUpdates: async (manual = false) => {
     const { status, autoDownloadEnabled } = get();
-    if (status === "checking" || status === "downloading" || status === "installing") {
+    if (
+      status === "checking" ||
+      status === "downloading" ||
+      status === "installing"
+    ) {
       return;
     }
 
@@ -118,7 +122,10 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         const { useTransferStore } = await import("@/store/transfer");
         useTransferStore
           .getState()
-          .showNotification("info", "Transfera is up to date (web preview mode).");
+          .showNotification(
+            "info",
+            "Transfera is up to date (web preview mode).",
+          );
       } else {
         set({ status: "idle" });
       }
@@ -129,7 +136,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
 
-      let currentVersion = "2.8.4";
+      let currentVersion = "2.8.5";
       try {
         const { getVersion } = await import("@tauri-apps/api/app");
         currentVersion = await getVersion();
@@ -150,7 +157,8 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         // If background auto-download is enabled and user didn't trigger manual check,
         // start downloading immediately in background (unless active transfer is running).
         const { useTransferStore } = await import("@/store/transfer");
-        const isTransferring = useTransferStore.getState().transfer.status === "running";
+        const isTransferring =
+          useTransferStore.getState().transfer.status === "running";
 
         if (autoDownloadEnabled && !manual && !isTransferring) {
           // Launch seamless background download
@@ -166,7 +174,10 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
           const { useTransferStore } = await import("@/store/transfer");
           useTransferStore
             .getState()
-            .showNotification("success", `You're up to date (v${currentVersion}).`);
+            .showNotification(
+              "success",
+              `You're up to date (v${currentVersion}).`,
+            );
         }
       }
     } catch (err) {
@@ -235,7 +246,8 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
   installAndRestart: async () => {
     const { useTransferStore } = await import("@/store/transfer");
-    const isTransferring = useTransferStore.getState().transfer.status === "running";
+    const isTransferring =
+      useTransferStore.getState().transfer.status === "running";
 
     if (isTransferring) {
       useTransferStore
@@ -278,7 +290,12 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     if (status === "downloaded") {
       set({ status: "idle" });
     } else {
-      set({ status: "idle", updateInfo: null, downloadProgress: null, errorMessage: null });
+      set({
+        status: "idle",
+        updateInfo: null,
+        downloadProgress: null,
+        errorMessage: null,
+      });
     }
   },
 

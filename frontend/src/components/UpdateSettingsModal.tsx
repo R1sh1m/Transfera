@@ -30,7 +30,10 @@ function formatTimestamp(ts: number | null): string {
     date.getMonth() === now.getMonth() &&
     date.getFullYear() === now.getFullYear();
 
-  const timeStr = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const timeStr = date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
   if (isToday) return `Today at ${timeStr}`;
   return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} at ${timeStr}`;
 }
@@ -50,13 +53,15 @@ export default function UpdateSettingsModal() {
   const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
   const installAndRestart = useUpdaterStore((s) => s.installAndRestart);
   const setAutoCheckEnabled = useUpdaterStore((s) => s.setAutoCheckEnabled);
-  const setAutoDownloadEnabled = useUpdaterStore((s) => s.setAutoDownloadEnabled);
+  const setAutoDownloadEnabled = useUpdaterStore(
+    (s) => s.setAutoDownloadEnabled,
+  );
 
   const [notesExpanded, setNotesExpanded] = useState(false);
 
   if (!isSettingsOpen) return null;
 
-  const currentVersion = updateInfo?.currentVersion || "2.8.4";
+  const currentVersion = updateInfo?.currentVersion || "2.8.5";
 
   return (
     <AnimatePresence>
@@ -75,8 +80,12 @@ export default function UpdateSettingsModal() {
                 <Sparkles className="w-4 h-4" />
               </div>
               <div>
-                <h2 className="text-sm font-semibold text-foreground">Software Update</h2>
-                <p className="text-xs text-muted-foreground">Keep Transfera automatic &amp; up to date</p>
+                <h2 className="text-sm font-semibold text-foreground">
+                  Software Update
+                </h2>
+                <p className="text-xs text-muted-foreground">
+                  Keep Transfera automatic &amp; up to date
+                </p>
               </div>
             </div>
             <button
@@ -96,7 +105,9 @@ export default function UpdateSettingsModal() {
               <div className="flex items-start justify-between gap-4">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-foreground">Transfera v{currentVersion}</span>
+                    <span className="text-sm font-semibold text-foreground">
+                      Transfera v{currentVersion}
+                    </span>
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-action/10 text-action">
                       <ShieldCheck className="w-3 h-3" />
                       Verified Desktop
@@ -127,7 +138,9 @@ export default function UpdateSettingsModal() {
                       className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-pill bg-muted text-muted-foreground text-xs opacity-75 cursor-default"
                     >
                       <RefreshCw className="w-3.5 h-3.5 animate-spin text-action" />
-                      {downloadProgress !== null ? `${downloadProgress}%` : "Downloading..."}
+                      {downloadProgress !== null
+                        ? `${downloadProgress}%`
+                        : "Downloading..."}
                     </button>
                   )}
 
@@ -153,7 +166,9 @@ export default function UpdateSettingsModal() {
                     </button>
                   )}
 
-                  {(status === "idle" || status === "up-to-date" || status === "error") && (
+                  {(status === "idle" ||
+                    status === "up-to-date" ||
+                    status === "error") && (
                     <button
                       type="button"
                       onClick={() => checkForUpdates(true)}
@@ -177,7 +192,9 @@ export default function UpdateSettingsModal() {
               {status === "available" && (
                 <div className="flex items-center gap-2 text-xs text-action pt-1 border-t border-border/50">
                   <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                  <span>Transfera v{updateInfo?.version} is available to install.</span>
+                  <span>
+                    Transfera v{updateInfo?.version} is available to install.
+                  </span>
                 </div>
               )}
 
@@ -199,14 +216,18 @@ export default function UpdateSettingsModal() {
               {status === "downloaded" && (
                 <div className="flex items-center gap-2 text-xs text-action pt-1 border-t border-border/50">
                   <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                  <span>Update ready! Restart now to run v{updateInfo?.version}.</span>
+                  <span>
+                    Update ready! Restart now to run v{updateInfo?.version}.
+                  </span>
                 </div>
               )}
 
               {status === "error" && (
                 <div className="flex items-center gap-2 text-xs text-destructive pt-1 border-t border-border/50">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>{errorMessage || "Unable to check for updates right now."}</span>
+                  <span>
+                    {errorMessage || "Unable to check for updates right now."}
+                  </span>
                 </div>
               )}
             </div>
@@ -223,7 +244,11 @@ export default function UpdateSettingsModal() {
                     <Sparkles className="w-3.5 h-3.5 text-action" />
                     What's New in v{updateInfo.version}
                   </span>
-                  {notesExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  {notesExpanded ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
                 </button>
 
                 {notesExpanded && (
@@ -252,7 +277,8 @@ export default function UpdateSettingsModal() {
                     Automatically check for updates
                   </span>
                   <span className="text-[11px] text-muted-foreground block">
-                    Periodically checks in the background (every 4 hours) so you never miss new features.
+                    Periodically checks in the background (every 4 hours) so you
+                    never miss new features.
                   </span>
                 </div>
                 <input
@@ -270,7 +296,8 @@ export default function UpdateSettingsModal() {
                     Automatically download updates in the background
                   </span>
                   <span className="text-[11px] text-muted-foreground block">
-                    Silently downloads new updates without interrupting your work, ready for 1-click restart.
+                    Silently downloads new updates without interrupting your
+                    work, ready for 1-click restart.
                   </span>
                 </div>
                 <input
@@ -287,7 +314,9 @@ export default function UpdateSettingsModal() {
           <div className="flex items-center justify-between px-6 py-3.5 border-t border-border bg-muted/20 text-xs">
             <button
               type="button"
-              onClick={() => openExternal("https://github.com/R1sh1m/Transfera/releases")}
+              onClick={() =>
+                openExternal("https://github.com/R1sh1m/Transfera/releases")
+              }
               className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-action transition-colors"
             >
               <ExternalLink className="w-3.5 h-3.5" />
