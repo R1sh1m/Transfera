@@ -40,8 +40,13 @@ import { useTransferStore } from "@/store/transfer";
 import { useTransferWs } from "@/hooks/use-transfer-ws";
 import { cn } from "@/lib/utils";
 import { isDesktop, openPath, setTrayProgress } from "@/lib/desktop";
+import { getLocalToken } from "@/lib/api-client";
 import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
-import type { SessionProgress, RecentItemProgress } from "@/types/api";
+import type {
+  SessionInfo,
+  SessionProgress,
+  RecentItemProgress,
+} from "@/types/api";
 
 // Keep track of session IDs that have already been started to prevent double-triggering
 // on component mount/remount in React Strict Mode.
@@ -56,6 +61,10 @@ const STATUS_LABELS: Record<string, string> = {
   failed: "Failed",
   cancelled: "Stopped",
 };
+
+// Backend includes error_message on failed sessions, but it is not part of
+// the generated SessionInfo type — read it defensively without touching types.
+type SessionWithError = SessionInfo & { error_message?: string };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -538,6 +547,37 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
     isCancelled,
   ].some(Boolean);
 
+  // Failure reason (defensive — field exists on the backend payload only).
+  const sessionError = (session as SessionWithError | undefined)?.error_message;
+
+  // Follow SessionRow handleViewReport pattern in DashboardPage:
+  // desktop opens the report path directly, browser opens the report endpoint.
+  const handleViewReport = () => {
+    const reportPath = session?.session_report_path;
+    if (!reportPath) return;
+    if (isDesktop) {
+      openPath(reportPath);
+    } else {
+      const token = getLocalToken();
+      const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
+      const sid = session?.id ?? sessionId;
+      if (sid == null) return;
+      window.open(
+        `/api/sessions/${sid}/report?fmt=html${tokenParam}`,
+        "_blank",
+      );
+    }
+  };
+
+  // Recovery path: seed setup with this transfer's roots, then go to setup.
+  // Uses existing store actions only — no new store fields.
+  const handleBackToSetup = () => {
+    const st = useTransferStore.getState();
+    if (transfer.sourceRoot) st.setSetupSourcePath(transfer.sourceRoot);
+    if (transfer.destRoot) st.setSetupDestPath(transfer.destRoot);
+    st.setCurrentPage("setup");
+  };
+
   // Use server-provided progress_percent for the main bar
   // On completion: animate to 100%. On cancel/failure: freeze at last value.
   let displayPct = transfer.progressPercent;
@@ -661,6 +701,45 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
                 {transfer.currentFileName}
               </p>
             )}
+          </div>
+        )}
+
+        {/* Failed details — reason + report + recovery path */}
+        {isFailed && (
+          <div className="p-3 bg-red-500/5 border border-red-200/20 dark:border-red-900/20 rounded-md space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5" />
+              Transfer failed
+            </p>
+            {sessionError ? (
+              <p className="text-[11px] text-foreground/80 break-words font-mono">
+                {sessionError}
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">
+                No additional error details were reported.
+              </p>
+            )}
+            <div className="flex items-center gap-2 pt-1">
+              {session?.session_report_path && (
+                <button
+                  onClick={handleViewReport}
+                  className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+                  title="Open HTML report"
+                >
+                  <FileText className="w-3 h-3" />
+                  Open report
+                </button>
+              )}
+              <button
+                onClick={handleBackToSetup}
+                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded text-xs font-normal hover:bg-primary/90 transition-colors"
+                title="Return to setup with the same source and destination"
+              >
+                <ArrowLeft className="w-3 h-3" />
+                Back to setup
+              </button>
+            </div>
           </div>
         )}
 
@@ -995,6 +1074,21 @@ export default function TransferPage() {
   };
 
   const handleStart = () => {
+    // Terminal states (failed/completed/cancelled) cannot be started via
+    // POST /sessions/{id}/start (backend 400s) — guide back to setup instead
+    // of firing a doomed request. Only created (start) and paused (resume)
+    // are valid start sources.
+    if (transfer.status !== "created" && transfer.status !== "paused") {
+      useTransferStore
+        .getState()
+        .showNotification(
+          "info",
+          transfer.status === "failed"
+            ? "This transfer failed and can't be resumed. Go back to setup to start a new transfer."
+            : "This transfer has already finished. Go back to setup to start a new transfer.",
+        );
+      return;
+    }
     if (transfer.sessionId) {
       // If auto-start already initiated for a fresh (created) session, don't
       // double-start. Paused sessions (Resume) are unaffected by this guard.

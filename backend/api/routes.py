@@ -1027,6 +1027,42 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
                 ts.id,
                 len(normalized),
             )
+            # Selective-scan mismatch diagnostics: record source/dest, a
+            # small sample of selected paths, and canonical serials so a
+            # later 0-match scan can be compared against scan-time state.
+            try:
+                _samples = list(normalized[:3])
+                _sample_display = [s[:160] for s in _samples]
+                _serial_notes: list[str] = []
+                for _scheme in ("ios://", "wpd://"):
+                    if source_root_str.startswith(_scheme):
+                        _live_serial = source_root_str[len(_scheme) :].split("/", 1)[0]
+                        _live_canon = canonical_device_serial(_live_serial)
+                        for _sp in _samples:
+                            _sp_scheme = next(
+                                (s for s in ("ios://", "wpd://") if _sp.startswith(s)),
+                                None,
+                            )
+                            if _sp_scheme is None:
+                                _serial_notes.append(f"{_sp[:80]}: non-device path")
+                            else:
+                                _sp_serial = _sp[len(_sp_scheme) :].split("/", 1)[0]
+                                _sp_canon = canonical_device_serial(_sp_serial)
+                                _serial_notes.append(
+                                    f"{_sp_scheme} sample canon={_sp_canon[:32]} vs live canon={_live_canon[:32]}"
+                                )
+                        break
+                logger.info(
+                    "Session %d created: source_root=%s dest_root=%s selected=%d samples=%s%s",
+                    ts.id,
+                    source_root_str[:260],
+                    req.dest_root[:260],
+                    len(normalized),
+                    _sample_display,
+                    f" serials=[{'; '.join(_serial_notes)}]" if _serial_notes else "",
+                )
+            except Exception:
+                logger.debug("Session %d: selection diagnostics logging skipped", ts.id)
 
         return _session_to_info(ts)
 
@@ -1540,9 +1576,45 @@ async def _phase_scan_and_create_batches(
 
     if not item_ids:
         if selected_set is not None:
+            # Selective-scan mismatch diagnostics: compare scan-time
+            # source_root serial against a sample of selected paths so
+            # serial flips vs cross-scheme mismatches are distinguishable.
+            _diag_samples = sorted(selected_set)[:3]
+            _diag_sample_display = [s[:160] for s in _diag_samples]
+            _src_scheme = next(
+                (s for s in ("ios://", "wpd://") if (source_root or "").startswith(s)),
+                None,
+            )
+            _src_canon = ""
+            if _src_scheme and source_root:
+                _src_serial = source_root[len(_src_scheme) :].split("/", 1)[0]
+                _src_canon = canonical_device_serial(_src_serial)
+            _cmp_notes: list[str] = []
+            for _sp in _diag_samples:
+                _sp_scheme = next(
+                    (s for s in ("ios://", "wpd://") if _sp.startswith(s)),
+                    None,
+                )
+                _short = _sp[:80]
+                if _src_scheme is None or _sp_scheme is None:
+                    _cmp_notes.append(f"{_short}: non-device path (no serial compare)")
+                elif _sp_scheme != _src_scheme:
+                    _cmp_notes.append(f"{_short}: cross-scheme ({_sp_scheme} vs {_src_scheme}; cannot reconcile)")
+                else:
+                    _sp_serial = _sp[len(_sp_scheme) :].split("/", 1)[0]
+                    _sp_canon = canonical_device_serial(_sp_serial)
+                    if _sp_canon == _src_canon:
+                        _cmp_notes.append(f"{_short}: identical canonical serial")
+                    else:
+                        _cmp_notes.append(
+                            f"{_short}: same-scheme serial flip "
+                            f"(selected canon={_sp_canon[:32]} vs scan canon={_src_canon[:32]})"
+                        )
+            _cmp_text = "; ".join(_cmp_notes) if _cmp_notes else "no samples"
             error_msg = (
                 f"None of the {len(selected_set)} selected file(s) matched scanned media "
-                f"at '{source_root}'. This may be a path normalisation issue — "
+                f"at '{source_root}'. Sampled selection={_diag_sample_display}; "
+                f"serial comparison: {_cmp_text}. This may be a path normalisation issue — "
                 "please try again by re-selecting files from the preview panel."
             )
         else:
