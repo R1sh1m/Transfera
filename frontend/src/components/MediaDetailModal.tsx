@@ -25,7 +25,8 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { useMediaItem } from "@/lib/queries";
-import { fetchThumbnail } from "@/lib/thumbnail-fetch";
+import apiClient from "@/lib/api-client";
+import { fetchThumbnail, clearThumbFailCache } from "@/lib/thumbnail-fetch";
 import { parseBackendDate } from "@/lib/utils";
 import { isDesktop, showItemInFolder, openPath } from "@/lib/desktop";
 import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
@@ -75,6 +76,7 @@ export default function MediaDetailModal({
   const [copied, setCopied] = useState(false);
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [thumbNonce, setThumbNonce] = useState(0);
+  const [retrying, setRetrying] = useState(false);
 
   // Fetch full detail including resolved destination path on disk
   const { data: detail, isLoading } = useMediaItem(item?.id ?? null);
@@ -135,30 +137,54 @@ export default function MediaDetailModal({
   if (!item) return null;
 
   const activeItem = detail ?? item;
-  const targetPath = detail?.dest_path || item.source_path;
+  // The on-PC location is ONLY dest_path. Never fall back to source_path
+  // here — device imports report ios:// source paths, which are not PC
+  // locations and must not be presented as such.
+  const destPath = detail?.dest_path ?? null;
+  const copyPath = destPath ?? item.source_path;
+  const isCompleted = activeItem.final_status === "completed";
   const isVideo = [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"].includes(
     (item.extension || "").toLowerCase(),
   );
 
+  // Retry must bust the module-level negative fail-cache first — otherwise
+  // fetchThumbnail short-circuits to null for 60 s and the retry can never
+  // succeed. Also asks the backend to regenerate thumbnails (same endpoint
+  // the Library "Refresh" button uses); best-effort, the refetch below runs
+  // regardless. No regen hook exists in queries.ts, so call apiClient here.
+  const handleRetryPreview = async () => {
+    if (!item) return;
+    setRetrying(true);
+    try {
+      clearThumbFailCache();
+      try {
+        await apiClient.post("/media/regenerate-thumbnails");
+      } catch {
+        // Best-effort — refetch still runs below.
+      }
+    } finally {
+      setRetrying(false);
+      setThumbNonce((n) => n + 1);
+    }
+  };
+
   const handleShowInFolder = () => {
     if (!isDesktop) return;
-    if (detail?.dest_path) {
-      showItemInFolder(detail.dest_path);
-    } else if (item.source_path) {
-      showItemInFolder(item.source_path);
+    // Only the resolved destination is a real on-disk PC path.
+    if (destPath) {
+      showItemInFolder(destPath);
     }
   };
 
   const handleOpenFile = () => {
-    const p = detail?.dest_path || item.source_path;
-    if (p && isDesktop) {
-      openPath(p);
+    if (destPath && isDesktop) {
+      openPath(destPath);
     }
   };
 
   const handleCopyPath = () => {
-    if (targetPath) {
-      navigator.clipboard.writeText(targetPath);
+    if (copyPath) {
+      navigator.clipboard.writeText(copyPath);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -247,11 +273,14 @@ export default function MediaDetailModal({
                   <p className="text-xs">Preview not available</p>
                   <button
                     type="button"
-                    onClick={() => setThumbNonce((n) => n + 1)}
-                    className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted text-foreground text-xs hover:bg-muted/80 active:scale-[0.95] transition-all"
+                    onClick={handleRetryPreview}
+                    disabled={retrying}
+                    className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted text-foreground text-xs hover:bg-muted/80 active:scale-[0.95] transition-all disabled:opacity-50"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    Retry preview
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${retrying ? "animate-spin" : ""}`}
+                    />
+                    {retrying ? "Retrying…" : "Retry preview"}
                   </button>
                 </div>
               )}
@@ -392,12 +421,22 @@ export default function MediaDetailModal({
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <p
-                    className="text-xs text-muted-foreground font-mono bg-background border border-border/80 px-2.5 py-1.5 rounded-lg flex-1 truncate select-all"
-                    title={targetPath}
-                  >
-                    {targetPath || "Path not available"}
-                  </p>
+                  {destPath ? (
+                    <p
+                      className="text-xs text-muted-foreground font-mono bg-background border border-border/80 px-2.5 py-1.5 rounded-lg flex-1 truncate select-all"
+                      title={destPath}
+                    >
+                      {destPath}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground bg-background border border-border/80 px-2.5 py-1.5 rounded-lg flex-1 truncate">
+                      {isLoading
+                        ? "Locating destination…"
+                        : isCompleted
+                          ? "Destination resolving — transferred, path not recorded yet."
+                          : "Available on PC after transfer completes."}
+                    </p>
+                  )}
                   <button
                     onClick={handleCopyPath}
                     className="p-2 rounded-lg border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors shrink-0"
@@ -412,7 +451,7 @@ export default function MediaDetailModal({
                 </div>
               </div>
 
-              {item.source_path && item.source_path !== targetPath && (
+              {item.source_path && (
                 <div className="pt-2 border-t border-border/50">
                   <p className="text-[11px] text-muted-foreground mb-0.5">
                     Original Source Path:

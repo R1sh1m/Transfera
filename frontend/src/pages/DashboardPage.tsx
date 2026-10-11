@@ -818,13 +818,15 @@ function BackendStatusCard() {
       : "No active transfer";
 
   return (
-    <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-3">
-      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+    <div className="bg-card border border-border rounded-lg p-3 flex items-center gap-x-3 gap-y-2 flex-wrap">
+      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
         <Activity className="w-4.5 h-4.5 text-primary" />
       </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs text-muted-foreground">Backend Status</p>
-        <div className="flex items-center gap-3 mt-1">
+      <div className="min-w-0 flex-1 basis-32">
+        <p className="text-xs text-muted-foreground whitespace-nowrap">
+          Backend Status
+        </p>
+        <div className="flex items-center gap-3 mt-1 flex-wrap">
           <div className="flex items-center gap-1.5">
             <span className={cn("w-2 h-2 rounded-full", restColor)} />
             <span className="text-[11px] text-muted-foreground">REST</span>
@@ -881,7 +883,7 @@ function BackendStatusCard() {
         <button
           type="button"
           onClick={() => setIsSettingsOpen(true)}
-          className="text-[10px] font-normal text-muted-foreground bg-muted hover:bg-muted/80 px-1.5 py-0.5 rounded transition-colors"
+          className="text-[10px] font-normal text-muted-foreground bg-muted hover:bg-muted/80 px-1.5 py-0.5 rounded transition-colors shrink-0 whitespace-nowrap"
           title="Click to view update settings and release info"
         >
           v{health.version}
@@ -892,7 +894,9 @@ function BackendStatusCard() {
       <button
         type="button"
         onClick={() => checkForUpdates(true)}
-        disabled={updaterStatus === "checking" || updaterStatus === "downloading"}
+        disabled={
+          updaterStatus === "checking" || updaterStatus === "downloading"
+        }
         title={`Check for updates${appVersion ? ` (app v${appVersion})` : ""} — runs update check`}
         className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0 disabled:opacity-50"
         aria-label="Check for updates"

@@ -249,7 +249,7 @@ jobs:
           $platform = [ordered]@{ signature = $sigText; url = $url }
           $manifest = [ordered]@{
             version = $version
-            notes = "Transfera $version - see the GitHub release for details."
+            notes = "Transfera $version"
             pub_date = $pubDate
             platforms = [ordered]@{
               "windows-x86_64" = $platform

@@ -415,6 +415,7 @@ function BackendDownScreen() {
   const serverDown = useTransferStore((s) => s.ui.serverDown);
   const [retrying, setRetrying] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const { data: health } = useHealth();
 
   // Initial probe on mount — if backend is already healthy, never show starting/down screen
@@ -485,6 +486,15 @@ function BackendDownScreen() {
     };
   }, [isStarting, serverDown]);
 
+  // Elapsed-seconds timer for the starting splash (display only — the
+  // retry/health-poll logic below is untouched).
+  useEffect(() => {
+    if (!isStarting || serverDown) return;
+    setElapsed(0);
+    const t = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [isStarting, serverDown]);
+
   // Clear starting/down as soon as TanStack useHealth sees "ok"
   useEffect(() => {
     if (health?.status === "ok") {
@@ -496,6 +506,20 @@ function BackendDownScreen() {
   }, [health]);
 
   if (!serverDown && !isStarting) return null;
+
+  // Staged splash copy by elapsed time (display only).
+  const stageHeading =
+    elapsed < 15
+      ? "Starting engine…"
+      : elapsed < 45
+        ? "Warming metadata…"
+        : "Almost ready…";
+  const stageCopy =
+    elapsed < 15
+      ? "The backend engine is starting up. This takes a few seconds."
+      : elapsed < 45
+        ? "Still starting — loading local metadata and checking device health."
+        : "Taking longer than usual — still working. You can leave this screen open.";
 
   // Show a clean loading screen while the backend is in the process of starting up
   if (isStarting && !serverDown) {
@@ -512,11 +536,10 @@ function BackendDownScreen() {
           <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
           </div>
-          <h1 className="text-xl font-bold text-foreground">
-            Starting Transfera
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            The backend engine is starting up. This takes a few seconds.
+          <h1 className="text-xl font-bold text-foreground">{stageHeading}</h1>
+          <p className="text-sm text-muted-foreground">{stageCopy}</p>
+          <p className="text-xs text-muted-foreground tabular-nums">
+            {elapsed}s elapsed
           </p>
         </div>
       </motion.div>

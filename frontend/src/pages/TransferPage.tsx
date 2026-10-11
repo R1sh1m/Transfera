@@ -332,6 +332,8 @@ function PreviewThumbnail({
 // ---------------------------------------------------------------------------
 function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
   const status = useTransferStore((s) => s.transfer.status);
+  const storeSessionId = useTransferStore((s) => s.transfer.sessionId);
+  const sessionId = progress?.session_id ?? storeSessionId;
   const completedItems =
     progress?.imported_files ?? progress?.completed_items ?? 0;
   const totalItems = progress?.total_files ?? progress?.total_items ?? 0;
@@ -379,6 +381,39 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
       .slice(0, 30);
   }, [itemMap]);
 
+  // Fallback: when the backend never sent recent_items (itemMap stays empty)
+  // but the session has files, fall back to vaulted/completed media items so
+  // the preview is not blank after e.g. 25/25 completed. recent_items
+  // accumulation above stays primary; this is only rendered when it is empty.
+  const { data: fallbackData } = useMediaList({
+    sessionId: sessionId ?? undefined,
+    finalStatus: "completed",
+    pageSize: 30,
+  });
+
+  const fallbackFiles = useMemo<RecentItemProgress[]>(() => {
+    if (recentFiles.length > 0) return [];
+    if (!progress) return [];
+    const total = progress.total_files ?? progress.total_items ?? 0;
+    if (total <= 0) return [];
+    return (fallbackData?.items ?? [])
+      .map((item) => ({
+        item_id: item.id,
+        file_name: item.file_name,
+        hop1_status: item.hop1_status,
+        hop2_status: item.hop2_status,
+        thumbnail_url: item.thumbnail_url ?? null,
+        updated_at: item.updated_at,
+      }))
+      .sort(
+        (a, b) =>
+          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+      )
+      .slice(0, 30);
+  }, [recentFiles.length, progress, fallbackData]);
+
+  const displayFiles = recentFiles.length > 0 ? recentFiles : fallbackFiles;
+
   return (
     <div className="flex-1 bg-card border border-border rounded-lg overflow-hidden">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -392,7 +427,7 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
       </div>
 
       <div className="p-4 h-[calc(100%-48px)] overflow-y-auto">
-        {recentFiles.length === 0 ? (
+        {displayFiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-3">
             {isRunning ? (
               <>
@@ -409,8 +444,8 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
         ) : (
           <div className="columns-3 gap-2">
             <AnimatePresence initial={false}>
-              {recentFiles.map((file) => {
-                const isFirst = file.item_id === recentFiles[0]?.item_id;
+              {displayFiles.map((file) => {
+                const isFirst = file.item_id === displayFiles[0]?.item_id;
                 return (
                   <motion.div
                     key={file.item_id}

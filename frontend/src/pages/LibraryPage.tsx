@@ -43,6 +43,7 @@ import MediaDetailModal from "@/components/MediaDetailModal";
 import {
   CapabilitiesBadge,
   DuplicatesPanel,
+  MOMENT_SELECT_EVENT,
   MomentsGrid,
   PeoplePanel,
   SemanticSearchBar,
@@ -57,6 +58,7 @@ import type {
   MediaItemInfo,
   HopStatus,
   DocumentMigratePreview,
+  Moment,
 } from "@/types/api";
 
 // Documents kind buckets — mirrors DOCUMENT_KINDS in backend/config.py.
@@ -570,6 +572,14 @@ export default function LibraryPage() {
   const [semanticQuery, setSemanticQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MediaItemInfo | null>(null);
+  // Active moment date-range filter (set via MOMENT_SELECT_EVENT from
+  // MomentsGrid). No backend date params exist on useMediaList, so this is
+  // applied client-side over date_taken/created_at and takes precedence over
+  // (combines with) the server-side search/filters.
+  const [momentRange, setMomentRange] = useState<{
+    start: string;
+    end: string;
+  } | null>(null);
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const [regenStatus, setRegenStatus] = useState<"idle" | "loading" | "done">(
     "idle",
@@ -604,6 +614,20 @@ export default function LibraryPage() {
       setShowingRecent(true);
     }
   }, [lastSessionId]);
+
+  // Moment cards (MomentsGrid buttons) broadcast MOMENT_SELECT_EVENT with the
+  // Moment {start, end, count} when clicked without an onSelect prop. Listen
+  // here: jump to the Vault tab and pin a date-range filter over the range.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const m = (e as CustomEvent<Moment>).detail;
+      if (!m?.start || !m?.end) return;
+      setMomentRange({ start: m.start, end: m.end });
+      setSection("vault");
+    };
+    window.addEventListener(MOMENT_SELECT_EVENT, handler);
+    return () => window.removeEventListener(MOMENT_SELECT_EVENT, handler);
+  }, []);
 
   // Auto-trigger thumbnail regeneration when a transfer completes
   useEffect(() => {
@@ -790,11 +814,38 @@ export default function LibraryPage() {
   const libraryTotalPages = useTransferStore((s) => s.library.totalPages);
   const libraryIsLoadingMore = useTransferStore((s) => s.library.isLoadingMore);
 
+  // Client-side moment date-range filter (useMediaList has no date params).
+  // Takes precedence by narrowing the server-filtered list to items whose
+  // date_taken (fallback created_at) falls within momentRange.
+  const visibleLibraryItems = useMemo(() => {
+    if (!momentRange) return libraryItems;
+    const s = new Date(momentRange.start).getTime();
+    const e = new Date(momentRange.end).getTime();
+    if (Number.isNaN(s) || Number.isNaN(e)) return libraryItems;
+    const lo = Math.min(s, e);
+    const hi = Math.max(s, e);
+    return libraryItems.filter((it) => {
+      const raw = it.date_taken ?? it.created_at;
+      if (!raw) return false;
+      const t = new Date(raw).getTime();
+      return !Number.isNaN(t) && t >= lo && t <= hi;
+    });
+  }, [libraryItems, momentRange]);
+
+  const momentLabel = useMemo(() => {
+    if (!momentRange) return "";
+    const fmt = (iso: string) => {
+      const t = new Date(iso).getTime();
+      return Number.isNaN(t) ? iso : new Date(iso).toLocaleDateString();
+    };
+    return `${fmt(momentRange.start)} → ${fmt(momentRange.end)}`;
+  }, [momentRange]);
+
   // Pure memoized distribution — no setState loop. Recomputes only when the
   // item list identity or the column bucket changes.
   const columns: MediaItemInfo[][] = useMemo(
-    () => distributeMasonry(libraryItems, colBucket),
-    [libraryItems, colBucket],
+    () => distributeMasonry(visibleLibraryItems, colBucket),
+    [visibleLibraryItems, colBucket],
   );
 
   // Stable select handler so memo(LibraryCard) isn't defeated by a new
@@ -807,25 +858,26 @@ export default function LibraryPage() {
   // Quick Look & Keyboard Navigation
   const selectedIndex = useMemo(() => {
     if (!selectedItem) return -1;
-    return libraryItems.findIndex((it) => it.id === selectedItem.id);
-  }, [libraryItems, selectedItem]);
+    return visibleLibraryItems.findIndex((it) => it.id === selectedItem.id);
+  }, [visibleLibraryItems, selectedItem]);
 
-  const hasNext = selectedIndex >= 0 && selectedIndex < libraryItems.length - 1;
+  const hasNext =
+    selectedIndex >= 0 && selectedIndex < visibleLibraryItems.length - 1;
   const hasPrev = selectedIndex > 0;
 
   const handleNextItem = useCallback(() => {
-    if (selectedIndex >= 0 && selectedIndex < libraryItems.length - 1) {
-      const next = libraryItems[selectedIndex + 1];
+    if (selectedIndex >= 0 && selectedIndex < visibleLibraryItems.length - 1) {
+      const next = visibleLibraryItems[selectedIndex + 1];
       if (next) setSelectedItem(next);
     }
-  }, [selectedIndex, libraryItems]);
+  }, [selectedIndex, visibleLibraryItems]);
 
   const handlePrevItem = useCallback(() => {
     if (selectedIndex > 0) {
-      const prev = libraryItems[selectedIndex - 1];
+      const prev = visibleLibraryItems[selectedIndex - 1];
       if (prev) setSelectedItem(prev);
     }
-  }, [selectedIndex, libraryItems]);
+  }, [selectedIndex, visibleLibraryItems]);
 
   // Spacebar Quick Look shortcut to open first/active item
   useEffect(() => {
@@ -835,15 +887,15 @@ export default function LibraryPage() {
         document.activeElement?.tagName === "TEXTAREA";
       if (isInput) return;
 
-      if (e.key === " " && !selectedItem && libraryItems.length > 0) {
+      if (e.key === " " && !selectedItem && visibleLibraryItems.length > 0) {
         e.preventDefault();
-        const first = libraryItems[0];
+        const first = visibleLibraryItems[0];
         if (first) setSelectedItem(first);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedItem, libraryItems]);
+  }, [selectedItem, visibleLibraryItems]);
 
   // Infinite scroll observer
   const loadMore = useCallback(() => {
@@ -1134,6 +1186,23 @@ export default function LibraryPage() {
         </button>
       </div>
 
+      {/* Moment filter banner */}
+      {momentRange && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-action/5 border border-action/30 rounded-lg text-xs">
+          <span className="flex-1 text-muted-foreground">
+            Showing moment {momentLabel} · {visibleLibraryItems.length} of{" "}
+            {libraryItems.length} items
+          </span>
+          <button
+            type="button"
+            onClick={() => setMomentRange(null)}
+            className="px-2.5 py-1 bg-action text-white rounded-pill font-normal hover:bg-action/90 active:scale-[0.95] transition-colors shrink-0"
+          >
+            × Clear
+          </button>
+        </div>
+      )}
+
       {/* Session filter banner */}
       {lastSessionId && (
         <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg text-xs">
@@ -1260,22 +1329,34 @@ export default function LibraryPage() {
               </div>
             ))}
           </div>
-        ) : libraryItems.length === 0 ? (
+        ) : visibleLibraryItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
             <HardDrive className="w-12 h-12 mb-3 opacity-30" />
             <p className="text-sm font-semibold text-foreground">
-              No items in library yet
+              {momentRange
+                ? "No items in this moment"
+                : "No items in library yet"}
             </p>
             <p className="text-xs text-muted-foreground mt-1 max-w-xs text-center">
-              Complete your first backup to safely store and view your photos
-              and videos here.
+              {momentRange
+                ? `Nothing taken between ${momentLabel} matches the current filters.`
+                : "Complete your first backup to safely store and view your photos and videos here."}
             </p>
-            <button
-              onClick={() => setCurrentPage("setup")}
-              className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"
-            >
-              Start a Transfer
-            </button>
+            {momentRange ? (
+              <button
+                onClick={() => setMomentRange(null)}
+                className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"
+              >
+                Clear moment filter
+              </button>
+            ) : (
+              <button
+                onClick={() => setCurrentPage("setup")}
+                className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"
+              >
+                Start a Transfer
+              </button>
+            )}
           </div>
         ) : (
           <MediaGridBoundary>
@@ -1296,7 +1377,7 @@ export default function LibraryPage() {
             ) : (
               <div className="space-y-1">
                 <AnimatePresence>
-                  {libraryItems.map((item) => (
+                  {visibleLibraryItems.map((item) => (
                     <div
                       key={item.id}
                       onClick={() => setSelectedItem(item)}
@@ -1334,11 +1415,11 @@ export default function LibraryPage() {
                 <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
               </div>
             )}
-            {libraryTotal > libraryItems.length &&
+            {libraryTotal > visibleLibraryItems.length &&
               !libraryIsLoadingMore &&
               !isFetching && (
                 <p className="text-center text-xs text-muted-foreground py-2">
-                  {libraryItems.length} of {libraryTotal} items shown
+                  {visibleLibraryItems.length} of {libraryTotal} items shown
                 </p>
               )}
           </>

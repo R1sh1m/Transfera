@@ -55,14 +55,16 @@ export default function AppUpdateNotification() {
             </div>
             <div>
               <p className="text-xs font-semibold leading-tight text-foreground">
-                {status === "available" && `Transfera v${updateInfo?.version} is available`}
+                {status === "available" &&
+                  `Transfera v${updateInfo?.version} is available`}
                 {status === "downloading" && `Downloading update...`}
                 {status === "downloaded" && `Update ready to install!`}
                 {status === "installing" && `Installing update...`}
                 {status === "error" && `Update check issue`}
               </p>
               <p className="text-[11px] text-muted-foreground mt-0.5 leading-tight">
-                {status === "available" && "A new version with the latest features is available."}
+                {status === "available" &&
+                  "A new version with the latest features is available."}
                 {status === "downloading" &&
                   (downloadProgress !== null
                     ? `${downloadProgress}% downloaded in background`
@@ -70,7 +72,8 @@ export default function AppUpdateNotification() {
                 {status === "downloaded" &&
                   "Restart Transfera to apply the update and enjoy the latest features."}
                 {status === "installing" && "Relaunching Transfera..."}
-                {status === "error" && (errorMessage || "Could not complete update check.")}
+                {status === "error" &&
+                  (errorMessage || "Could not complete update check.")}
               </p>
             </div>
           </div>
@@ -106,29 +109,34 @@ export default function AppUpdateNotification() {
           </div>
         )}
 
-        {/* Expandable Release Notes */}
-        {updateInfo?.body && (
-          <div className="border-t border-border/50 pt-1.5">
-            <button
-              type="button"
-              onClick={() => setNotesExpanded(!notesExpanded)}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <span>What's new in v{updateInfo.version}</span>
-              {notesExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
-            {notesExpanded && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="mt-1.5 p-2 bg-muted/40 rounded-lg text-[10px] text-muted-foreground max-h-32 overflow-y-auto whitespace-pre-line select-text font-mono"
+        {/* Expandable Release Notes (hidden for empty/placeholder bodies) */}
+        {updateInfo?.body?.trim() &&
+          !/see the github release/i.test(updateInfo.body) && (
+            <div className="border-t border-border/50 pt-1.5">
+              <button
+                type="button"
+                onClick={() => setNotesExpanded(!notesExpanded)}
+                className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
               >
-                {updateInfo.body}
-              </motion.div>
-            )}
-          </div>
-        )}
+                <span>What's new in v{updateInfo.version}</span>
+                {notesExpanded ? (
+                  <ChevronUp className="w-3 h-3" />
+                ) : (
+                  <ChevronDown className="w-3 h-3" />
+                )}
+              </button>
+              {notesExpanded && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="mt-1.5 p-2 bg-muted/40 rounded-lg text-[10px] text-muted-foreground max-h-32 overflow-y-auto whitespace-pre-line select-text font-mono"
+                >
+                  {updateInfo.body}
+                </motion.div>
+              )}
+            </div>
+          )}
 
         {/* Action buttons */}
         {status === "available" && (

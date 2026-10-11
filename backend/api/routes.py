@@ -3209,15 +3209,17 @@ async def get_session_progress(
                 hop1_progress = round((hop1_done / total) * 100)
                 hop2_progress = round((hop2_done / total) * 100)
 
-            # Recent items with thumbnails (for the Media Preview panel).
+            # Recent items (for the Media Preview panel).
             # Use a generous limit (200) so that when items arrive progressively
             # the frontend sees them arrive and can accumulate them, rather than
             # having earlier items silently pushed out of a tight 12-item window.
+            # NOTE: no thumbnail_path filter — items without thumbnails yet
+            # return with thumbnail_url=None and the frontend falls back to
+            # file icons (RecentItemProgress.thumbnail_url is Optional).
             recent_result = await session.execute(
                 select(MediaItem)
                 .where(
                     MediaItem.session_id == session_id,
-                    MediaItem.thumbnail_path.isnot(None),
                 )
                 .order_by(MediaItem.updated_at.desc())
                 .limit(200)

@@ -33,6 +33,7 @@ import {
   useTimeline,
 } from "@/lib/queries";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
+import type { Moment } from "@/types/api";
 
 function Thumb({
   id,
@@ -242,7 +243,16 @@ export function TimelineStrip() {
   );
 }
 
-export function MomentsGrid() {
+/** Window event fired when a moment is selected without an onSelect handler,
+ *  so the library view can filter to that date range without prop drilling.
+ *  Subscribe: window.addEventListener(MOMENT_SELECT_EVENT, (e) => ...). */
+export const MOMENT_SELECT_EVENT = "transfera:moment-select";
+
+export function MomentsGrid({
+  onSelect,
+}: {
+  onSelect?: (moment: Moment) => void;
+}) {
   const { data, isLoading } = useMoments();
   if (isLoading)
     return (
@@ -261,17 +271,36 @@ export function MomentsGrid() {
         events
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-        {data.moments.slice(0, 9).map((m, i) => (
-          <div key={i} className="rounded-lg border border-border bg-card p-3">
-            <div className="text-sm font-semibold">
-              {parseBackendDate(m.start).toLocaleDateString()} →{" "}
-              {parseBackendDate(m.end).toLocaleDateString()}
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {m.count} photos · event {i + 1}
-            </div>
-          </div>
-        ))}
+        {data.moments.slice(0, 9).map((m, i) => {
+          const label = `${parseBackendDate(m.start).toLocaleDateString()} → ${parseBackendDate(m.end).toLocaleDateString()}`;
+          const handleSelect = () => {
+            if (onSelect) {
+              onSelect(m);
+              return;
+            }
+            // Null-safe default: broadcast the range so the library view can
+            // set its search/filter to that date range (LibraryPage owns its
+            // filter state, so this stays decoupled until it subscribes).
+            window.dispatchEvent(
+              new CustomEvent<Moment>(MOMENT_SELECT_EVENT, { detail: m }),
+            );
+          };
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={handleSelect}
+              aria-label={`Show ${m.count} photos from ${label}`}
+              title={`Filter library to ${label}`}
+              className="rounded-lg border border-border bg-card p-3 text-left hover:border-action hover:bg-action/5 active:scale-[0.98] transition-all cursor-pointer"
+            >
+              <div className="text-sm font-semibold">{label}</div>
+              <div className="text-xs text-muted-foreground">
+                {m.count} photos · event {i + 1}
+              </div>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -364,21 +393,57 @@ export function DuplicatesPanel() {
 export function PeoplePanel() {
   const { data, isLoading } = usePeople();
   const rename = useRenamePerson();
+  const backfill = useBackfill();
+  const downloadModels = useDownloadModels();
+  const { data: modelStatus } = useModelStatus(downloadModels.isPending);
   const [editing, setEditing] = useState<number | null>(null);
   const [name, setName] = useState("");
   if (isLoading)
     return <div className="text-sm text-muted-foreground">Loading people…</div>;
-  if (!data || data.people.length === 0)
+  if (!data || data.people.length === 0) {
+    const modelsReady = modelStatus?.ready ?? false;
+    const modelsBusy =
+      modelStatus?.status === "downloading" ||
+      modelStatus?.status === "installing-packages";
     return (
       <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
         <div className="flex items-center gap-2 font-semibold text-foreground mb-1">
           <Users className="w-4 h-4 text-action" /> People
         </div>
-        No face clusters yet. Run{" "}
-        <strong className="font-semibold text-foreground">Index library</strong>{" "}
-        above to scan your media and group faces automatically.
+        <p>
+          No face clusters yet. Index your library to scan media and group faces
+          automatically.
+        </p>
+        {!modelsReady && modelStatus && (
+          <p className="mt-1 text-xs">
+            {modelsBusy
+              ? `AI face models ${modelStatus.status === "installing-packages" ? "installing" : "downloading"}…`
+              : `${modelStatus.missing.length} AI model(s) not installed — face grouping needs them.`}
+          </p>
+        )}
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => backfill.mutate()}
+            disabled={backfill.isPending}
+            className="px-3 py-1.5 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40"
+            title="Fill missing perceptual hashes, dimensions and tags, then group faces (offline, idempotent)"
+          >
+            {backfill.isPending ? "Indexing…" : "Index library"}
+          </button>
+          {!modelsReady && !modelsBusy && (
+            <button
+              onClick={() => downloadModels.mutate()}
+              disabled={downloadModels.isPending}
+              className="px-3 py-1.5 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
+              title="Download on-board AI models (~218 MB, one time) to enable face grouping"
+            >
+              {downloadModels.isPending ? "Starting…" : "Download AI models"}
+            </button>
+          )}
+        </div>
       </div>
     );
+  }
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-sm font-semibold">
