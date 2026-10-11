@@ -88,6 +88,13 @@ frontend/src-tauri/resources/exiftool_files/*
 !frontend/src-tauri/resources/transfera-engine/
 frontend/src-tauri/resources/transfera-engine/*
 !frontend/src-tauri/resources/transfera-engine/.gitkeep
+# Ignore pre-seeded AI-model *contents* (~400 MB CLIP + face weights, staged
+# at build time by the release workflow) but keep the directory itself
+# tracked via .gitkeep so the Tauri resources glob resolves on fresh
+# checkouts (same failure mode as exiftool_files above).
+!frontend/src-tauri/resources/models/
+frontend/src-tauri/resources/models/*
+!frontend/src-tauri/resources/models/.gitkeep
 # VC++ redistributable (~25 MB, fetched at build time by
 # scripts/build-sidecar.ps1 for the NSIS post-install hook). Never commit
 # the binary; Unix builds carry a 0-byte placeholder instead.
