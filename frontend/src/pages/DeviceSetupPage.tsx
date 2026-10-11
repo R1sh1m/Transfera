@@ -2316,8 +2316,42 @@ export default function DeviceSetupPage() {
 
   const handleTransferStart = useCallback(
     (confirmedPaths?: string[]) => {
-      if (canStart && !createSession.isPending) {
+      if (import.meta.env.DEV) {
+        console.log("[Transfer] canStart parts:", {
+          hasPaths,
+          spaceSufficient,
+          isSamePath,
+          needsMoveConfirm,
+          isPending: createSession.isPending,
+          confirmedCount: confirmedPaths?.length ?? null,
+          selectedCount: selectedFilesRef.current.length,
+        });
+      }
+      // Guard against double-submit from the preview-panel Start buttons
+      // (SourcePreviewPanel has no pending prop, so this early return is
+      // the only double-submit protection for that surface).
+      if (createSession.isPending) return;
+      if (canStart) {
         handleStart(confirmedPaths);
+        return;
+      }
+      if (!hasPaths) {
+        showNotification(
+          "info",
+          "Select both source and destination directories to continue",
+        );
+      } else if (isSamePath) {
+        showNotification("info", "Source and destination cannot be the same");
+      } else if (needsMoveConfirm) {
+        showNotification(
+          "info",
+          "Confirm that you understand the move operation",
+        );
+      } else if (!spaceSufficient) {
+        showNotification(
+          "info",
+          "Free up disk space on the destination to continue",
+        );
       } else {
         showNotification(
           "info",
@@ -2325,7 +2359,16 @@ export default function DeviceSetupPage() {
         );
       }
     },
-    [canStart, createSession.isPending, handleStart, showNotification],
+    [
+      canStart,
+      createSession.isPending,
+      handleStart,
+      showNotification,
+      hasPaths,
+      isSamePath,
+      needsMoveConfirm,
+      spaceSufficient,
+    ],
   );
 
   // Reset only-new-mode when source changes away from iOS device
@@ -2335,9 +2378,16 @@ export default function DeviceSetupPage() {
     }
   }, [isIOSDevice, onlyNewMode, setSetupOnlyNewMode]);
 
-  // Clear selected files when source changes
+  // Clear selected files when source changes (but NOT on initial mount —
+  // the mount run would wipe a just-confirmed selection restored alongside
+  // the source). handleStart already prefers the preview panel's
+  // confirmedPaths param over state, so a stale clear can't drop files.
+  const prevSourceRef = useRef(sourceRef);
   useEffect(() => {
-    setSelectedFiles([]);
+    if (prevSourceRef.current !== sourceRef) {
+      prevSourceRef.current = sourceRef;
+      setSelectedFiles([]);
+    }
   }, [sourceRef]);
 
   // Esc key to go back
@@ -2968,7 +3018,7 @@ export default function DeviceSetupPage() {
           whileHover={canStart ? { scale: 1.01 } : undefined}
           whileTap={canStart ? { scale: 0.95 } : undefined}
           disabled={!canStart || createSession.isPending}
-          onClick={() => handleStart()}
+          onClick={() => handleTransferStart()}
           title={
             canStart
               ? undefined

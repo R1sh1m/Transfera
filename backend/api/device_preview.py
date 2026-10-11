@@ -6,6 +6,7 @@ and lazy thumbnail generation with in-memory LRU cache.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io as _io
 import logging
@@ -34,12 +35,59 @@ logger = logging.getLogger(__name__)
 # HEIF opener for Pillow decodes below (mirrors thumbnailer/metadata_extractor).
 # Registration is process-global; other modules usually beat us to it, but the
 # preview endpoints must not depend on import order.
+_HEIF_AVAILABLE = False
 try:
     from pillow_heif import register_heif_opener as _register_heif_opener
 
     _register_heif_opener()
-except Exception:
-    logger.debug("pillow-heif unavailable — HEIF preview thumbnails will fall back to gray")
+    _HEIF_AVAILABLE = True
+except Exception as _heif_exc:
+    _HEIF_AVAILABLE = False
+    logger.debug("pillow-heif unavailable — HEIF preview thumbnails will fall back to gray: %s", _heif_exc)
+
+
+def _is_transient_thumb_error(exc: BaseException | None) -> bool:
+    """True when *exc* looks like a transient USB/timeout/lock failure.
+
+    Such failures deserve a 503 + Retry-After so the frontend can retry,
+    instead of a grey-fallback 200 which looks like a successful load.
+    """
+    if exc is None:
+        return False
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    try:
+        import concurrent.futures as _cf
+
+        if isinstance(exc, _cf.TimeoutError):
+            return True
+    except Exception:
+        pass
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    for marker in (
+        "timeout",
+        "timed out",
+        "temporarily",
+        "try again",
+        "busy",
+        "locked",
+        "lock",
+        "not trusted",
+        "trust",
+        "pair",
+        "disconnected",
+        "unreachable",
+        "usb",
+        "stalled",
+        "slot dropped",
+        "econnreset",
+        "broken pipe",
+    ):
+        if marker in text:
+            return True
+    return False
 
 
 async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -> bytes | None:
@@ -672,12 +720,20 @@ async def device_thumbnail(
     size: int = Query(200, ge=32, le=512),
     file_size: int | None = Query(None, description="Source file size (cache validation)"),
     file_mtime: float | None = Query(None, description="Source file mtime (cache validation)"),
+    retry: int | None = Query(
+        None, description="Client retry counter — ignored for cache keys so retries hit disk/RAM cache"
+    ),
     _: None = Depends(require_local_token_or_query),
 ):
+    _ = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
     abs_path = os.path.abspath(path)
 
     if not os.path.exists(abs_path):
-        return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            headers={"X-Thumb-Status": "not-found"},
+        )
 
     try:
         if file_size is None or file_mtime is None:
@@ -686,15 +742,28 @@ async def device_thumbnail(
                 file_size = st.st_size
             if file_mtime is None:
                 file_mtime = st.st_mtime
-    except OSError:
-        return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+    except OSError as exc:
+        logger.debug("local thumbnail stat failed for %s: %s", abs_path, exc)
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            headers={"X-Thumb-Status": "not-found"},
+        )
 
     if file_size and file_size > 200 * 1024 * 1024:
-        return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            headers={"X-Thumb-Status": "file-too-large"},
+        )
 
     ext = os.path.splitext(abs_path)[1].lower()
     if ext not in PREVIEW_EXTENSIONS:
-        return Response(content=_generate_gray_fallback(), media_type="image/jpeg")
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            headers={"X-Thumb-Status": "unsupported-type"},
+        )
 
     cache_key = (abs_path, size)
     cached = _get_thumb_cache(cache_key)
@@ -702,39 +771,47 @@ async def device_thumbnail(
         return Response(
             content=cached,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
 
     disk_key = _device_thumb_disk_key("local", abs_path, size, file_size, file_mtime)
-    disk_cached = _read_disk_thumb(disk_key)
+    disk_cached = await asyncio.to_thread(_read_disk_thumb, disk_key)
     if disk_cached is not None:
         _put_thumb_cache(cache_key, disk_cached)
         return Response(
             content=disk_cached,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
 
     # Offload CPU-bound decode + encode to the thread pool so the
     # event loop stays free for other requests during thumbnail generation.
-    import asyncio
-
     if ext in PREVIEW_IMAGE_EXTENSIONS:
         jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail, abs_path, size)
     else:
         jpeg_bytes = await asyncio.to_thread(_generate_video_thumbnail, abs_path, size)
 
     is_real = bool(jpeg_bytes and len(jpeg_bytes) > 10)
+    if not is_real:
+        logger.debug(
+            "local thumbnail undecodable for %s (ext=%s heif_available=%s) — grey fallback",
+            abs_path,
+            ext,
+            _HEIF_AVAILABLE,
+        )
     result = jpeg_bytes if is_real else _generate_gray_fallback()
 
     _put_thumb_cache(cache_key, result)
     if is_real:
-        _write_disk_thumb(disk_key, result)
+        await asyncio.to_thread(_write_disk_thumb, disk_key, result)
 
     return Response(
         content=result,
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            "X-Thumb-Status": "ok" if is_real else "fallback-undecodable",
+        },
     )
 
 
@@ -920,8 +997,12 @@ async def ios_thumbnail(
     size: int = Query(200, ge=32, le=512),
     file_size: int | None = Query(None, description="Source file size (cache validation, from listing)"),
     file_mtime: float | None = Query(None, description="Source file mtime (cache validation, from listing)"),
+    retry: int | None = Query(
+        None, description="Client retry counter — ignored for cache keys so retries hit disk/RAM cache"
+    ),
     _: None = Depends(require_local_token_or_query),
 ):
+    _ = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
     if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
         raise HTTPException(status_code=400, detail="Invalid device path")
     cache_key = (f"ios:{device_id}:{path}", size)
@@ -930,80 +1011,219 @@ async def ios_thumbnail(
         return Response(
             content=cached,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
     disk_key = _device_thumb_disk_key(device_id, path, size, file_size, file_mtime)
-    disk_cached = _read_disk_thumb(disk_key)
+    disk_cached = await asyncio.to_thread(_read_disk_thumb, disk_key)
     if disk_cached is not None:
         _put_thumb_cache(cache_key, disk_cached)
         return Response(
             content=disk_cached,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
 
     ext = os.path.splitext(path)[1].lower()
     jpeg_bytes: bytes | None = None
+    transient_exc: BaseException | None = None
+    fail_reason = "unknown"
 
     try:
         if ext in PREVIEW_IMAGE_EXTENSIONS:
             # ----------------------------------------------------------------
-            # FAST PATH: Read only the first 256 KB of the file.
+            # TWO-STAGE FAST PATH: Read only the first 256 KB of the file.
             # iOS HEIC/JPEG files embed a small JPEG preview (typically 20-80 KB)
             # in the EXIF header, which sits in the first ~128 KB of the file.
             # Downloading 256 KB vs a full 5-8 MB file is ~20-30x faster.
-            # If the partial read doesn't contain a usable thumbnail, fall back
-            # to a full read.
+            # Stage 1 (partial-prefix embedded-EXIF) runs first; only on
+            # failure do we pay for Stage 2 (full read). Blocking Pillow
+            # decodes run in the threadpool so the event loop never blocks.
             # ----------------------------------------------------------------
             PARTIAL_READ_BYTES = 256 * 1024  # 256 KB
 
             partial_bytes: bytes | None = None
+            partial_exc: BaseException | None = None
             try:
                 partial_bytes = await _read_device_file_partial(device_id, path, max_bytes=PARTIAL_READ_BYTES)
             except Exception as exc:
-                logger.debug("iOS partial read failed for %s: %s", path, exc)
+                partial_exc = exc
+                logger.debug("iOS partial read raised for %s: %s", path, exc)
 
             if partial_bytes and len(partial_bytes) >= 4096:
-                jpeg_bytes = _generate_photo_thumbnail_from_bytes(partial_bytes, size)
-
-            # Fall back to full read if partial thumbnail extraction failed
-            if not jpeg_bytes:
+                # Threadpool: EXIF-extract + Pillow decode/encode are blocking.
+                jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail_from_bytes, partial_bytes, size)
+                if jpeg_bytes and len(jpeg_bytes) > 10:
+                    logger.debug("iOS partial-read thumbnail hit for %s (%d bytes)", path, len(partial_bytes))
+                else:
+                    logger.debug(
+                        "iOS partial-prefix decode failed for %s (%d bytes, "
+                        "heif_available=%s, partial_truncated=%s) — falling back to full read",
+                        path,
+                        len(partial_bytes),
+                        _HEIF_AVAILABLE,
+                        len(partial_bytes) < PARTIAL_READ_BYTES,
+                    )
+                    fail_reason = (
+                        "no-pillow-heif"
+                        if (ext in (".heic", ".heif") and not _HEIF_AVAILABLE)
+                        else "partial-truncated-no-exif"
+                    )
+                    jpeg_bytes = None
+            else:
                 logger.debug(
-                    "iOS partial-read thumbnail failed for %s (%d bytes) — falling back to full read",
+                    "iOS partial read unusable for %s (bytes=%s, heif_available=%s) — falling back to full read",
                     path,
                     len(partial_bytes) if partial_bytes else 0,
+                    _HEIF_AVAILABLE,
                 )
+                fail_reason = "partial-truncated"
+                if partial_exc is not None and _is_transient_thumb_error(partial_exc):
+                    transient_exc = partial_exc
+
+            # Stage 2: full-read fallback before ever returning grey.
+            if not jpeg_bytes or len(jpeg_bytes) <= 10:
+                jpeg_bytes = None
                 try:
                     file_bytes = await read_device_file(device_id, path)
-                    jpeg_bytes = _generate_photo_thumbnail_from_bytes(file_bytes, size)
+                    if file_bytes and len(file_bytes) > 100:
+                        jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail_from_bytes, file_bytes, size)
+                        if jpeg_bytes and len(jpeg_bytes) > 10:
+                            logger.debug("iOS full-read thumbnail hit for %s (%d bytes)", path, len(file_bytes))
+                        else:
+                            logger.debug(
+                                "iOS full-read decode failed for %s (%d bytes, ext=%s, "
+                                "heif_available=%s) — truly undecodable",
+                                path,
+                                len(file_bytes),
+                                ext,
+                                _HEIF_AVAILABLE,
+                            )
+                            fail_reason = (
+                                "no-pillow-heif"
+                                if (ext in (".heic", ".heif") and not _HEIF_AVAILABLE)
+                                else "undecodable"
+                            )
+                    else:
+                        logger.debug("iOS full read empty for %s — transient?", path)
+                        fail_reason = "full-read-empty"
+                except FileNotFoundError as exc:
+                    logger.debug("iOS thumbnail not-found for %s: %s", path, exc)
+                    return Response(
+                        content=b"",
+                        media_type="image/jpeg",
+                        status_code=404,
+                        headers={"X-Thumb-Status": "not-found"},
+                    )
                 except Exception as exc:
-                    logger.debug("iOS full-read thumbnail error for %s: %s", path, exc)
+                    logger.debug("iOS full-read thumbnail error for %s: %s (%s)", path, exc, fail_reason)
+                    if _is_transient_thumb_error(exc):
+                        transient_exc = exc
+                        return Response(
+                            content=b"",
+                            media_type="image/jpeg",
+                            status_code=503,
+                            headers={
+                                "Retry-After": "2",
+                                "X-Thumb-Status": "transient-read-failed",
+                            },
+                        )
+                    fail_reason = f"full-read-failed: {exc}"
 
         else:
             # Video fast path: read only the first 8 MB and extract one
             # frame with a single input-seek ffmpeg spawn (no duration
             # probe, no full download). Phone videos with the moov box up
-            # front (faststart) resolve immediately; others fall back to
-            # the video badge instead of downloading hundreds of MB.
+            # front (faststart) resolve immediately; others resolve to a
+            # retryable 503 (not a grey 200) so the frontend shows a badge
+            # and can retry instead of thinking the thumbnail loaded.
+            # ffmpeg runs in the threadpool (blocking subprocess).
             _VIDEO_PREFIX_BYTES = 8 * 1024 * 1024
             prefix_bytes: bytes | None = None
             try:
                 prefix_bytes = await _read_device_file_partial(device_id, path, max_bytes=_VIDEO_PREFIX_BYTES)
             except Exception as exc:
-                logger.debug("iOS video prefix read failed for %s: %s", path, exc)
+                logger.debug("iOS video prefix read raised for %s: %s", path, exc)
+                if _is_transient_thumb_error(exc):
+                    return Response(
+                        content=b"",
+                        media_type="image/jpeg",
+                        status_code=503,
+                        headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
+                    )
             if prefix_bytes and len(prefix_bytes) > 4096:
-                jpeg_bytes = _extract_frame_from_bytes(prefix_bytes, size, ext or ".mp4")
+                try:
+                    jpeg_bytes = await asyncio.to_thread(_extract_frame_from_bytes, prefix_bytes, size, ext or ".mp4")
+                except subprocess.TimeoutExpired as exc:
+                    logger.debug("iOS ffmpeg timeout for %s: %s", path, exc)
+                    return Response(
+                        content=b"",
+                        media_type="image/jpeg",
+                        status_code=503,
+                        headers={"Retry-After": "2", "X-Thumb-Status": "ffmpeg-timeout"},
+                    )
+                if not jpeg_bytes or len(jpeg_bytes) <= 100:
+                    logger.debug(
+                        "iOS video prefix has no decodable frame for %s (%d bytes) — "
+                        "likely moov-at-EOF/truncated prefix",
+                        path,
+                        len(prefix_bytes),
+                    )
+                    jpeg_bytes = None
+                    fail_reason = "prefix-no-frame"
+            else:
+                logger.debug(
+                    "iOS video prefix read unusable for %s (bytes=%s)",
+                    path,
+                    len(prefix_bytes) if prefix_bytes else 0,
+                )
+                fail_reason = "prefix-read-failed"
 
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.debug("iOS thumbnail error for %s: %s", path, exc)
+        if _is_transient_thumb_error(exc):
+            return Response(
+                content=b"",
+                media_type="image/jpeg",
+                status_code=503,
+                headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
+            )
+        fail_reason = f"error: {exc}"
 
-    result = jpeg_bytes if (jpeg_bytes and len(jpeg_bytes) > 10) else _generate_gray_fallback()
-    _put_thumb_cache(cache_key, result)
-    # Persist real thumbnails (not the gray fallback) for instant revisits.
+    # --- Semantics: grey 200 ONLY for truly undecodable ---------------------
     if jpeg_bytes and len(jpeg_bytes) > 10:
-        _write_disk_thumb(disk_key, jpeg_bytes)
+        _put_thumb_cache(cache_key, jpeg_bytes)
+        await asyncio.to_thread(_write_disk_thumb, disk_key, jpeg_bytes)
+        return Response(
+            content=jpeg_bytes,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "ok"},
+        )
+
+    # Video prefix with no decodable frame is NOT truly undecodable (the full
+    # file might decode) — signal retryable so the frontend shows a badge.
+    if ext not in PREVIEW_IMAGE_EXTENSIONS and fail_reason in ("prefix-no-frame", "prefix-read-failed"):
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            status_code=503,
+            headers={"Retry-After": "2", "X-Thumb-Status": fail_reason},
+        )
+    if transient_exc is not None:
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            status_code=503,
+            headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
+        )
+    # Truly undecodable (full bytes present but Pillow/ffmpeg cannot decode,
+    # unsupported type, or no-heif-codec): grey 200 with a reason header so
+    # the frontend can distinguish fallback from a real thumbnail.
+    logger.debug("iOS thumbnail grey fallback for %s: reason=%s", path, fail_reason)
+    grey = _generate_gray_fallback()
     return Response(
-        content=result,
+        content=grey,
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
+        headers={"X-Thumb-Status": f"fallback-{fail_reason}"},
     )

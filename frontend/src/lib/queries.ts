@@ -154,7 +154,13 @@ export function useCreateSession() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (req: SessionCreate) => {
-      const { data } = await apiClient.post<SessionInfo>("/sessions", req);
+      // Session create walks/stats thousands of device files server-side
+      // (100 selected out of 4804 routinely exceeds the 30 s default).
+      // Match the preflight 120 s ceiling so large selections don't abort
+      // client-side with ECONNABORTED ("taking longer than expected").
+      const { data } = await apiClient.post<SessionInfo>("/sessions", req, {
+        timeout: 120000,
+      });
       return data;
     },
     onSuccess: () => {

@@ -752,10 +752,15 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             "quit" => {
+                // NOTE: deliberately no show()/unminimize()/set_focus() here.
+                // Quit must never steal foreground focus (it made Alt+Tab
+                // feel dead while the app ran). The renderer answers
+                // app:request-close via the close-guard modal and exits
+                // headless with forceExit() when idle, so forcing the
+                // window visible/focused before emitting is unnecessary.
+                // Focus stays reserved for explicit user opens: the tray
+                // "Open" item, tray left-click, and single-instance below.
                 if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
                     let _ = w.emit("app:request-close", ());
                 } else {
                     app.exit(0);

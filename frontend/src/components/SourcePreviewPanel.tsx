@@ -47,6 +47,59 @@ const THUMBNAIL_SIZE = 200;
 const GRID_COLUMNS = 4;
 const _PREVIEW_MAX_FILES = 5000;
 
+// Viewport prefetch window — kept tight so a 25/page device grid only
+// warms the next row instead of firing the whole page at once.
+const THUMB_ROOT_MARGIN = "200px";
+// Auto-retry backoff between gated thumbnail fetches (USB relief).
+const THUMB_RETRY_DELAYS = [1000, 2000, 4000];
+const THUMB_MAX_AUTO_RETRIES = 3;
+
+// Negative cache: abs_path -> timestamp of last terminal failure.
+// Prevents the same grey/failed tile from re-hammering USB on every
+// scroll or page revisit. Cleared on manual retry; 60s TTL.
+const thumbFailCache = new Map<string, number>();
+const THUMB_FAIL_TTL_MS = 60_000;
+
+function isThumbBlocked(absPath: string): boolean {
+  const t = thumbFailCache.get(absPath);
+  if (t == null) return false;
+  if (Date.now() - t > THUMB_FAIL_TTL_MS) {
+    thumbFailCache.delete(absPath);
+    return false;
+  }
+  return true;
+}
+
+function markThumbFailed(absPath: string): void {
+  thumbFailCache.set(absPath, Date.now());
+}
+
+function clearThumbFailed(absPath: string): void {
+  thumbFailCache.delete(absPath);
+}
+
+// Backend grey-fallback signals a transient USB failure with HTTP 200 +
+// a placeholder JPEG. When the backend exposes it via header, treat it
+// as a failure (retry affordance + negative cache) instead of "loaded".
+const GREY_FALLBACK_STATUSES = new Set([
+  "fallback",
+  "grey",
+  "placeholder",
+  "pending",
+  "failed",
+  "error",
+  "transient",
+]);
+
+function isGreyFallbackResponse(res: Response): boolean {
+  const h =
+    res.headers.get("X-Thumb-Status") ||
+    res.headers.get("X-Thumbnail-Status") ||
+    res.headers.get("X-Thumb-Fallback");
+  if (!h) return false;
+  return GREY_FALLBACK_STATUSES.has(h.trim().toLowerCase());
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   if (bytes < 1024) return `${bytes} B`;
@@ -129,82 +182,239 @@ function MediaThumbCell({
     "none" | "loading" | "loaded" | "error"
   >("none");
   const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const slotGrantedRef = useRef(false);
+  const cancelQueuedRef = useRef<(() => void) | null>(null);
+  const fetchAbortRef = useRef<AbortController | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
   const slotHeldRef = useRef(false);
+  const observedRef = useRef(false);
+  const mountedRef = useRef(true);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const releaseSlot = useCallback(() => {
+    if (slotHeldRef.current) {
+      slotHeldRef.current = false;
+      thumbQueue.release();
+    }
+  }, [thumbQueue]);
+
+  const revokeBlob = useCallback(() => {
+    if (blobUrlRef.current) {
+      try {
+        URL.revokeObjectURL(blobUrlRef.current);
+      } catch {
+        /* already revoked */
+      }
+      blobUrlRef.current = null;
+    }
+  }, []);
+
+  const cleanupPending = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    if (cancelQueuedRef.current) {
+      cancelQueuedRef.current();
+      cancelQueuedRef.current = null;
+    }
+    if (fetchAbortRef.current) {
+      try {
+        fetchAbortRef.current.abort();
+      } catch {
+        /* ignore */
+      }
+      fetchAbortRef.current = null;
+    }
+  }, []);
+
+  // Reset per-item state when the cell is recycled for a new path.
   const prevItemIdRef = useRef<string | null>(null);
   if (prevItemIdRef.current !== item.abs_path) {
     prevItemIdRef.current = item.abs_path;
-    slotGrantedRef.current = false;
-    slotHeldRef.current = false;
     retryCountRef.current = 0;
+    observedRef.current = false;
+    if (retryCount !== 0) setRetryCount(0);
+    if (imgSrc !== null) setImgSrc(null);
+    if (loadState !== "none") setLoadState("none");
   }
+
+  const startFetch = useCallback(() => {
+    const absPath = item.abs_path;
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+    const url = makeThumbnailUrl(item);
+
+    fetch(url, { signal: controller.signal })
+      .then((res) => {
+        if (!mountedRef.current) return null;
+        if (!res.ok) throw new Error(`thumb http ${res.status}`);
+        if (isGreyFallbackResponse(res)) {
+          throw new Error("thumb grey fallback");
+        }
+        return res.blob();
+      })
+      .then((blob) => {
+        if (!mountedRef.current || blob === null) return;
+        // Empty bodies are the grey-fallback shape on some backends —
+        // surface retry instead of a "loaded" grey tile.
+        if (blob.size === 0) throw new Error("thumb empty body");
+        revokeBlob();
+        const objectUrl = URL.createObjectURL(blob);
+        blobUrlRef.current = objectUrl;
+        if (!mountedRef.current) {
+          try {
+            URL.revokeObjectURL(objectUrl);
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        setImgSrc(objectUrl);
+        // <img onLoad> below confirms decode and releases the slot.
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        if (err instanceof Error && err.name === "AbortError") return;
+        // Free the concurrency slot between attempts so retries don't
+        // pin USB throughput while backing off.
+        releaseSlot();
+        fetchAbortRef.current = null;
+        if (retryCountRef.current < THUMB_MAX_AUTO_RETRIES) {
+          const delay = THUMB_RETRY_DELAYS[retryCountRef.current] ?? 4000;
+          retryTimerRef.current = setTimeout(() => {
+            if (!mountedRef.current) return;
+            retryCountRef.current += 1;
+            setRetryCount(retryCountRef.current);
+            if (isThumbBlocked(absPath)) {
+              setLoadState("error");
+              return;
+            }
+            slotHeldRef.current = true;
+            setLoadState("loading");
+            cancelQueuedRef.current = thumbQueue.request(() => {
+              cancelQueuedRef.current = null;
+              if (!mountedRef.current) {
+                releaseSlot();
+                return;
+              }
+              startFetch();
+            });
+          }, delay);
+        } else {
+          markThumbFailed(absPath);
+          setLoadState("error");
+        }
+      });
+  }, [item, makeThumbnailUrl, thumbQueue, releaseSlot, revokeBlob]);
 
   useEffect(() => {
     const el = cellRef.current;
     if (!el) return;
-    if (slotGrantedRef.current) return;
+    if (observedRef.current) return;
 
     const scrollContainer =
       el.closest(".overflow-y-auto") || el.closest(".overflow-auto") || null;
 
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry?.isIntersecting && !slotGrantedRef.current) {
-          slotGrantedRef.current = true;
-          slotHeldRef.current = true;
-          const url = makeThumbnailUrl(item);
-          thumbQueue.request(() => {
-            setImgSrc(url);
+        if (entry?.isIntersecting && !observedRef.current) {
+          observedRef.current = true;
+          // Negative-cached failures render the retry affordance
+          // without spending a gated slot or USB round trip.
+          if (isThumbBlocked(item.abs_path)) {
+            setLoadState("error");
+          } else {
+            slotHeldRef.current = true;
             setLoadState("loading");
-          });
+            cancelQueuedRef.current = thumbQueue.request(() => {
+              cancelQueuedRef.current = null;
+              if (!mountedRef.current) {
+                releaseSlot();
+                return;
+              }
+              startFetch();
+            });
+          }
           observer.unobserve(el);
         }
       },
-      { root: scrollContainer, rootMargin: "400px" },
+      { root: scrollContainer, rootMargin: THUMB_ROOT_MARGIN },
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [item.abs_path, makeThumbnailUrl, thumbQueue]);
+  }, [item.abs_path, item, thumbQueue, startFetch, releaseSlot]);
 
   useEffect(() => {
     return () => {
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-      if (slotHeldRef.current) {
-        slotHeldRef.current = false;
-        thumbQueue.release();
-      }
+      cleanupPending();
+      revokeBlob();
+      releaseSlot();
     };
-  }, [thumbQueue]);
+  }, [thumbQueue, cleanupPending, revokeBlob, releaseSlot]);
 
   const handleLoad = () => {
-    if (slotHeldRef.current) {
-      slotHeldRef.current = false;
-      thumbQueue.release();
-    }
+    releaseSlot();
     setLoadState("loaded");
   };
 
   const handleError = () => {
-    if (retryCountRef.current < 3) {
-      const delays = [1000, 2000, 4000];
-      const delay = delays[retryCountRef.current];
+    // Blob-URL decode failure (rare) follows the same bounded retry path.
+    releaseSlot();
+    if (retryCountRef.current < THUMB_MAX_AUTO_RETRIES) {
+      const delay = THUMB_RETRY_DELAYS[retryCountRef.current] ?? 4000;
       retryTimerRef.current = setTimeout(() => {
+        if (!mountedRef.current) return;
         retryCountRef.current += 1;
-        const base = makeThumbnailUrl(item);
-        const separator = base.includes("?") ? "&" : "?";
-        setImgSrc(`${base}${separator}retry=${retryCountRef.current}`);
+        setRetryCount(retryCountRef.current);
+        if (isThumbBlocked(item.abs_path)) {
+          setLoadState("error");
+          return;
+        }
+        slotHeldRef.current = true;
         setLoadState("loading");
+        cancelQueuedRef.current = thumbQueue.request(() => {
+          cancelQueuedRef.current = null;
+          if (!mountedRef.current) {
+            releaseSlot();
+            return;
+          }
+          startFetch();
+        });
       }, delay);
     } else {
-      if (slotHeldRef.current) {
-        slotHeldRef.current = false;
-        thumbQueue.release();
-      }
+      markThumbFailed(item.abs_path);
       setLoadState("error");
     }
+  };
+
+  const handleManualRetry = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    clearThumbFailed(item.abs_path);
+    cleanupPending();
+    revokeBlob();
+    releaseSlot();
+    retryCountRef.current = 0;
+    setRetryCount(0);
+    setImgSrc(null);
+    slotHeldRef.current = true;
+    setLoadState("loading");
+    cancelQueuedRef.current = thumbQueue.request(() => {
+      cancelQueuedRef.current = null;
+      if (!mountedRef.current) {
+        releaseSlot();
+        return;
+      }
+      startFetch();
+    });
   };
 
   return (
@@ -250,8 +460,16 @@ function MediaThumbCell({
       )}
 
       {loadState === "error" && (
-        <div className="absolute inset-0 flex items-center justify-center bg-muted">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-muted">
           <ImageOff className="w-5 h-5 text-muted-foreground/40" />
+          <button
+            type="button"
+            onClick={handleManualRetry}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-background/80 text-[10px] text-muted-foreground hover:text-foreground border border-border transition-colors"
+          >
+            <RefreshCw className="w-2.5 h-2.5" />
+            Retry
+          </button>
         </div>
       )}
 
@@ -616,7 +834,11 @@ function SourcePreviewPanelInner({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [sortBy, setSortBy] = useState("newest");
+  // Device (USB/iOS) sources default to 25/page to bound DOM + thumbnail
+  // pressure; local folders keep 100/page. User override via PillSelect
+  // sticks (pageSizeTouched) across source switches.
   const [pageSize, setPageSize] = useState(100);
+  const [pageSizeTouched, setPageSizeTouched] = useState(false);
   // Sizes seen on any page — keeps the bottom-bar byte total correct when
   // the selection spans pages (items only holds the current page).
   const [knownSizes, setKnownSizes] = useState<Map<string, number>>(new Map());
@@ -633,7 +855,22 @@ function SourcePreviewPanelInner({
 
   const abortRef = useRef<AbortController | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  const thumbQueueRef = useRef<ThumbQueue>(createThumbQueue(8));
+  // Device thumbnails decode over USB — cap at 4 concurrent gated fetches.
+  // Local disk is cheap — allow 8.
+  const isDeviceSource = Boolean(deviceSource);
+  const thumbQueueRef = useRef<ThumbQueue>(
+    createThumbQueue(isDeviceSource ? 4 : 8),
+  );
+  useEffect(() => {
+    thumbQueueRef.current.setMaxConcurrent(isDeviceSource ? 4 : 8);
+  }, [isDeviceSource]);
+
+  // Adopt the per-source default page size until the user overrides it.
+  useEffect(() => {
+    if (!pageSizeTouched) {
+      setPageSize(isDeviceSource ? 25 : 100);
+    }
+  }, [isDeviceSource, pageSizeTouched]);
 
   const isDefaultRecursive = Boolean(
     deviceSource &&
@@ -701,6 +938,13 @@ function SourcePreviewPanelInner({
       item.mtime ?? null,
     );
   }
+  // Stable reference so thumb cells don't re-observe / re-fetch on every
+  // parent render.
+  const makeThumbnailUrl = useCallback(
+    (item: MediaPreviewItem) => getThumbnailUrl(item),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deviceSource?.device_id],
+  );
 
   useEffect(() => {
     return () => {
@@ -801,6 +1045,8 @@ function SourcePreviewPanelInner({
     retryNonce,
   ]);
 
+  // Debounced + abortable so the prescan never stampedes the gated
+  // thumbnail fetches on page turns — it fires 1s after the grid settles.
   useEffect(() => {
     if (items.length === 0) {
       setLikelyDupPaths(new Set());
@@ -811,19 +1057,29 @@ function SourcePreviewPanelInner({
       filename: item.filename,
       size_bytes: item.size_bytes,
     }));
-    fetch(`${API_BASE_URL}/api/duplicates/prescan`, {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ candidates }),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error("Prescan failed");
-        return res.json();
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(`${API_BASE_URL}/api/duplicates/prescan`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ candidates }),
+        signal: controller.signal,
       })
-      .then((data) => {
-        setLikelyDupPaths(new Set(data.likely_duplicate_paths || []));
-      })
-      .catch(() => {});
+        .then((res) => {
+          if (!res.ok) throw new Error("Prescan failed");
+          return res.json();
+        })
+        .then((data) => {
+          setLikelyDupPaths(new Set(data.likely_duplicate_paths || []));
+        })
+        .catch((err) => {
+          if (err instanceof Error && err.name === "AbortError") return;
+        });
+    }, 1000);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [items]);
 
   const toggleItem = useCallback(
@@ -920,7 +1176,9 @@ function SourcePreviewPanelInner({
         videos: data.videos || 0,
         total_size_bytes: data.total_size_bytes || 0,
       });
-      setTotalPages(Math.max(1, Math.ceil((data.total || loadedItems.length) / pageSize)));
+      setTotalPages(
+        Math.max(1, Math.ceil((data.total || loadedItems.length) / pageSize)),
+      );
       setPage(1);
 
       // Select all items by default
@@ -948,7 +1206,14 @@ function SourcePreviewPanelInner({
       isImportingAllRef.current = false;
       setLoading(false);
     }
-  }, [deviceSource, sourcePath, sortBy, pageSize, onSelectionConfirm, onTransferStart]);
+  }, [
+    deviceSource,
+    sourcePath,
+    sortBy,
+    pageSize,
+    onSelectionConfirm,
+    onTransferStart,
+  ]);
 
   const handleConfirmImportAll = useCallback(() => {
     if (!importAllData) return;
@@ -1041,7 +1306,17 @@ function SourcePreviewPanelInner({
     (n: number) => {
       const clamped = Math.max(1, Math.min(totalPages, n));
       if (clamped === page) return;
+      // Drop queued (not-yet-granted) thumb fetches; granted fetches abort
+      // via cell unmount (AbortController + blob revoke). Also abort any
+      // in-flight preview page fetch so offscreen work stops immediately.
       thumbQueueRef.current.reset();
+      if (abortRef.current) {
+        try {
+          abortRef.current.abort();
+        } catch {
+          /* ignore */
+        }
+      }
       setFocusedIndex(null);
       setPage(clamped);
       gridRef.current?.scrollIntoView({ block: "nearest" });
@@ -1083,7 +1358,9 @@ function SourcePreviewPanelInner({
                 onClick={handleSelectAll}
                 className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors"
               >
-                {allVisibleSelected ? "Deselect page" : `Select page (${visibleItems.length})`}
+                {allVisibleSelected
+                  ? "Deselect page"
+                  : `Select page (${visibleItems.length})`}
               </button>
               {selectedCount > 0 && (
                 <button
@@ -1158,6 +1435,8 @@ function SourcePreviewPanelInner({
                 value={String(pageSize)}
                 onChange={(val) => {
                   setPageSize(Number(val) || 100);
+                  setPageSizeTouched(true);
+                  thumbQueueRef.current.reset();
                   setPage(1);
                 }}
                 options={[
@@ -1309,7 +1588,7 @@ function SourcePreviewPanelInner({
                     isLikelyDuplicate={likelyDupPaths.has(item.abs_path)}
                     isFocused={index === focusedIndex}
                     cellIndex={index}
-                    makeThumbnailUrl={getThumbnailUrl}
+                    makeThumbnailUrl={makeThumbnailUrl}
                     thumbQueue={thumbQueueRef.current}
                   />
                 ))}
@@ -1369,7 +1648,9 @@ function SourcePreviewPanelInner({
         <div className="flex items-center justify-between pt-1">
           <div>
             <p className="text-xs font-normal text-foreground">
-              {selectedCount > 0 ? `${selectedCount} selected` : `0 of ${items.length} selected`}
+              {selectedCount > 0
+                ? `${selectedCount} selected`
+                : `0 of ${items.length} selected`}
             </p>
             <p className="text-xs text-muted-foreground">
               {selectedCount > 0

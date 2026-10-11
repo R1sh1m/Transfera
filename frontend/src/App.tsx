@@ -4,7 +4,11 @@
 // ---------------------------------------------------------------------------
 
 import { Suspense, lazy, useEffect, useState } from "react";
-import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClientProvider,
+  focusManager,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { queryClient } from "@/lib/query-client";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -371,6 +375,37 @@ function PageRouter() {
 }
 
 // ---------------------------------------------------------------------------
+// Background polling throttle (Alt+Tab / system-saturation guard)
+// TanStack pauses interval refetching while focusManager reports unfocused
+// (refetchIntervalInBackground defaults to false), but a Tauri window that
+// is Alt+Tabbed away or minimized-to-tray does not always flip
+// document.visibilityState on its own. Mirror visibility + window blur/focus
+// into focusManager so the 10s health / 5s sessions / 3s session polls back
+// off when the app is in the background. No visual change.
+// NOTE: BackendRecoveryWatcher below is already a no-op while healthy — its
+// guarded reads skip invalidation and state writes when health is "ok".
+// ---------------------------------------------------------------------------
+function useBackgroundPollingThrottle() {
+  useEffect(() => {
+    const sync = () => {
+      const visible = document.visibilityState !== "hidden";
+      const focused =
+        typeof document.hasFocus === "function" ? document.hasFocus() : true;
+      focusManager.setFocused(visible && focused);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("blur", sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("blur", sync);
+      window.removeEventListener("focus", sync);
+    };
+  }, []);
+}
+
+// ---------------------------------------------------------------------------
 // Backend Down Screen
 // The Tauri shell ships the frozen sidecar — there is no first-run Python
 // install. backend:down therefore always means "engine failed", answered
@@ -429,6 +464,9 @@ function BackendDownScreen() {
     if (!isStarting && !serverDown) return;
     let cancelled = false;
     const interval = setInterval(async () => {
+      // Skip probes while the window is backgrounded — the 300ms rapid poll
+      // must not saturate CPU/disk when the user is in another app.
+      if (document.hidden) return;
       try {
         const res = await fetch(`${API_BASE_URL}/api/health`);
         if (res.ok && !cancelled) {
@@ -601,6 +639,9 @@ function BackendRecoveryWatcher() {
 // App
 // ---------------------------------------------------------------------------
 export default function App() {
+  // Throttle TanStack interval polling while the window is unfocused so
+  // background health/session polls don't saturate the system (Alt+Tab guard).
+  useBackgroundPollingThrottle();
   // Listen for backend:down from the Tauri shell — flip into the
   // Engine Unavailable screen (BackendRecoveryWatcher clears it on return).
   useEffect(() => {
