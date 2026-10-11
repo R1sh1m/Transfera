@@ -226,8 +226,13 @@ jobs:
       - name: Generate Updater Manifest (latest.json)
         # The v2 updater installs the full NSIS installer directly (no zip
         # wrapping): latest.json points url at the setup.exe and carries the
-        # decoded minisign signature. Fails loudly when the .sig is missing
-        # so we never publish a release the in-app updater cannot use.
+        # .sig content VERBATIM (single-line base64 blob starting
+        # "dW50cnVzdGVk..."). Never base64-decode it: the plugin decodes the
+        # field itself, and embedding decoded minisign text ("untrusted
+        # comment: ...") fails verification with "Invalid symbol 32"
+        # (32 = ASCII space at offset 9 in "untrusted comment:").
+        # Fails loudly when the .sig is missing or malformed so we never
+        # publish a release the in-app updater cannot use.
         shell: pwsh
         run: |
           $releaseDir = "frontend/release"
@@ -237,19 +242,14 @@ jobs:
           if (-not $exe) { Write-Error "No setup exe found for updater manifest"; exit 1 }
           $sigPath = "$($exe.FullName).sig"
           if (-not (Test-Path $sigPath)) { Write-Error "Missing updater signature $($exe.Name).sig"; exit 1 }
-          $sigRaw = (Get-Content $sigPath -Raw).Trim()
-          if ($sigRaw.Contains("untrusted comment:")) {
-            $sigText = $sigRaw
-          } else {
-            $sigText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($sigRaw)).Trim()
-          }
-          if (-not $sigText.Contains("untrusted comment:")) { Write-Error "Updater signature has unexpected format"; exit 1 }
+          $sigText = (Get-Content $sigPath -Raw).Trim()
+          if ($sigText -notmatch '^[A-Za-z0-9+/=]+$') { Write-Error "Updater signature is not a single-line base64 blob (do not decode the .sig file)"; exit 1 }
           $url = "https://github.com/R1sh1m/Transfera/releases/download/$tag/$($exe.Name)"
           $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           $platform = [ordered]@{ signature = $sigText; url = $url }
           $manifest = [ordered]@{
             version = $version
-            notes = "Transfera $version — see the GitHub release for details."
+            notes = "Transfera $version - see the GitHub release for details."
             pub_date = $pubDate
             platforms = [ordered]@{
               "windows-x86_64" = $platform
