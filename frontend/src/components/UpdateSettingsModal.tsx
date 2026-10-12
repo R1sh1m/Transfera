@@ -61,7 +61,7 @@ export default function UpdateSettingsModal() {
 
   if (!isSettingsOpen) return null;
 
-  const currentVersion = updateInfo?.currentVersion || "2.8.8";
+  const currentVersion = updateInfo?.currentVersion || "1.0.0";
 
   return (
     <AnimatePresence>

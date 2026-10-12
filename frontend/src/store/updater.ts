@@ -136,7 +136,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
 
-      let currentVersion = "2.8.8";
+      let currentVersion = "1.0.0";
       try {
         const { getVersion } = await import("@tauri-apps/api/app");
         currentVersion = await getVersion();
