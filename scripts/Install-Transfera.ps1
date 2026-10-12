@@ -1,4 +1,4 @@
-<#Requires -Version 5.1>
+﻿<#Requires -Version 5.1>
 <#
 .SYNOPSIS
   Transfera one-shot installer — builds the app from source on your PC.
