@@ -52,7 +52,7 @@ import {
 import apiClient from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
 import { cn } from "@/lib/utils";
-import { fetchThumbnail } from "@/lib/thumbnail-fetch";
+import { fetchThumbnail, clearThumbFailCache } from "@/lib/thumbnail-fetch";
 import { createThumbQueue } from "@/lib/thumb-queue";
 import type {
   MediaItemInfo,
@@ -205,6 +205,7 @@ const LibraryCard = memo(function LibraryCard({
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [noThumb, setNoThumb] = useState(false);
   const [visible, setVisible] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const cellRef = useRef<HTMLDivElement>(null);
   const extLower = item.extension?.toLowerCase();
   const isImage =
@@ -340,10 +341,28 @@ const LibraryCard = memo(function LibraryCard({
     };
   }, [thumbUrl]);
 
+  // Thumbnail status badge label
+  const getThumbStatusLabel = (status: string | undefined) => {
+    switch (status) {
+      case "ready":
+        return "Ready";
+      case "pending":
+        return "Pending";
+      case "generating":
+        return "Generating…";
+      case "failed":
+        return "Failed";
+      default:
+        return "Unknown";
+    }
+  };
+
   return (
     <div
       ref={cellRef}
       onClick={() => onSelect?.(item)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       className="vault-card vault-card-enter bg-card border border-border hover:border-primary/50 rounded-lg overflow-hidden group cursor-pointer transition-colors hover:shadow-xs"
     >
       {/* Preview Area */}
@@ -397,6 +416,12 @@ const LibraryCard = memo(function LibraryCard({
         {item.live_photo_group && (
           <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-primary/80 text-primary-foreground rounded text-[9px] font-normal">
             Live Photo
+          </div>
+        )}
+        {/* Thumbnail status badge on hover */}
+        {hovered && item.thumbnail_status && (
+          <div className="absolute bottom-2 left-2 right-2 px-2 py-1 bg-black/70 backdrop-blur-sm text-white text-[10px] rounded text-center">
+            Thumbnail: {getThumbStatusLabel(item.thumbnail_status)}
           </div>
         )}
       </div>
@@ -938,6 +963,8 @@ export default function LibraryPage() {
 
   const handleRegenThumbnails = async () => {
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    // Clear negative cache so retries work immediately after regeneration
+    clearThumbFailCache();
     setRegenStatus("loading");
     try {
       const res = await apiClient.post("/media/regenerate-thumbnails");

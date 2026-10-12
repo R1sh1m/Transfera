@@ -33,6 +33,7 @@ import {
   useTimeline,
 } from "@/lib/queries";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
+import { useTransferStore } from "@/store/transfer";
 import type { Moment } from "@/types/api";
 
 function Thumb({
@@ -88,7 +89,9 @@ export function CapabilitiesBadge() {
     modelStatus?.status === "installing-packages";
   const downloading = busy;
   const clipReady = data?.semantic_mode === "clip";
+  const facesAvailable = data?.faces_available ?? false;
   const [justFinished, setJustFinished] = useState(false);
+  const [backfillProgress, setBackfillProgress] = useState<string | null>(null);
   useEffect(() => {
     if (clipReady) setJustFinished(false);
   }, [clipReady]);
@@ -104,7 +107,7 @@ export function CapabilitiesBadge() {
     totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0;
   if (!data) return null;
   return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+    <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
       <span
         className={cn(
           "px-2.5 py-0.5 rounded-pill border border-border text-xs",
@@ -119,7 +122,7 @@ export function CapabilitiesBadge() {
         }
       >
         {clipReady ? "CLIP on-device" : "Keyword search"} ·{" "}
-        {data.faces_available ? "Faces on" : "Faces off"}
+        {facesAvailable ? "Faces on" : "Faces off"}
       </span>
       {justFinished && !clipReady && (
         <span
@@ -174,13 +177,47 @@ export function CapabilitiesBadge() {
         </span>
       )}
       <button
-        onClick={() => backfill.mutate()}
+        onClick={() => {
+          backfill.mutate(undefined, {
+            onSuccess: (response) => {
+              // Show progress breakdown from response
+              const parts: string[] = [];
+              if (response.phash_filled !== undefined)
+                parts.push(`hashes: ${response.phash_filled}`);
+              if (response.dims_filled !== undefined)
+                parts.push(`dims: ${response.dims_filled}`);
+              if (response.tags_filled !== undefined)
+                parts.push(`tags: ${response.tags_filled}`);
+              if (response.faces_filled !== undefined)
+                parts.push(`faces: ${response.faces_filled}`);
+              if (parts.length > 0) {
+                setBackfillProgress(parts.join(", "));
+                // Clear after 5 seconds
+                setTimeout(() => setBackfillProgress(null), 5000);
+              }
+              // Show face clustering toast if faces were filled
+              if (response.faces_filled && response.faces_filled > 0) {
+                useTransferStore
+                  .getState()
+                  .showNotification(
+                    "success",
+                    `Face clustering complete — ${response.faces_filled} people found`,
+                  );
+              }
+            },
+          });
+        }}
         disabled={backfill.isPending}
         className="px-3 py-1 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40"
         title="Fill missing perceptual hashes, dimensions and tags (offline, idempotent)"
       >
         {backfill.isPending ? "Indexing…" : "Index library"}
       </button>
+      {backfillProgress && (
+        <span className="px-2 py-0.5 rounded-pill border border-border text-xs text-muted-foreground bg-muted/50">
+          {backfillProgress}
+        </span>
+      )}
       {!clipReady && !downloading && (
         <button
           onClick={() => downloadModels.mutate()}
@@ -190,6 +227,11 @@ export function CapabilitiesBadge() {
         >
           {downloadModels.isPending ? "Starting…" : "Download AI models"}
         </button>
+      )}
+      {!facesAvailable && !downloading && (
+        <span className="px-2 py-0.5 rounded-pill border border-border text-xs text-amber-600 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30">
+          Face models not installed — click Get AI models
+        </span>
       )}
     </div>
   );
@@ -414,8 +456,10 @@ export function PeoplePanel() {
   const backfill = useBackfill();
   const downloadModels = useDownloadModels();
   const { data: modelStatus } = useModelStatus(downloadModels.isPending);
+  const { data: capabilities } = useCapabilities();
   const [editing, setEditing] = useState<number | null>(null);
   const [name, setName] = useState("");
+  const facesAvailable = capabilities?.faces_available ?? false;
   if (isLoading)
     return <div className="text-sm text-muted-foreground">Loading people…</div>;
   if (!data || data.people.length === 0) {
@@ -439,6 +483,11 @@ export function PeoplePanel() {
               : `${modelStatus.missing.length} AI model(s) not installed — face grouping needs them.`}
           </p>
         )}
+        {!facesAvailable && !modelsBusy && modelStatus && (
+          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+            Face models not installed — click "Get AI models" to download.
+          </p>
+        )}
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <button
             onClick={() => backfill.mutate()}
@@ -455,7 +504,7 @@ export function PeoplePanel() {
               className="px-3 py-1.5 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
               title="Download on-board AI models (~218 MB, one time) to enable face grouping"
             >
-              {downloadModels.isPending ? "Starting…" : "Download AI models"}
+              {downloadModels.isPending ? "Starting…" : "Get AI models"}
             </button>
           )}
         </div>

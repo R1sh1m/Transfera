@@ -387,8 +387,81 @@ class TestUtcStorageContract:
         from datetime import UTC, datetime
 
         from sqlalchemy.dialects.sqlite import DATETIME
+        from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 
         aware = datetime(2026, 9, 28, 13, 35, 43, tzinfo=UTC)
-        stored = DATETIME(timezone=True).bind_processor(None)(aware)
+        proc = DATETIME(timezone=True).bind_processor(sqlite_dialect())
+        assert proc is not None
+        stored = proc(aware)
 
         assert stored == "2026-09-28 13:35:43.000000", stored
+
+
+class TestCutoffTimezoneSafety:
+    """Cutoff comparisons and resolved dates must never fail with naive/aware TypeError."""
+
+    async def test_cutoff_comparison_with_ts_to_datetime(self, db_session):
+        from datetime import UTC, datetime
+
+        from backend.database.manager import session_scope
+        from backend.database.models import SessionStatus, TransferSession
+        from backend.engines.date_resolver import resolve_item_date
+        from backend.engines.device_import_state import get_cutoff_datetime, upsert_device_state
+        from backend.engines.metadata_extractor import _ts_to_datetime
+
+        async with session_scope() as sess:
+            ts = TransferSession(
+                session_name="Test Session",
+                source_root="ios://test_dev_123/DCIM",
+                dest_root="/dest",
+                transfer_mode="copy",
+                status=SessionStatus.COMPLETED.value,
+            )
+            sess.add(ts)
+            await sess.flush()
+            sid = ts.id
+
+        # Store naive or aware cutoff
+        naive_dt = datetime(2026, 10, 12, 14, 0, 0)
+        await upsert_device_state(
+            device_id="test_dev_123",
+            device_name="iPhone",
+            cutoff=naive_dt,
+            session_id=sid,
+        )
+
+        cutoff = await get_cutoff_datetime("test_dev_123")
+        assert cutoff is not None
+        assert cutoff.tzinfo == UTC
+
+        # Comparing against _ts_to_datetime must succeed without TypeError
+        file_dt = _ts_to_datetime(1760000000.0)
+        assert file_dt.tzinfo == UTC
+        _ = file_dt <= cutoff  # Must not raise TypeError
+
+        # resolve_item_date must return timezone-aware UTC datetime
+        resolved, _ = resolve_item_date(date_taken=naive_dt, date_modified=None)
+        assert resolved is not None
+        assert resolved.tzinfo == UTC
+        _ = resolved <= cutoff  # Must not raise TypeError
+
+    def test_session_info_includes_error_message(self):
+        from datetime import UTC, datetime
+
+        from backend.api.schemas import SessionInfo
+
+        info = SessionInfo(
+            id=1,
+            session_name="Test",
+            source_root="ios://abc/DCIM",
+            dest_root="/dest",
+            transfer_mode="copy",
+            status="failed",
+            total_items=0,
+            completed_items=0,
+            failed_items=0,
+            error_message="can't compare offset-naive and offset-aware datetimes",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        assert info.error_message == "can't compare offset-naive and offset-aware datetimes"

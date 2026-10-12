@@ -23,12 +23,11 @@ from fastapi.staticfiles import StaticFiles
 from backend.api.device_preview import router as device_preview_router
 from backend.api.intelligence_routes import curation_router, trash_router
 from backend.api.intelligence_routes import router as intelligence_router
-from backend.api.routes import _run_transfer_background, router, ws_transfer
+from backend.api.routes import router, ws_transfer
 from backend.api.tier2_routes import router as tier2_router
-from backend.config import APP_VERSION, CACHE_DIR, HOST, LOG_DIR, LOG_FORMAT, PORT
+from backend.config import APP_VERSION, HOST, LOG_DIR, LOG_FORMAT, PORT
 from backend.config import LOG_LEVEL as _LOG_LEVEL
-from backend.database.manager import create_all_tables, dispose_engine, session_scope
-from backend.engines.recovery import recover_interrupted_batches
+from backend.database.manager import create_all_tables, dispose_engine
 
 # ---------------------------------------------------------------------------
 # Logging setup — ensure stdout uses UTF-8 so Unicode log characters
@@ -110,8 +109,118 @@ class SPAStaticFiles(StaticFiles):
 
 
 # ---------------------------------------------------------------------------
-# Background initializer for device manager — must not block server startup
+# Deferred startup work — everything here runs AFTER the app is already
+# serving HTTP traffic so /api/health returns 200 immediately. Only the
+# lightweight essentials (executor sizing, frontend-dir check, table
+# creation) stay on the synchronous lifespan path; the items below used
+# to block Uvicorn startup for ~7s ("Starting engine" spinner) on cold
+# boots with large caches or a slow WSL bridge.
 # ---------------------------------------------------------------------------
+async def _run_startup_background() -> None:
+    """Crash recovery, resume, Tier 2 state, ExifTool, AI seeding. Never raises."""
+    t0 = asyncio.get_event_loop().time() if hasattr(asyncio.get_event_loop(), "time") else 0.0
+    logger.info("Background startup tasks beginning (non-blocking)")
+
+    # Reset stale in-memory thumbnail sentinels — after a restart the LRU
+    # cache is empty, so "memory" entries from a prior process no longer
+    # have actual bytes available.  Setting them to NULL means the frontend
+    # will get a clean 404 instead of endlessly retrying.
+    try:
+        from typing import cast
+
+        from sqlalchemy import CursorResult, text
+
+        from backend.database.manager import session_scope as _session_scope
+
+        async with _session_scope() as session:
+            result = await session.execute(
+                text("UPDATE media_items SET thumbnail_path = NULL WHERE thumbnail_path = 'memory'")
+            )
+            cursor_result = cast(CursorResult, result)
+            if cursor_result.rowcount > 0:
+                logger.info("Reset %d stale 'memory' thumbnail entries after restart", cursor_result.rowcount)
+        logger.info("Stale thumbnail sentinels cleared")
+    except Exception as exc:
+        logger.warning("Stale thumbnail sentinel reset skipped: %s", exc)
+
+    # Run crash recovery (can scan a large cache dir — the old ~7s blocker)
+    try:
+        from backend.config import CACHE_DIR as _CACHE_DIR
+        from backend.engines.recovery import recover_interrupted_batches as _recover
+
+        stats = await _recover(cache_dir=_CACHE_DIR)
+        logger.info(
+            "Recovery complete: %d LOADING, %d ARCHIVED batches handled (%d orphaned partials removed)",
+            stats.get("loading_recovered", 0),
+            stats.get("archived_recovered", 0),
+            stats.get("orphaned_partials_removed", 0),
+        )
+
+        # Auto-resume sessions that had interrupted batches
+        resumable = stats.get("resumable_session_ids", [])
+        if resumable:
+            logger.info("Auto-resuming %d interrupted session(s): %s", len(resumable), resumable)
+            from backend.api.routes import _cancellation_events, _run_transfer_background
+
+            for sid in resumable:
+                # Register a fresh cancellation event BEFORE spawning so the UI can
+                # pause or cancel the resumed transfer immediately (GAP-4 fix).
+                if sid not in _cancellation_events:
+                    _cancellation_events[sid] = asyncio.Event()
+                asyncio.create_task(_run_transfer_background(sid))
+    except Exception as exc:
+        logger.warning("Crash recovery skipped: %s", exc)
+
+    # Check if Tier 2 setup needs to resume after restart
+    try:
+        from backend.wsl_orchestrator import Tier2PersistedState
+
+        tier2_state = Tier2PersistedState.load()
+        if tier2_state and tier2_state.pending_step:
+            logger.info(
+                "Tier 2 setup was interrupted (step: %s) — will resume automatically",
+                tier2_state.pending_step,
+            )
+    except Exception:
+        pass
+
+    # Pre-warm ExifTool so it's ready for the first transfer
+    try:
+        from backend.engines.metadata_extractor import _bootstrap_exiftool, _exiftool_session
+
+        exiftool_path = _bootstrap_exiftool()
+        if exiftool_path:
+            _exiftool_session._ensure_running()
+            logger.info("ExifTool stay_open session pre-warmed at startup")
+        else:
+            logger.warning("ExifTool not available — metadata extraction limited to filesystem timestamps")
+    except Exception as exc:
+        logger.warning("Failed to pre-warm ExifTool: %s", exc)
+
+    # Seed AI models from bundle if present (offline installer support),
+    # or kick off background download if on-device AI is enabled but face models are missing.
+    try:
+        from backend.engines.intelligence import (
+            _onnx_available,
+            ensure_seeded_from_bundle,
+            missing_face_models,
+            start_background_face_download,
+        )
+
+        ensure_seeded_from_bundle()
+        if _onnx_available() and missing_face_models():
+            start_background_face_download()
+            logger.info("Auto-started background face model download for missing models")
+    except Exception as exc:
+        logger.debug("AI model seeding check skipped: %s", exc)
+
+    try:
+        elapsed = asyncio.get_event_loop().time() - t0
+        logger.info("Background startup tasks finished in %.1fs", elapsed)
+    except Exception:
+        logger.info("Background startup tasks finished")
+
+
 async def _init_device_manager_background(manager) -> None:
     """Runs after the app is already serving HTTP traffic. Probes
     device tiers and may auto-start the WSL bridge, which can take
@@ -166,91 +275,16 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Serving frontend from %s", FRONTEND_DIST)
 
-    # Ensure tables exist
+    # Ensure tables exist (fast local SQLite DDL — stays on the startup
+    # path so /api/health never serves before the DB is ready)
     await create_all_tables()
     logger.info("Database tables ready")
 
-    # Reset stale in-memory thumbnail sentinels — after a restart the LRU
-    # cache is empty, so "memory" entries from a prior process no longer
-    # have actual bytes available.  Setting them to NULL means the frontend
-    # will get a clean 404 instead of endlessly retrying.
-    from typing import cast
-
-    from sqlalchemy import CursorResult, text
-
-    async with session_scope() as session:
-        result = await session.execute(
-            text("UPDATE media_items SET thumbnail_path = NULL WHERE thumbnail_path = 'memory'")
-        )
-        cursor_result = cast(CursorResult, result)
-        if cursor_result.rowcount > 0:
-            logger.info("Reset %d stale 'memory' thumbnail entries after restart", cursor_result.rowcount)
-    logger.info("Stale thumbnail sentinels cleared")
-
-    # Run crash recovery
-    stats = await recover_interrupted_batches(cache_dir=CACHE_DIR)
-    logger.info(
-        "Recovery complete: %d LOADING, %d ARCHIVED batches handled (%d orphaned partials removed)",
-        stats.get("loading_recovered", 0),
-        stats.get("archived_recovered", 0),
-        stats.get("orphaned_partials_removed", 0),
-    )
-
-    # Auto-resume sessions that had interrupted batches
-    resumable = stats.get("resumable_session_ids", [])
-    if resumable:
-        logger.info("Auto-resuming %d interrupted session(s): %s", len(resumable), resumable)
-        from backend.api.routes import _cancellation_events
-
-        for sid in resumable:
-            # Register a fresh cancellation event BEFORE spawning so the UI can
-            # pause or cancel the resumed transfer immediately (GAP-4 fix).
-            if sid not in _cancellation_events:
-                _cancellation_events[sid] = asyncio.Event()
-            asyncio.create_task(_run_transfer_background(sid))
-
-    # Check if Tier 2 setup needs to resume after restart
-    try:
-        from backend.wsl_orchestrator import Tier2PersistedState
-
-        tier2_state = Tier2PersistedState.load()
-        if tier2_state and tier2_state.pending_step:
-            logger.info(
-                "Tier 2 setup was interrupted (step: %s) — will resume automatically",
-                tier2_state.pending_step,
-            )
-    except Exception:
-        pass
-
-    # Pre-warm ExifTool so it's ready for the first transfer
-    try:
-        from backend.engines.metadata_extractor import _bootstrap_exiftool, _exiftool_session
-
-        exiftool_path = _bootstrap_exiftool()
-        if exiftool_path:
-            _exiftool_session._ensure_running()
-            logger.info("ExifTool stay_open session pre-warmed at startup")
-        else:
-            logger.warning("ExifTool not available — metadata extraction limited to filesystem timestamps")
-    except Exception as exc:
-        logger.warning("Failed to pre-warm ExifTool: %s", exc)
-
-    # Seed AI models from bundle if present (offline installer support),
-    # or kick off background download if on-device AI is enabled but face models are missing.
-    try:
-        from backend.engines.intelligence import (
-            _onnx_available,
-            ensure_seeded_from_bundle,
-            missing_face_models,
-            start_background_face_download,
-        )
-
-        ensure_seeded_from_bundle()
-        if _onnx_available() and missing_face_models():
-            start_background_face_download()
-            logger.info("Auto-started background face model download for missing models")
-    except Exception as exc:
-        logger.debug("AI model seeding check skipped: %s", exc)
+    # Everything heavy (recovery scan, resume, Tier 2 state, ExifTool,
+    # AI seeding) runs after yield so health checks pass immediately.
+    # The device manager probe (up to ~60s cold WSL) was already
+    # backgrounded; the rest follows it now.
+    app.state.startup_background_task = asyncio.create_task(_run_startup_background())
 
     # Fire up device manager in background — don't block server startup
     from backend.tier2_manager import get_device_manager
@@ -270,6 +304,12 @@ async def lifespan(app: FastAPI):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    startup_task = getattr(app.state, "startup_background_task", None)
+    if startup_task is not None and not startup_task.done():
+        startup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await startup_task
 
     async def _drain_transfer_tasks() -> None:
         try:
@@ -358,6 +398,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*", "X-Thumbnail-Status", "X-Local-Token"],
     )
 
     # Consistent error envelope (validation errors + unhandled 500s without leaks)

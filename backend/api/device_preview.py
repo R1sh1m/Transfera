@@ -25,7 +25,7 @@ from fastapi.responses import Response
 
 from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.device_backend import DeviceLockedError, DeviceNotTrustedError, DeviceStatus, WpdDeviceAccessDenied
-from backend.ios_device import read_device_file
+from backend.ios_device import drop_afc_slots, ensure_afc_warm, read_device_file
 from backend.tier2_manager import get_device_manager
 
 _PREVIEW_MAX_FILES = 5000
@@ -319,7 +319,7 @@ _VIDEO_PREFIX_BYTES = 4 * 1024 * 1024
 
 
 class _ListingCacheEntry:
-    __slots__ = ("items", "photos", "videos", "total_size", "snapshot", "cached_at")
+    __slots__ = ("items", "photos", "videos", "total_size", "snapshot", "cached_at", "scan_id")
 
     def __init__(
         self,
@@ -329,6 +329,7 @@ class _ListingCacheEntry:
         total_size: int,
         snapshot: tuple | None,
         cached_at: float,
+        scan_id: str | None = None,
     ) -> None:
         self.items = items
         self.photos = photos
@@ -336,6 +337,7 @@ class _ListingCacheEntry:
         self.total_size = total_size
         self.snapshot = snapshot
         self.cached_at = cached_at
+        self.scan_id = scan_id
 
 
 _listing_cache: OrderedDict[tuple, _ListingCacheEntry] = OrderedDict()
@@ -405,12 +407,43 @@ def _listing_store(
     total_size: int,
     snapshot: tuple[int, str] | None,
     now: float,
-) -> None:
+) -> str:
+    """Store a walk result; totals are frozen per scan ID from this point on.
+
+    Returns the stable scan ID for this walk (derived from device + root +
+    snapshot digest): every page/sort/filter sliced from this entry reports
+    identical totals under the same scan ID — totals never drift mid-scan.
+    """
+    try:
+        device_id = key[0] if len(key) > 0 else ""
+        path = key[1] if len(key) > 1 else ""
+        recursive = bool(key[2]) if len(key) > 2 else False
+        scan_id = _scan_id_for(device_id, path, recursive, snapshot)
+    except Exception:
+        scan_id = ""
     with _listing_cache_lock:
         while len(_listing_cache) >= _LISTING_MAX_KEYS and key not in _listing_cache:
             _listing_cache.popitem(last=False)
-        _listing_cache[key] = _ListingCacheEntry(items, photos, videos, total_size, snapshot, now)
+        _listing_cache[key] = _ListingCacheEntry(items, photos, videos, total_size, snapshot, now, scan_id)
         _listing_cache.move_to_end(key)
+    return scan_id
+
+
+def _scan_id_for(device_id: str, path: str, recursive: bool, snapshot: tuple[int, str] | None) -> str:
+    """Stable per-scan identity: device + root + snapshot digest.
+
+    A rescan that observes any add/remove/rename/size/mtime change yields
+    a new snapshot digest and therefore a new scan ID; pagination, sort
+    and filter variations of the same walk share one ID with frozen
+    totals (files count + total bytes).
+    """
+    try:
+        count = snapshot[0] if snapshot else 0
+        digest = snapshot[1] if snapshot else ""
+        raw = f"{device_id}\x00{path}\x00{int(bool(recursive))}\x00{count}\x00{digest}"
+        return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12]
+    except Exception:
+        return ""
 
 
 def _listing_drop(key: tuple) -> None:
@@ -466,6 +499,39 @@ def purge_listing_cache_for_serial(serial: str) -> int:
     if purged:
         logger.info("ios-preview listing cache purged %d key(s) for serial %s", purged, serial)
     return purged
+
+
+def find_listing_by_scan_id(scan_id: str) -> dict | None:
+    """Look up a cached preview walk by its scan ID (snapshot-based reuse).
+
+    Session creation passes the ``scan_id`` the frontend received from
+    ``GET /api/device/ios-preview`` so the transfer can reuse the frozen
+    enumeration (files + total bytes) instead of re-walking AFC. Returns
+    ``{"device_id", "path", "recursive", "total", "photos", "videos",
+    "total_size_bytes", "age_s"}`` or None when the entry aged out /
+    was never cached (caller falls back to normal behavior).
+    """
+    if not scan_id:
+        return None
+    with _listing_cache_lock:
+        for key, ent in list(_listing_cache.items()):
+            if getattr(ent, "scan_id", None) != scan_id:
+                continue
+            try:
+                age_s = time.monotonic() - ent.cached_at
+            except Exception:
+                age_s = -1.0
+            return {
+                "device_id": key[0] if len(key) > 0 else "",
+                "path": key[1] if len(key) > 1 else "",
+                "recursive": bool(key[2]) if len(key) > 2 else False,
+                "total": len(ent.items),
+                "photos": ent.photos,
+                "videos": ent.videos,
+                "total_size_bytes": ent.total_size,
+                "age_s": age_s,
+            }
+    return None
 
 
 def _sort_ios_preview_items(items: list, sort_by: str) -> list:
@@ -558,8 +624,30 @@ def _listing_find_reusable(
     return None
 
 
+def _purge_device_preview_state(device_id: str) -> None:
+    """Drop cached listing + pooled AFC slots after a lock/trust failure.
+
+    A preview-time lock means the device state flipped under us: the next
+    device-list poll must re-probe trust fresh instead of serving a stale
+    Ready row or a stale page from the listing cache. Best-effort only.
+    """
+    try:
+        purge_listing_cache_for_serial(device_id)
+    except Exception:
+        pass
+    try:
+        drop_afc_slots(device_id)
+    except Exception:
+        pass
+
+
 async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive: bool) -> list:
-    """Full device fetch (recursive walk or single browse) with HTTP error mapping."""
+    """Full device fetch (recursive walk or single browse) with HTTP error mapping.
+
+    Only successful walks are ever cached by callers — lock/trust failures
+    purge the listing cache and drop pooled AFC slots (transient treatment)
+    before raising, so no Ready state survives a preview-time lock.
+    """
     try:
         if recursive:
             from backend.engines.scanner import _walk_ios_directory
@@ -567,11 +655,13 @@ async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive:
             return await _walk_ios_directory(device_id, path)
         return await manager.browse_device(device_id, path)
     except DeviceLockedError as exc:
+        _purge_device_preview_state(device_id)
         raise HTTPException(
             status_code=423,
             detail={"status": "locked", "message": exc.message},
         )
     except DeviceNotTrustedError as exc:
+        _purge_device_preview_state(device_id)
         raise HTTPException(
             status_code=403,
             detail={"status": "not_trusted", "message": exc.message},
@@ -596,6 +686,7 @@ async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive:
         error_text = str(exc)
         exc_lower = error_text.lower()
         if "locked" in exc_lower or "lock" in exc_lower:
+            _purge_device_preview_state(device_id)
             raise HTTPException(
                 status_code=423,
                 detail={
@@ -605,6 +696,7 @@ async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive:
                 },
             )
         if "trust" in exc_lower or "pair" in exc_lower or "paired" in exc_lower:
+            _purge_device_preview_state(device_id)
             raise HTTPException(
                 status_code=403,
                 detail={
@@ -1250,8 +1342,11 @@ async def ios_preview_directory(
             },
         )
 
-    # Early-exit for terminal device states that no backend can work around
+    # Early-exit for terminal device states that no backend can work around.
+    # A preview-time lock also purges cached pages/slots so the next poll
+    # re-probes trust fresh (lock is transient, never cached as Ready).
     if device.status == DeviceStatus.LOCKED:
+        _purge_device_preview_state(device_id)
         raise HTTPException(
             status_code=423,
             detail={
@@ -1261,6 +1356,7 @@ async def ios_preview_directory(
             },
         )
     if device.status == DeviceStatus.NOT_TRUSTED:
+        _purge_device_preview_state(device_id)
         raise HTTPException(
             status_code=403,
             detail={
@@ -1276,11 +1372,24 @@ async def ios_preview_directory(
     except Exception:
         pass
 
+    # AFC keep-alive: reuse a warm pooled slot when one was used within
+    # ~20s, else one cheap bounded NOOP (never holds the lock beyond one
+    # op). Best-effort with a short cap — a slow device must not stall
+    # the listing; the normal path below proceeds regardless.
+    warm_ms = 0.0
+    try:
+        _wm0 = time.perf_counter()
+        await asyncio.wait_for(ensure_afc_warm(device_id), timeout=5.0)
+        warm_ms = (time.perf_counter() - _wm0) * 1000.0
+    except Exception as exc:
+        logger.debug("ios-preview AFC warmup skipped for %s: %s", device_id, exc)
+
     items: list[dict] | None = None
     total_photos = 0
     total_videos = 0
     total_size = 0
     cache_status = "miss"
+    scan_id: str | None = None
     walk_ms = 0.0
     snap_ms = 0.0
 
@@ -1291,7 +1400,8 @@ async def ios_preview_directory(
         # every page turn. A background refresh keeps it warm.
         # Only aged/missing entries pay for a synchronous snapshot check,
         # and a snapshot match under ANY sort_by re-sorts the cached walk
-        # instead of re-walking the device.
+        # instead of re-walking the device. Pagination/sort/filter always
+        # slice the cached list; totals stay frozen per scan ID.
         cached = _listing_cache_get(cache_key)
         now = time.monotonic()
         if cached is not None and (now - cached.cached_at) <= _LISTING_TTL_S:
@@ -1301,6 +1411,7 @@ async def ios_preview_directory(
                 cached.videos,
                 cached.total_size,
             )
+            scan_id = cached.scan_id
             cache_status = "hit"
             _listing_touch(cache_key, now)
             _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
@@ -1318,7 +1429,9 @@ async def ios_preview_directory(
                     reuse_ent.total_size,
                 )
                 cache_status = "hit" if reuse_key == cache_key else "hit-sort-reuse"
-                _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+                scan_id = _listing_store(
+                    cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic()
+                )
             elif cached is not None and snap is None:
                 # Snapshot browse itself failed (transient USB): serve the
                 # aged page now and refresh in the background rather than
@@ -1329,6 +1442,7 @@ async def ios_preview_directory(
                     cached.videos,
                     cached.total_size,
                 )
+                scan_id = cached.scan_id
                 cache_status = "hit-unvalidated"
                 _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
         if items is None:
@@ -1341,54 +1455,80 @@ async def ios_preview_directory(
             _s0 = time.perf_counter()
             snap = await _listing_quick_snapshot(manager, device_id, path)
             snap_ms += (time.perf_counter() - _s0) * 1000.0
-            _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+            scan_id = _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
     else:
-        # Flat listing is already a single browse; snapshot-validate it
-        # against the cache so repeat sorts/pages skip the rebuild.
-        _w0 = time.perf_counter()
-        entries = await _fetch_ios_entries(manager, device_id, path, False)
-        walk_ms = (time.perf_counter() - _w0) * 1000.0
-        snap = _listing_snapshot_of(entries)
+        # Flat fast path: a fresh cache entry (age <= TTL) serves the page
+        # with zero AFC round trips — pagination/sort/filter slice the
+        # cached list and totals stay frozen per scan ID. Only aged/missing
+        # entries pay for the single browse, which doubles as the snapshot
+        # for validation and cross-sort reuse.
         cached = _listing_cache_get(cache_key)
-        if cached is not None and cached.snapshot == snap:
+        now = time.monotonic()
+        if cached is not None and (now - cached.cached_at) <= _LISTING_TTL_S:
             items, total_photos, total_videos, total_size = (
                 cached.items,
                 cached.photos,
                 cached.videos,
                 cached.total_size,
             )
+            scan_id = cached.scan_id
             cache_status = "hit"
-            _listing_touch(cache_key, time.monotonic())
+            _listing_touch(cache_key, now)
         else:
-            # Same-walk, different-sort entry: re-sort instead of rebuilding.
-            reused = _listing_find_reusable(device_id, path, False, snap)
-            if reused is not None:
-                _reuse_key, reuse_ent = reused
-                items = _sort_ios_preview_items(list(reuse_ent.items), sort_by)
-                total_photos, total_videos, total_size = (
-                    reuse_ent.photos,
-                    reuse_ent.videos,
-                    reuse_ent.total_size,
+            _w0 = time.perf_counter()
+            entries = await _fetch_ios_entries(manager, device_id, path, False)
+            walk_ms = (time.perf_counter() - _w0) * 1000.0
+            snap = _listing_snapshot_of(entries)
+            if cached is not None and cached.snapshot == snap:
+                items, total_photos, total_videos, total_size = (
+                    cached.items,
+                    cached.photos,
+                    cached.videos,
+                    cached.total_size,
                 )
-                cache_status = "hit-sort-reuse"
-                _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+                scan_id = cached.scan_id
+                cache_status = "hit"
+                _listing_touch(cache_key, time.monotonic())
             else:
-                items, total_photos, total_videos, total_size = _build_ios_preview_items(
-                    entries, device_id=device_id, path=path, recursive=False, sort_by=sort_by
-                )
-                _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+                # Same-walk, different-sort entry: re-sort instead of rebuilding.
+                reused = _listing_find_reusable(device_id, path, False, snap)
+                if reused is not None:
+                    _reuse_key, reuse_ent = reused
+                    items = _sort_ios_preview_items(list(reuse_ent.items), sort_by)
+                    total_photos, total_videos, total_size = (
+                        reuse_ent.photos,
+                        reuse_ent.videos,
+                        reuse_ent.total_size,
+                    )
+                    cache_status = "hit-sort-reuse"
+                    scan_id = _listing_store(
+                        cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic()
+                    )
+                else:
+                    items, total_photos, total_videos, total_size = _build_ios_preview_items(
+                        entries, device_id=device_id, path=path, recursive=False, sort_by=sort_by
+                    )
+                    scan_id = _listing_store(
+                        cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic()
+                    )
 
     assert items is not None
+    if not scan_id:
+        # Defensive: every branch above stores or reuses, so this only
+        # fires if a future branch forgets — totals still frozen per key.
+        scan_id = _scan_id_for(device_id, path, recursive, None)
     total_ms = (time.perf_counter() - req_t0) * 1000.0
     logger.debug(
-        "ios-preview device=%s path=%s recursive=%s sort=%s page=%d cache=%s "
-        "walk_ms=%.1f snapshot_ms=%.1f total_ms=%.1f items=%d",
+        "ios-preview device=%s path=%s recursive=%s sort=%s page=%d cache=%s scan=%s "
+        "warm_ms=%.1f walk_ms=%.1f snapshot_ms=%.1f total_ms=%.1f items=%d",
         device_id,
         path,
         recursive,
         sort_by,
         page,
         cache_status,
+        scan_id,
+        warm_ms,
         walk_ms,
         snap_ms,
         total_ms,
@@ -1409,6 +1549,8 @@ async def ios_preview_directory(
         "page_size": page_size,
         "pages": pages,
         "items": page_items,
+        "scan_id": scan_id,
+        "cache_status": cache_status,
     }
 
 

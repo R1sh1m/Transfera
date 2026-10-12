@@ -149,8 +149,7 @@ async def model_download_status(_: None = Depends(require_local_token)) -> dict:
         face_st = intel_engine.face_download_status()
 
         is_downloading = (
-            clip_st.get("status") in ("downloading", "installing-packages")
-            or face_st.get("status") == "downloading"
+            clip_st.get("status") in ("downloading", "installing-packages") or face_st.get("status") == "downloading"
         )
         has_error = clip_st.get("status") == "error" or face_st.get("status") == "error"
         ready = bool(clip_st.get("ready")) and bool(face_st.get("ready"))
@@ -337,9 +336,7 @@ async def list_people(_: None = Depends(require_local_token)) -> PeopleListRespo
         people = list(result.scalars().all())
     return PeopleListResponse(
         people=[
-            PersonSchema(
-                id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden
-            )
+            PersonSchema(id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden)
             for p in people
         ],
         total=len(people),
@@ -359,9 +356,7 @@ async def rename_person(
         p.name = (req.name or "").strip() or None
         # Person has no touch(); bump manually
         p.updated_at = datetime.now(UTC)
-    return PersonSchema(
-        id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden
-    )
+    return PersonSchema(id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden)
 
 
 @router.post("/people/merge")
@@ -473,23 +468,90 @@ async def semantic_search(
     )
 
 
+async def _cluster_and_sync_people(session) -> int:
+    from backend.database.models import Face, Person
+    from backend.engines.intelligence import cluster_faces_greedy
+
+    res = await session.execute(select(Face).where(Face.embedding_json.isnot(None)))
+    faces = list(res.scalars().all())
+    if not faces:
+        logger.debug("Face clustering: no faces with embeddings found")
+        return 0
+
+    face_payload = []
+    face_map = {}
+    for f in faces:
+        try:
+            emb = json.loads(f.embedding_json or "[]")
+            if emb:
+                face_payload.append({"id": f.id, "embedding": emb})
+                face_map[f.id] = f
+        except Exception:
+            pass
+
+    if not face_payload:
+        logger.debug("Face clustering: no valid face embeddings after parsing")
+        return 0
+
+    # Lowered threshold from 0.55 to 0.50 for more inclusive clustering with ArcFace embeddings
+    clusters = cluster_faces_greedy(face_payload, threshold=0.50)
+    logger.info("Face clustering: formed %d clusters from %d faces (threshold=0.50)", len(clusters), len(face_payload))
+    for cl in clusters:
+        cl_faces = [face_map[fid] for fid in cl if fid in face_map]
+        if not cl_faces:
+            continue
+        existing_pids = {f.person_id for f in cl_faces if f.person_id is not None}
+        person = None
+        for pid in existing_pids:
+            person = await session.get(Person, pid)
+            if person is not None:
+                break
+        if person is None:
+            person = Person(
+                face_count=len(cl_faces),
+                cover_face_id=cl_faces[0].id,
+                hidden=False,
+            )
+            session.add(person)
+            await session.flush()
+
+        for f in cl_faces:
+            f.person_id = person.id
+
+        person.face_count = len(cl_faces)
+        if person.cover_face_id is None and cl_faces:
+            person.cover_face_id = cl_faces[0].id
+        person.updated_at = datetime.now(UTC)
+
+    return len(clusters)
+
+
 @router.post("/backfill", response_model=BackfillResponse)
 async def backfill_intelligence(
     limit: int = Query(2000, ge=1, le=10000),
     _: None = Depends(require_local_token),
 ) -> BackfillResponse:
-    """Fill missing phash / dimensions / tags for completed items.
+    """Fill missing phash / dimensions / tags / embeddings / faces for completed items.
 
     Bounded (``limit``) so it is safe to call repeatedly; idempotent —
-    only touches rows with NULL fields. Pure-Pillow, fully offline.
+    only touches rows with NULL fields. Pure-Pillow and on-board ONNX.
     """
     import asyncio
     import io
+    from pathlib import Path
+
+    from PIL import Image
 
     from backend.config import IMAGE_EXTENSIONS
-    from backend.database.models import MediaEmbedding
-    from backend.engines.intelligence import compute_blur_score, keyword_tags
+    from backend.database.models import Face, MediaEmbedding
+    from backend.engines.intelligence import (
+        compute_blur_score,
+        extract_faces,
+        get_capabilities,
+        keyword_tags,
+    )
     from backend.engines.perceptual_hash import dhash_bytes
+    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path
     from backend.engines.thumbnailer import generate_thumbnail_bytes
 
     try:
@@ -502,11 +564,46 @@ async def backfill_intelligence(
         clip_ready = False
         clip_model_name = ""
 
-    scanned = phash_filled = dims_filled = tags_filled = embeddings_filled = 0
+    caps = get_capabilities()
+    faces_ready = bool(caps.get("faces_available", False))
+
+    # If face models are not available, return early with a clear message
+    if not faces_ready:
+        logger.info(
+            "Backfill: face models not downloaded — skipping face extraction. Click 'Get AI models' in Library to download."
+        )
+        # Still run other backfill tasks (phash, dims, tags, clip) but skip faces
+        # We'll continue below with faces_ready=False
+
+    scanned = phash_filled = dims_filled = tags_filled = embeddings_filled = faces_filled = 0
     async with session_scope() as session:
         result = await session.execute(select(MediaItem).where(MediaItem.final_status == "completed").limit(limit))
         items = list(result.scalars().all())
         sessions: dict[int, TransferSession | None] = {}
+
+        async def _resolve_path(mi: MediaItem) -> Path | None:
+            if mi.session_id is not None and mi.session_id not in sessions:
+                sessions[mi.session_id] = await session.get(TransferSession, mi.session_id)
+            sess = sessions.get(mi.session_id) if mi.session_id is not None else None
+            if sess is not None and getattr(sess, "dest_root", None):
+                entry = {
+                    "source_path": mi.source_path,
+                    "file_name": mi.file_name,
+                    "date_taken": mi.date_taken,
+                    "original_capture_time": mi.original_capture_time,
+                    "created_at": mi.created_at,
+                    "file_size": mi.file_size,
+                    "folder_layout": getattr(sess, "folder_layout", "year/month"),
+                }
+                found = resolve_thumbnail_source_path(entry, Path(sess.dest_root))
+                if found is not None:
+                    return found
+            if mi.source_path:
+                sp = Path(mi.source_path)
+                if sp.is_file():
+                    return sp
+            return None
+
         for mi in items:
             scanned += 1
             touched = False
@@ -519,42 +616,20 @@ async def backfill_intelligence(
                     touched = True
                 except Exception:
                     pass
-            # Dimensions via Pillow on the archived file (source_path may be stale;
-            # thumbnail bytes are the reliable fallback for hashing)
+
             needs_visual = mi.phash is None or mi.width is None or mi.blur_score is None
+            p: Path | None = None
             thumb: bytes | None = None
-            if needs_visual:
+
+            if needs_visual or clip_ready or faces_ready:
                 try:
-                    from pathlib import Path
+                    p = await _resolve_path(mi)
+                except Exception:
+                    p = None
 
-                    from PIL import Image
-
-                    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path
-
-                    p: Path | None = None
-                    # Device imports (ios://…) never exist as local paths —
-                    # resolve through the vault (session dest_root + layout),
-                    # Hop 1 cache, then the original source, in that order.
-                    if mi.session_id is not None and mi.session_id not in sessions:
-                        sessions[mi.session_id] = await session.get(TransferSession, mi.session_id)
-                    sess = sessions.get(mi.session_id) if mi.session_id is not None else None
-                    if sess is not None and getattr(sess, "dest_root", None):
-                        from pathlib import Path as _Path
-
-                        entry = {
-                            "source_path": mi.source_path,
-                            "file_name": mi.file_name,
-                            "date_taken": mi.date_taken,
-                            "original_capture_time": mi.original_capture_time,
-                            "created_at": mi.created_at,
-                            "file_size": mi.file_size,
-                            "folder_layout": getattr(sess, "folder_layout", "year/month"),
-                        }
-                        p = resolve_thumbnail_source_path(entry, _Path(sess.dest_root))
-                    if p is None:
-                        _sp = Path(mi.source_path) if mi.source_path else None
-                        p = _sp if _sp and _sp.is_file() else None
-                    thumb = generate_thumbnail_bytes(p) if p else None
+            if needs_visual and p is not None:
+                try:
+                    thumb = generate_thumbnail_bytes(p)
                     if thumb:
                         if mi.phash is None:
                             h = dhash_bytes(thumb)
@@ -570,77 +645,83 @@ async def backfill_intelligence(
                                     touched = True
                             except Exception:
                                 pass
-                    if mi.blur_score is None and p is not None:
+                    if mi.blur_score is None:
                         s = compute_blur_score(p)
                         if s is not None:
                             mi.blur_score = s
                             touched = True
                 except Exception as exc:
-                    logger.debug("backfill skipped %s: %s", mi.id, exc)
-            # CLIP embedding (vector-DB row) — images only, on-board model.
-            # Reuses thumbnail bytes generated above when available, else
-            # generates them (CLIP on 512px thumbs is fast and sufficient).
-            # Skipped entirely when models are absent.
-            if clip_ready and thumb is None and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
-                # Item already has phash/dims/blur but no embedding yet:
-                # resolve the file the same vault-aware way as above.
-                try:
-                    from pathlib import Path as _Path
+                    logger.debug("backfill visual skipped %s: %s", mi.id, exc)
 
-                    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path as _resolve
-
-                    _p = None
-                    if mi.session_id is not None:
-                        _sess = sessions.get(mi.session_id)
-                        if _sess is not None and getattr(_sess, "dest_root", None):
-                            _p = _resolve(
-                                {
-                                    "source_path": mi.source_path,
-                                    "file_name": mi.file_name,
-                                    "date_taken": mi.date_taken,
-                                    "original_capture_time": mi.original_capture_time,
-                                    "created_at": mi.created_at,
-                                    "file_size": mi.file_size,
-                                    "folder_layout": getattr(_sess, "folder_layout", "year/month"),
-                                },
-                                _Path(_sess.dest_root),
-                            )
-                    if _p is None:
-                        _sp = _Path(mi.source_path) if mi.source_path else None
-                        _p = _sp if _sp and _sp.is_file() else None
-                    thumb = generate_thumbnail_bytes(_p) if _p else None
-                except Exception as exc:
-                    logger.debug("backfill clip thumb skipped %s: %s", mi.id, exc)
-                    thumb = None
-            if clip_ready and thumb and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
-                try:
-                    existing = await session.get(MediaEmbedding, mi.id)
-                    if existing is None or existing.model != clip_model_name:
-                        vec = await asyncio.to_thread(_clip_embed_thumb, thumb)
-                        if vec:
-                            if existing is None:
-                                session.add(
-                                    MediaEmbedding(
-                                        media_id=mi.id,
-                                        model=clip_model_name,
-                                        dim=len(vec),
-                                        vector_json=json.dumps(vec),
+            # CLIP embedding (vector-DB row)
+            if clip_ready and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
+                if thumb is None and p is not None:
+                    try:
+                        thumb = generate_thumbnail_bytes(p)
+                    except Exception:
+                        thumb = None
+                if thumb:
+                    try:
+                        existing = await session.get(MediaEmbedding, mi.id)
+                        if existing is None or existing.model != clip_model_name:
+                            vec = await asyncio.to_thread(_clip_embed_thumb, thumb)
+                            if vec:
+                                if existing is None:
+                                    session.add(
+                                        MediaEmbedding(
+                                            media_id=mi.id,
+                                            model=clip_model_name,
+                                            dim=len(vec),
+                                            vector_json=json.dumps(vec),
+                                        )
                                     )
+                                else:
+                                    existing.model = clip_model_name
+                                    existing.dim = len(vec)
+                                    existing.vector_json = json.dumps(vec)
+                                embeddings_filled += 1
+                                touched = True
+                    except Exception as exc:
+                        logger.debug("backfill clip skipped %s: %s", mi.id, exc)
+
+            # Face extraction (SCRFD + ArcFace)
+            if faces_ready and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
+                f_check = await session.execute(select(func.count(Face.id)).where(Face.media_id == mi.id))
+                if (f_check.scalar() or 0) == 0 and p is not None and p.is_file():
+                    try:
+                        detected = await asyncio.to_thread(extract_faces, p)
+                        for df in detected:
+                            session.add(
+                                Face(
+                                    media_id=mi.id,
+                                    bbox_json=json.dumps(df["bbox"]),
+                                    embedding_json=json.dumps(df["embedding"]),
+                                    confidence=df["confidence"],
                                 )
-                            else:
-                                existing.model = clip_model_name
-                                existing.dim = len(vec)
-                                existing.vector_json = json.dumps(vec)
-                            embeddings_filled += 1
+                            )
+                            faces_filled += 1
                             touched = True
-                except Exception as exc:
-                    logger.debug("backfill clip skipped %s: %s", mi.id, exc)
+                    except Exception as exc:
+                        logger.debug("backfill face skipped %s: %s", mi.id, exc)
+
             if touched:
                 mi.touch()
+
+        # Cluster all faces into persons
+        if faces_ready:
+            try:
+                await _cluster_and_sync_people(session)
+            except Exception as exc:
+                logger.warning("Face clustering sync failed: %s", exc)
+        else:
+            logger.debug("Backfill: skipping face clustering (face models not available)")
+
     msg = (
         f"backfilled {phash_filled} hashes, {dims_filled} dims, {tags_filled} tags, "
-        f"{embeddings_filled} clip embeddings across {scanned} items"
+        f"{embeddings_filled} clip embeddings, {faces_filled} faces across {scanned} items"
     )
+    if not faces_ready:
+        msg += " — Face models not downloaded; click 'Get AI models' in Library to enable face detection."
     logger.info(msg)
     return BackfillResponse(
         scanned=scanned,
@@ -648,6 +729,7 @@ async def backfill_intelligence(
         dims_filled=dims_filled,
         tags_filled=tags_filled,
         embeddings_filled=embeddings_filled,
+        faces_filled=faces_filled,
         message=msg,
     )
 

@@ -17,9 +17,15 @@ const STATUS_FRIENDLY_MESSAGES: Record<number, string> = {
   422: "The request was invalid. Please check your input and try again.",
 };
 
-function isTimeoutError(error: unknown): boolean {
+export function isTimeoutError(error: unknown): boolean {
   if (isAxiosError(error) && error.code === "ECONNABORTED") return true;
   if (error instanceof Error && /timeout/i.test(error.message)) return true;
+  return false;
+}
+
+export function isAbortError(error: unknown): boolean {
+  if (isAxiosError(error) && error.code === "ECONNABORTED") return true;
+  if (error instanceof Error && error.name === "AbortError") return true;
   return false;
 }
 

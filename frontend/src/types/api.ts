@@ -37,6 +37,13 @@ export interface HealthResponse {
   version: string;
   port: number;
   database: string;
+  /** Optional background-task progress surfaced by the engine while it
+   *  starts (e.g. metadata warm-up). Absent when idle — the splash treats
+   *  it as display-only and never blocks on it. */
+  background_task?: {
+    label: string;
+    progress_percent: number;
+  } | null;
 }
 
 // --- Config ---------------------------------------------------------------
@@ -108,6 +115,9 @@ export interface SessionCreate {
   selected_files?: string[] | null;
   folder_layout?: FolderLayout;
   batch_size?: number | null;
+  /** Preview scan id the totals were frozen from. The backend ignores it
+   *  when unsupported — safe to always send when known. */
+  scan_id?: string | null;
 }
 
 // --- Device Preview ----------------------------------------------------------
@@ -131,6 +141,9 @@ export interface DevicePreviewResponse {
   page_size: number;
   pages: number;
   items: DevicePreviewItem[];
+  /** Opaque scan id when the backend serves previews from a scan cache.
+   *  Passed back on session create so totals stay pinned to this scan. */
+  scan_id?: string | null;
 }
 
 export interface SessionInfo {
@@ -152,6 +165,7 @@ export interface SessionInfo {
   completed_at?: string;
   total_bytes_volume?: number;
   session_report_path?: string;
+  error_message?: string | null;
 }
 
 export interface SessionList {
@@ -328,6 +342,7 @@ export interface BackfillResponse {
   phash_filled: number;
   dims_filled: number;
   tags_filled: number;
+  faces_filled?: number;
   message: string;
 }
 

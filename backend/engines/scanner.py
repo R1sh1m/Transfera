@@ -107,6 +107,8 @@ def _sort_key(meta: FileMetadata) -> datetime:
         date_taken=meta.date_taken,
         date_modified=meta.date_modified,
     )
+    if date is not None and date.tzinfo is None:
+        date = date.replace(tzinfo=UTC)
     return date or EPOCH
 
 
@@ -288,9 +290,20 @@ async def _scan_ios_device(
             # Apply cutoff filter: skip files with mtime at or before the cutoff
             if cutoff_datetime is not None and fi.mtime > 0:
                 file_mtime_dt = _ts_to_datetime(fi.mtime)
-                if file_mtime_dt is not None and file_mtime_dt <= cutoff_datetime:
-                    skipped_by_cutoff += 1
-                    continue
+                if file_mtime_dt is not None:
+                    _c_dt = (
+                        cutoff_datetime
+                        if cutoff_datetime.tzinfo is not None
+                        else cutoff_datetime.replace(tzinfo=UTC)
+                    )
+                    _f_dt = (
+                        file_mtime_dt
+                        if file_mtime_dt.tzinfo is not None
+                        else file_mtime_dt.replace(tzinfo=UTC)
+                    )
+                    if _f_dt <= _c_dt:
+                        skipped_by_cutoff += 1
+                        continue
 
             # Build the ios:// source path
             source_path = f"{IOS_SOURCE_PREFIX}{serial}{fi.path}"

@@ -233,3 +233,24 @@ def test_trash_favorite_flow(test_client):
     r = test_client.post("/api/intelligence/search/semantic", json={"query": "beach", "limit": 10})
     assert r.status_code == 200
     assert r.json()["mode"] in ("keyword", "clip")
+
+
+def test_cluster_faces_greedy():
+    from backend.engines.intelligence import cluster_faces_greedy
+
+    # Synthesize 3 faces: face 1 and 2 similar, face 3 orthogonal
+    emb1 = [1.0, 0.0, 0.0] + [0.0] * 509
+    emb2 = [0.95, 0.1, 0.0] + [0.0] * 509  # Cosine sim ~ 0.99
+    emb3 = [0.0, 1.0, 0.0] + [0.0] * 509  # Cosine sim ~ 0.0
+
+    items = [
+        {"id": 101, "embedding": emb1},
+        {"id": 102, "embedding": emb2},
+        {"id": 103, "embedding": emb3},
+    ]
+
+    clusters = cluster_faces_greedy(items, threshold=0.6)
+    assert len(clusters) == 2
+    assert 101 in clusters[0] and 102 in clusters[0]
+    assert 103 in clusters[1]
+

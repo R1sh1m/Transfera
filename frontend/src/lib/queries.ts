@@ -4,8 +4,9 @@
 // ---------------------------------------------------------------------------
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import apiClient from "./api-client";
-import { extractErrorMessage } from "./utils";
+import { extractErrorMessage, isAbortError } from "./utils";
 import { clearThumbFailCache } from "./thumbnail-fetch";
 import { useTransferStore } from "@/store/transfer";
 import type {
@@ -91,6 +92,10 @@ export function useDevicePreview(path: string | null, enabled = true) {
     enabled: enabled && path !== null,
     staleTime: 30000,
     retry: 1,
+    // Client-side timeout so the skeleton can never spin forever.
+    // The preview panel also has its own 15s abort; this is a belt-and-suspenders
+    // guard for any other consumer of this hook.
+    meta: { timeout: 15000 },
   });
 }
 
@@ -174,9 +179,22 @@ export function useCreateSession() {
         .showNotification("success", "Backup session created");
     },
     onError: (error) => {
-      useTransferStore
-        .getState()
-        .showNotification("error", extractErrorMessage(error));
+      // Toast only on a real client-side abort/timeout (the 120 s ceiling
+      // above): the phone may still be working, so offer Keep waiting /
+      // Try again. Any other failure surfaces inline in the setup form
+      // (setStartError) — no toast, no double reporting.
+      if (isAbortError(error) || (isAxiosError(error) && !error.response)) {
+        useTransferStore
+          .getState()
+          .showNotification(
+            "error",
+            "Creating the backup is taking longer than expected. The phone may still be working.",
+            [
+              { id: "keep-waiting", label: "Keep waiting" },
+              { id: "try-again-session", label: "Try again", primary: true },
+            ],
+          );
+      }
     },
   });
 }

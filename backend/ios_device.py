@@ -724,6 +724,50 @@ async def pooled_afc_service(serial: str):
         _release_afc_slot(serial, slot)
 
 
+# ---------------------------------------------------------------------------
+# Lightweight AFC keep-alive / warmup (preview hot path)
+# ---------------------------------------------------------------------------
+# A pooled slot idle past _AFC_IDLE_TTL_SECONDS is evicted, so the first
+# preview request after an idle gap pays a full usbmux + lockdown +
+# pairing handshake again. ensure_afc_warm() keeps one slot warm with a
+# single cheap NOOP (get_device_info): when a slot was used within
+# _AFC_WARM_TTL_SECONDS it returns immediately with zero I/O, otherwise
+# it performs exactly one bounded op and releases the lock before
+# returning — the lock is never held longer than one op.
+_AFC_WARM_TTL_SECONDS = 20.0
+_AFC_WARM_TIMEOUT_SECONDS = 8.0
+
+
+def _afc_pool_has_fresh_slot(serial: str, now: float) -> bool:
+    """True when a pooled (non-ephemeral) slot was used within the warm TTL."""
+    with _AFC_POOL_GUARD:
+        slots = _AFC_POOL.get(serial, [])
+        return any(not s.ephemeral and now - s.last_used < _AFC_WARM_TTL_SECONDS for s in slots)
+
+
+async def ensure_afc_warm(serial: str) -> bool:
+    """Ensure a live pooled AFC session exists for *serial* (best-effort).
+
+    Returns True when the pool is warm (fresh slot reused or NOOP
+    succeeded), False when the device is unreachable — callers must
+    proceed with the normal path regardless. Never raises, never holds
+    the slot lock beyond the single NOOP op.
+    """
+    if _afc_pool_has_fresh_slot(serial, time.monotonic()):
+        return True
+    try:
+        async with pooled_afc_service(serial) as afc:
+            await asyncio.wait_for(
+                asyncio.to_thread(afc.get_device_info),
+                timeout=_AFC_WARM_TIMEOUT_SECONDS,
+            )
+        logger.debug("AFC slot warmed for device %s", serial)
+        return True
+    except Exception as exc:
+        logger.debug("AFC warmup NOOP failed for %s: %s", serial, exc)
+        return False
+
+
 async def browse_device_directory(serial: str, path: str = "/") -> list[DeviceFileInfo]:
     """
     List contents of a directory on the iOS device.

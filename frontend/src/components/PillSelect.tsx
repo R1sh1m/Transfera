@@ -15,6 +15,8 @@ import { cn } from "@/lib/utils";
 export interface PillSelectOption {
   value: string;
   label: string;
+  disabled?: boolean;
+  title?: string;
 }
 
 export interface PillSelectProps {
@@ -23,8 +25,12 @@ export interface PillSelectProps {
   options: PillSelectOption[];
   placeholder?: string;
   className?: string;
+  triggerClassName?: string;
+  menuClassName?: string;
   align?: "left" | "right";
   title?: string;
+  disabled?: boolean;
+  size?: "sm" | "md";
 }
 
 export function PillSelect({
@@ -33,8 +39,12 @@ export function PillSelect({
   options,
   placeholder = "Select...",
   className,
+  triggerClassName,
+  menuClassName,
   align = "left",
   title,
+  disabled = false,
+  size = "md",
 }: PillSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -83,22 +93,32 @@ export function PillSelect({
       {/* Pill-shaped Trigger */}
       <button
         type="button"
-        onClick={() => setIsOpen((prev) => !prev)}
+        disabled={disabled}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!disabled) setIsOpen((prev) => !prev);
+        }}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         className={cn(
-          "inline-flex items-center gap-2 pl-3.5 pr-2.5 py-1.5 rounded-pill text-xs font-normal border transition-all active:scale-[0.97]",
+          "inline-flex items-center gap-2 rounded-pill font-normal border transition-all active:scale-[0.97]",
+          size === "sm"
+            ? "px-2.5 py-1 text-[11px]"
+            : "pl-3.5 pr-2.5 py-1.5 text-xs",
           isOpen
             ? "border-action ring-2 ring-action/20 bg-muted/80 text-foreground"
             : isSelected
               ? "border-action/40 bg-action/5 hover:bg-action/10 text-foreground"
               : "border-border bg-muted/40 hover:bg-muted/70 text-foreground",
+          disabled && "opacity-50 cursor-not-allowed pointer-events-none active:scale-100",
+          triggerClassName,
         )}
       >
-        <span className="truncate max-w-[140px]">{displayLabel}</span>
+        <span className="truncate flex-1 text-left">{displayLabel}</span>
         <ChevronDown
           className={cn(
-            "w-3 h-3 text-muted-foreground transition-transform duration-200 shrink-0",
+            "text-muted-foreground transition-transform duration-200 shrink-0",
+            size === "sm" ? "w-2.5 h-2.5" : "w-3 h-3",
             isOpen && "rotate-180 text-action",
           )}
         />
@@ -113,11 +133,13 @@ export function PillSelect({
             exit={{ opacity: 0, y: -4, scale: 0.96 }}
             transition={{ duration: 0.15, ease: "easeOut" }}
             role="listbox"
+            onClick={(e) => e.stopPropagation()}
             className={cn(
-              "absolute top-full mt-1.5 z-50 min-w-[170px] max-w-[260px] p-1.5",
+              "absolute top-full mt-1.5 z-50 min-w-[170px] max-w-[320px] p-1.5",
               "bg-popover/95 dark:bg-[#1a1c23]/95 backdrop-blur-md",
               "border border-border/80 rounded-2xl shadow-xl",
               align === "right" ? "right-0" : "left-0",
+              menuClassName,
             )}
           >
             <div className="max-h-60 overflow-y-auto overscroll-contain space-y-0.5 pr-0.5 custom-scrollbar">
@@ -128,18 +150,31 @@ export function PillSelect({
                     key={opt.value}
                     type="button"
                     role="option"
+                    disabled={opt.disabled}
+                    title={opt.title}
                     aria-selected={isItemActive}
-                    onClick={() => handleSelect(opt.value)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!opt.disabled) handleSelect(opt.value);
+                    }}
                     className={cn(
-                      "w-full flex items-center justify-between gap-2 px-3 py-1.5 rounded-pill text-xs transition-colors text-left",
-                      isItemActive
-                        ? "bg-action text-white font-medium shadow-xs"
-                        : "text-foreground hover:bg-muted/80 active:bg-muted",
+                      "w-full flex items-center justify-between gap-2 rounded-pill transition-colors text-left",
+                      size === "sm" ? "px-2.5 py-1 text-[11px]" : "px-3 py-1.5 text-xs",
+                      opt.disabled
+                        ? "opacity-40 cursor-not-allowed text-muted-foreground"
+                        : isItemActive
+                          ? "bg-action text-white font-medium shadow-xs"
+                          : "text-foreground hover:bg-muted/80 active:bg-muted",
                     )}
                   >
                     <span className="truncate">{opt.label}</span>
                     {isItemActive && (
-                      <Check className="w-3.5 h-3.5 text-white shrink-0" />
+                      <Check
+                        className={cn(
+                          "text-white shrink-0",
+                          size === "sm" ? "w-3 h-3" : "w-3.5 h-3.5",
+                        )}
+                      />
                     )}
                   </button>
                 );

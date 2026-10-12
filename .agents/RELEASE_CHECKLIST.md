@@ -1,5 +1,10 @@
 # Transfera Release Checklist
 
+> Releases are on-demand only — per-fix testing uses the dev loop in `.agents/AGENTS.md`, not tags.
+> Run this checklist + version-bump all 4 manifests only after explicit user ship approval.
+> Dev loop: `python run.py --tauri --reload --no-build` (repeats add `--skip-deps`).
+> Installed v1.0.0 is kept only for final pre-release smoke (updater, NSIS hooks, frozen sidecar).
+
 Run through this matrix before publishing a GitHub release tag (`v*`).
 The `release.yml` workflow gates on `frontend/package.json` ↔ `pyproject.toml` ↔
 `frontend/src-tauri/tauri.conf.json` ↔ `frontend/src-tauri/Cargo.toml` all matching the tag.

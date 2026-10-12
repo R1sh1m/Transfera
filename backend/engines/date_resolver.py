@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import TypeGuard
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ _MIN_DATE = datetime(1995, 1, 1, tzinfo=UTC)
 _FUTURE_TOLERANCE = timedelta(days=1)
 
 
-def is_date_sane(dt: datetime | None) -> bool:
+def is_date_sane(dt: datetime | None) -> TypeGuard[datetime]:
     """Return True if the datetime is plausible for a 'date taken' value."""
     if dt is None:
         return False
@@ -49,11 +50,17 @@ def resolve_item_date(
     """
     # 1. Try EXIF date_taken
     if is_date_sane(date_taken):
-        return date_taken, "exif"
+        dt = date_taken
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt, "exif"
 
     # 2. Try filesystem mtime
     if is_date_sane(date_modified):
-        return date_modified, "file_modified"
+        dt = date_modified
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt, "file_modified"
 
     # 3. No sane date — unsorted
     if date_taken is not None and not is_date_sane(date_taken):

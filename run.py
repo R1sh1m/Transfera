@@ -6,9 +6,12 @@ Single-command startup for the full backend + frontend development environment.
 Enforces Python 3.12 for stable pre-compiled wheel availability (pillow-heif, blake3).
 
 Usage:
-    python run.py              # Start everything (backend serves compiled frontend)
+    python run.py              # Start everything (backend + Tauri dev shell)
     python run.py --backend    # Backend only (serves compiled frontend)
-    python run.py --frontend   # Vite dev server only (hot-reload)
+    python run.py --frontend   # Tauri dev shell only (adopts an already-running backend)
+    python run.py --tauri      # Start backend + Tauri dev shell (recommended full-feature local test)
+    python run.py --reload     # Auto-reload backend on Python changes (dev only, combines with others)
+    python run.py --no-build   # Skip frontend dist rebuild (Tauri dev uses Vite HMR)
     python run.py --skip-deps  # Skip dependency checks
 """
 
@@ -546,6 +549,198 @@ def _build_native() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# STEP 2.7: Stage Tauri dev resources (frontend/src-tauri/resources/)
+# ---------------------------------------------------------------------------
+_TAURI_DIR = FRONTEND_DIR / "src-tauri"
+_TAURI_RESOURCES_DIR = _TAURI_DIR / "resources"
+_EXIFTOOL_PKG_DIR = BACKEND_DIR / "bin" / "exiftool"
+_EXIFTOOL_DATA_DIR = BACKEND_DIR / "data" / "bin" / "exiftool"
+
+
+def _resolve_exiftool_src() -> tuple[Path, Path]:
+    """Return (exe_src, files_src) preferring release download dir, falling back to dev data dir.
+
+    Release builds download into backend/bin/exiftool/ (PACKAGED_EXIFTOOL_DIR);
+    dev runs keep the writable copy at backend/data/bin/exiftool/ (EXIFTOOL_DIR).
+    """
+    for base in (_EXIFTOOL_PKG_DIR, _EXIFTOOL_DATA_DIR):
+        exe = base / "exiftool.exe"
+        files = base / "exiftool_files"
+        if exe.is_file():
+            return exe, files
+    return _EXIFTOOL_PKG_DIR / "exiftool.exe", _EXIFTOOL_PKG_DIR / "exiftool_files"
+
+
+def _copy_if_newer(src: Path, dst: Path, label: str) -> bool:
+    """Copy src -> dst when dst is missing or src is newer. Returns True if dst is current."""
+    import shutil
+
+    try:
+        if dst.is_file() and src.is_file():
+            if src.stat().st_mtime <= dst.stat().st_mtime:
+                _info(f"{label} up to date ({dst.relative_to(ROOT_DIR)})")
+                return True
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+        _ok(f"{label} staged ({dst.relative_to(ROOT_DIR)})")
+        return True
+    except OSError as exc:
+        _err(f"Failed to stage {label}: {exc}")
+        return False
+
+
+def _stage_tauri_dev_resources() -> bool:
+    """Sync dev-required binaries into frontend/src-tauri/resources/.
+
+    Always runs when the Tauri dev shell will start (orthogonal to
+    --skip-deps/--no-build). Stages wpd_helper.exe + exiftool, ensures
+    dev-unneeded large-asset dirs exist, and writes a 0-byte dev-only
+    placeholder for VC_redist.x64.exe. Release workflow
+    (.github/workflows/release.yml) stages the real files -- placeholders
+    are dev-only and must never ship.
+    """
+    import shutil
+
+    _info("Staging Tauri dev resources...")
+    try:
+        _TAURI_RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _err(f"Cannot create resources dir {_TAURI_RESOURCES_DIR}: {exc}")
+        return False
+
+    ok = True
+
+    # 1. wpd_helper.exe (required -- built by _build_native into backend/bin/)
+    wpd_dst = _TAURI_RESOURCES_DIR / "wpd_helper.exe"
+    if not WPD_HELPER_EXE.is_file():
+        _err(f"Missing {WPD_HELPER_EXE.relative_to(ROOT_DIR)} -- cannot stage Tauri resource.")
+        _err("  Fix: run 'python run.py' without --skip-deps/--no-build so _build_native() runs,")
+        _err("  or build native/wpd_helper/build.bat manually, then retry.")
+        ok = False
+    elif not _copy_if_newer(WPD_HELPER_EXE, wpd_dst, "wpd_helper.exe"):
+        ok = False
+
+    # 2. exiftool.exe + exiftool_files/ (required -- do not silently placeholder).
+    # Source: backend/bin/exiftool/ in release, backend/data/bin/exiftool/ in dev.
+    exif_src, _exiftool_files_src = _resolve_exiftool_src()
+    exif_dst = _TAURI_RESOURCES_DIR / "exiftool.exe"
+    if not exif_src.is_file():
+        _err(
+            f"Missing exiftool.exe (checked {_EXIFTOOL_PKG_DIR.relative_to(ROOT_DIR)} and {_EXIFTOOL_DATA_DIR.relative_to(ROOT_DIR)}) -- cannot stage Tauri resource."
+        )
+        _err("  Fix: restore backend/data/bin/exiftool/ (exiftool.exe + exiftool_files/) then retry.")
+        ok = False
+    elif not _copy_if_newer(exif_src, exif_dst, "exiftool.exe"):
+        ok = False
+
+    files_dst = _TAURI_RESOURCES_DIR / "exiftool_files"
+    try:
+        files_dst.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _err(f"Cannot create {files_dst}: {exc}")
+        ok = False
+    if not _exiftool_files_src.is_dir():
+        _err(f"Missing {_exiftool_files_src.relative_to(ROOT_DIR)}/ -- cannot stage Tauri resource.")
+        _err("  Fix: restore backend/data/bin/exiftool/exiftool_files/ then retry.")
+        ok = False
+    else:
+        try:
+            for src_file in sorted(_exiftool_files_src.rglob("*")):
+                if not src_file.is_file():
+                    continue
+                rel = src_file.relative_to(_exiftool_files_src)
+                dst_file = files_dst / rel
+                if dst_file.is_file() and src_file.stat().st_mtime <= dst_file.stat().st_mtime:
+                    continue
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src_file), str(dst_file))
+            _ok(f"exiftool_files staged ({files_dst.relative_to(ROOT_DIR)})")
+        except OSError as exc:
+            _err(f"Failed to stage exiftool_files: {exc}")
+            ok = False
+
+    # 3. Dev-unneeded large assets: ensure dirs exist, do not require real files in dev.
+    for dirname in ("transfera-engine", "models", "exiftool_files"):
+        try:
+            (_TAURI_RESOURCES_DIR / dirname).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _err(f"Cannot create resources/{dirname}/: {exc}")
+            ok = False
+
+    # 4. VC_redist.x64.exe: 0-byte dev-only placeholder (dev shell never runs
+    #    the installer hook; Unix builds carry a 0-byte placeholder per
+    #    scripts/build-sidecar.ps1 convention; release stages the real file).
+    vc_dst = _TAURI_RESOURCES_DIR / "VC_redist.x64.exe"
+    if not vc_dst.is_file():
+        try:
+            vc_dst.write_bytes(b"")
+            _warn(
+                "VC_redist.x64.exe missing -- wrote 0-byte dev-only placeholder (release workflow stages the real file)."
+            )
+        except OSError as exc:
+            _err(f"Failed to write dev placeholder {vc_dst}: {exc}")
+            ok = False
+
+    if ok:
+        _ok("Tauri dev resources staged")
+    return ok
+
+
+def _verify_tauri_resources() -> bool:
+    """Fail-fast preflight: every bundle.resources entry must exist under src-tauri/.
+
+    Reads frontend/src-tauri/tauri.conf.json bundle.resources, resolves each
+    entry relative to frontend/src-tauri/, and verifies existence (dirs: must
+    exist; files: must exist -- 0-byte placeholders allowed in dev for
+    VC_redist.x64.exe / transfera-engine.exe with a warning). Returns True
+    when all entries resolve, False otherwise. Must run BEFORE the Rust build
+    so a missing resource fails fast instead of after a 9-min compile.
+    """
+    conf = _TAURI_DIR / "tauri.conf.json"
+    try:
+        raw = conf.read_text(encoding="utf-8")
+    except OSError as exc:
+        _err(f"Cannot read {conf.relative_to(ROOT_DIR)}: {exc}")
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _err(f"Cannot parse {conf.relative_to(ROOT_DIR)}: {exc}")
+        return False
+
+    resources = (data.get("bundle") or {}).get("resources") or []
+    if not isinstance(resources, list) or not resources:
+        _err(f"No bundle.resources list found in {conf.relative_to(ROOT_DIR)} -- cannot verify Tauri resources")
+        return False
+
+    missing: list[str] = []
+    for entry in resources:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        target = (_TAURI_DIR / entry.strip()).resolve()
+        if target.is_dir():
+            continue
+        if target.is_file():
+            try:
+                if target.stat().st_size == 0 and target.name in ("VC_redist.x64.exe", "transfera-engine.exe"):
+                    _warn(f"Dev-only 0-byte placeholder in use: {entry} (release workflow stages the real file).")
+            except OSError:
+                pass
+            continue
+        missing.append(entry)
+
+    if missing:
+        _err("Missing Tauri bundle resources (fail-fast, before Rust build):")
+        for entry in missing:
+            _err(f"  - {entry}  (expected at {(_TAURI_DIR / entry).relative_to(ROOT_DIR)})")
+        _err("  Fix: ensure _stage_tauri_dev_resources() ran, then retry.")
+        return False
+
+    _ok(f"Tauri resources verified ({len(resources)} bundle.resources entries)")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # STEP 3: Concurrent process launch
 # ---------------------------------------------------------------------------
 def _python_bin() -> str:
@@ -585,7 +780,7 @@ def _check_ports(start_backend: bool, start_frontend: bool) -> None:
     sys.exit(1)
 
 
-def _launch_backend() -> subprocess.Popen | None:
+def _launch_backend(reload: bool = False) -> subprocess.Popen | None:
     _info(f"Starting FastAPI backend on port {BACKEND_PORT}...")
     cmd = [
         _python_bin(),
@@ -597,6 +792,18 @@ def _launch_backend() -> subprocess.Popen | None:
         "--port",
         str(BACKEND_PORT),
     ]
+    if reload:
+        cmd += [
+            "--reload",
+            "--reload-dir",
+            "backend",
+            "--reload-exclude",
+            "backend/data",
+            "--reload-exclude",
+            "backend/bin",
+            "--reload-exclude",
+            "frontend/dist",
+        ]
     try:
         proc = subprocess.Popen(
             cmd,
@@ -694,8 +901,17 @@ def _get_transfera_processes(exclude_pid: int | None = None) -> list[dict]:
         "Where-Object { "
         f"$_.ProcessId -ne {exclude} -and $_.CommandLine -and "
         '$_.Name -ne "powershell.exe" -and '
-        f'( $_.CommandLine -like "*{root}*" -or '
-        f'$_.CommandLine -like "*uvicorn*backend.main*" ) '
+        "( "
+        '  ( $_.Name -eq "python.exe" -and ( '
+        '      $_.CommandLine -like "*uvicorn*backend.main*" -or '
+        '      $_.CommandLine -like "*backend.main:app*" -or '
+        '      $_.CommandLine -like "*backend.main*" -or '
+        '      $_.CommandLine -like "*run.py*" '
+        "  ) ) -or "
+        f'  ( $_.Name -eq "exiftool.exe" -and $_.CommandLine -like "*{root}*" ) -or '
+        '  ( $_.Name -eq "wpd_helper.exe" ) -or '
+        f'  ( $_.Name -eq "transfera.exe" -and $_.CommandLine -like "*{root}*" ) '
+        ") "
         "} | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json"
     )
 
@@ -711,7 +927,26 @@ def _get_transfera_processes(exclude_pid: int | None = None) -> list[dict]:
             data = json.loads(result.stdout.strip())
             if isinstance(data, dict):
                 data = [data]
-            return data
+            # Exclude IDE language servers / editors that may host a python
+            # under a matching path (e.g. .antigravity-ide, .vscode, jedi, pylance).
+            _IDE_EXCLUDE = (
+                ".antigravity-ide",
+                ".vscode",
+                "antigravity",
+                "vscode",
+                "jedi",
+                "pylance",
+                "ms-python",
+                "language_server",
+                "languageserver",
+            )
+            filtered: list[dict] = []
+            for proc in data:
+                cmdline = proc.get("CommandLine") or ""
+                if any(marker in cmdline.lower() for marker in _IDE_EXCLUDE):
+                    continue
+                filtered.append(proc)
+            return filtered
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         pass
     return []
@@ -733,49 +968,29 @@ def _sweep_remaining(label: str) -> bool:
         if attempt == 0:
             _warn(f"Found {len(remaining)} remaining {label} process(es)")
             for r in remaining:
-                cmd = (r.get("CommandLine") or "")[:100]
+                cmd = (r.get("CommandLine") or "")[:300]
                 _info(f"  PID {r['ProcessId']} ({r.get('Name', '?')}): {cmd}")
 
         for r in remaining:
             pid = r.get("ProcessId")
             if pid and pid != own_pid:
-                subprocess.run(
+                result = subprocess.run(
                     ["taskkill", "/T", "/F", "/PID", str(pid)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
                 )
+                if result.returncode != 0:
+                    _warn(f"taskkill /PID {pid} failed (exit {result.returncode}) -- will retry")
 
         time.sleep(1)
 
     remaining = _get_transfera_processes(exclude_pid=own_pid)
     if remaining:
-        # Fallback: kill by image name for known stubborn processes
-        for img in ("transfera.exe", "node.exe", "python.exe"):
-            if img == "python.exe":
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/FI", f"COMMANDLINE eq *{ROOT_DIR}*", "/IM", "python.exe"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
-                    )
-                except Exception:
-                    pass
-            else:
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", img],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
-                )
-        time.sleep(1)
-        remaining = _get_transfera_processes(exclude_pid=own_pid)
-
-    if remaining:
-        _err(f"{len(remaining)} {label} process(es) could not be terminated:")
+        _warn(f"{len(remaining)} {label} process(es) could not be terminated and will be left running:")
         for r in remaining:
-            _err(f"  PID {r['ProcessId']} ({r.get('Name', '?')})")
+            _warn(f"  PID {r['ProcessId']} ({r.get('Name', '?')})")
+            _warn(f"    Manual cleanup: taskkill /F /PID {r['ProcessId']}")
         return False
     return True
 
@@ -789,14 +1004,19 @@ def _terminate_process_tree(proc: subprocess.Popen | None, label: str) -> None:
     _info(f"Stopping {label} (PID {pid})...")
 
     if IS_WINDOWS:
-        subprocess.run(
+        result = subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(pid)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0,
         )
+        if result.returncode != 0:
+            _warn(f"taskkill /PID {pid} ({label}) failed (exit {result.returncode})")
     else:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        killpg = getattr(os, "killpg", None)
+        getpgid = getattr(os, "getpgid", None)
+        if killpg and getpgid:
+            killpg(getpgid(pid), signal.SIGTERM)
 
     try:
         proc.wait(timeout=5)
@@ -838,11 +1058,11 @@ def _check_stray_processes() -> None:
     if strays:
         _warn(f"Found {len(strays)} leftover process(es) from a previous session:")
         for s in strays:
-            cmd = (s.get("CommandLine") or "")[:120]
+            cmd = (s.get("CommandLine") or "")[:300]
             _warn(f"  PID {s['ProcessId']} ({s.get('Name', '?')}): {cmd}")
         _info("Auto-terminating before starting new processes...")
         if not _sweep_remaining("stray"):
-            _err("Could not clear all stray processes -- continuing anyway")
+            _warn("Could not clear all stray processes -- continuing anyway")
 
 
 # ---------------------------------------------------------------------------
@@ -854,7 +1074,11 @@ def main() -> None:
     parser.add_argument(
         "--frontend", action="store_true", help="Start Tauri dev shell only (adopts an already-running backend)"
     )
-    parser.add_argument("--tauri", action="store_true", help="Start backend + Tauri dev shell (WebView2)")
+    parser.add_argument(
+        "--tauri", action="store_true", help="Start backend + Tauri dev shell (recommended full-feature local test)"
+    )
+    parser.add_argument("--reload", action="store_true", help="Auto-reload backend on Python changes (dev only)")
+    parser.add_argument("--no-build", action="store_true", help="Skip frontend dist rebuild (Tauri dev uses Vite HMR)")
     parser.add_argument("--skip-deps", action="store_true", help="Skip dependency checks")
     args = parser.parse_args()
 
@@ -867,6 +1091,10 @@ def main() -> None:
 
     start_backend = not args.frontend
     start_frontend = not args.backend
+    if args.tauri:
+        # Explicit: --tauri means backend + Tauri dev shell (same as default no-flags).
+        start_backend = True
+        start_frontend = True
 
     # Check for leftover processes from previous sessions before launching
     _check_stray_processes()
@@ -919,8 +1147,10 @@ def main() -> None:
 
     # STEP 1 & 2: Dependency checks
     if not args.skip_deps:
-        if start_backend and not _ensure_backend_venv(python312):
-            sys.exit(1)
+        if start_backend:
+            assert python312 is not None
+            if not _ensure_backend_venv(python312):
+                sys.exit(1)
         if start_frontend:
             _check_node()
         if start_frontend and not _ensure_frontend_deps():
@@ -929,13 +1159,27 @@ def main() -> None:
         _info("Skipping dependency checks (--skip-deps)")
 
     # STEP 2.5: Build frontend if serving through FastAPI
-    if start_backend:
+    # (skipped with --no-build: Tauri dev uses Vite HMR via devUrl, so dist
+    # is unnecessary; backend-only mode still needs dist, hence build by default)
+    if start_backend and not args.no_build:
         if not _build_frontend():
             _warn("Frontend build failed -- backend will run in API-only mode")
+    elif args.no_build:
+        _info("Skipping frontend dist build (--no-build)")
 
     # STEP 2.6: Build native wpd_helper
     if start_backend:
         _build_native()
+
+    # STEP 2.7: Stage + verify Tauri dev resources (always when frontend starts,
+    # orthogonal to --skip-deps/--no-build -- must run before the Rust build).
+    if start_frontend:
+        if not _stage_tauri_dev_resources():
+            _err("Tauri resource staging failed -- fix the missing binaries above and retry.")
+            sys.exit(1)
+        if not _verify_tauri_resources():
+            _err("Tauri resource preflight failed -- fix the missing entries above and retry.")
+            sys.exit(1)
 
     # STEP 3: Launch processes (fail fast if a needed port is already taken)
     _check_ports(start_backend, start_frontend)
@@ -944,7 +1188,7 @@ def main() -> None:
     global _backend_proc, _frontend_proc
 
     if start_backend:
-        _backend_proc = _launch_backend()
+        _backend_proc = _launch_backend(reload=args.reload)
         if _backend_proc is None:
             _err("Cannot continue without backend -- exiting")
             sys.exit(1)

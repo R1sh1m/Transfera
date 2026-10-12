@@ -33,6 +33,7 @@ import {
   RefreshCw,
   RotateCcw,
   X,
+  Lock,
 } from "lucide-react";
 import { getDeviceMeta } from "@/lib/device-utils";
 import { useQueryClient } from "@tanstack/react-query";
@@ -78,6 +79,8 @@ import type {
 import { IOS_SOURCE_PREFIX, sourceRefToString } from "@/types/api";
 import { DeviceFolderBrowser } from "@/components/DeviceFolderBrowser";
 import SourcePreviewPanel from "@/components/SourcePreviewPanel";
+import { PillSelect, type PillSelectOption } from "@/components/PillSelect";
+import KeepAwakeBanner from "@/components/KeepAwakeBanner";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -146,33 +149,56 @@ function TierSelect({
   const tw = optionState("wpd");
   const t2 = optionState("tier2");
 
+  const tierOptions: PillSelectOption[] = [
+    {
+      value: "auto",
+      label: "Auto (recommended)",
+      title: TIER_OPTION_DESCRIPTIONS.auto,
+    },
+    {
+      value: "tier1",
+      label: `Apple driver${t1.disabled ? " — unavailable" : ""}`,
+      disabled: t1.disabled,
+      title: t1.title,
+    },
+    {
+      value: "wpd",
+      label: `Windows USB${tw.disabled ? " — unavailable" : ""}`,
+      disabled: tw.disabled,
+      title: tw.title,
+    },
+    {
+      value: "tier2",
+      label: `Linux bridge${t2.disabled ? " — unavailable" : ""}`,
+      disabled: t2.disabled,
+      title: t2.title,
+    },
+  ];
+
   return (
-    <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-      <span className="shrink-0">Driver</span>
-      <select
+    <div
+      className="flex items-center gap-2 text-xs text-muted-foreground"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+        Driver
+      </span>
+      <PillSelect
         value={value}
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value as DeviceTierChoice)}
-        onClick={(e) => e.stopPropagation()}
+        size="sm"
+        className="flex-1 min-w-0"
+        triggerClassName="w-full justify-between"
+        menuClassName="w-full min-w-[220px]"
+        onChange={(val) => onChange(val as DeviceTierChoice)}
+        options={tierOptions}
         title={
           serving
             ? `Now serving via ${tierLabel(serving)}. Your choice is tried first; the rest are always tried as fallback.`
             : "Your choice is tried first; the rest are always tried as fallback."
         }
-        className="min-w-0 flex-1 px-1.5 py-1 bg-background border border-border rounded-md text-[10px] text-foreground focus:outline-hidden focus:ring-1 focus:ring-ring transition-colors disabled:opacity-50"
-      >
-        <option value="auto">{`Auto (recommended)`}</option>
-        <option value="tier1" disabled={t1.disabled} title={t1.title}>
-          Apple driver{t1.disabled ? " — unavailable" : ""}
-        </option>
-        <option value="wpd" disabled={tw.disabled} title={tw.title}>
-          Windows USB{tw.disabled ? " — unavailable" : ""}
-        </option>
-        <option value="tier2" disabled={t2.disabled} title={t2.title}>
-          Linux bridge{t2.disabled ? " — unavailable" : ""}
-        </option>
-      </select>
-    </label>
+      />
+    </div>
   );
 }
 
@@ -238,12 +264,14 @@ interface SourcePickerProps {
       import("@/types/api").IOSDeviceRecoverResponse["devices"]
     >,
   ) => void;
+  deviceLocked?: boolean;
 }
 
 function SourcePicker({
   sourceRef,
   onSourceChange,
   onRecovered,
+  deviceLocked = false,
 }: SourcePickerProps) {
   const [mode, setMode] = useState<SourceMode>(
     sourceRef?.type === "device"
@@ -659,7 +687,10 @@ function SourcePicker({
               : "border-border hover:border-muted-foreground/30",
           )}
         >
-          <div className="flex items-center gap-3 p-3">
+          <div
+            className="flex items-center gap-3 p-3 cursor-pointer select-none"
+            onClick={() => setDeviceListExpanded(!deviceListExpanded)}
+          >
             <div
               className={cn(
                 "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
@@ -692,12 +723,16 @@ function SourcePicker({
                 </p>
               )}
             </div>
-            <div className="flex items-center gap-1">
+            <div
+              className="flex items-center gap-1"
+              onClick={(e) => e.stopPropagation()}
+            >
               {isIOS && (
                 <button
                   type="button"
                   onClick={handleClear}
-                  className="p-1 text-muted-foreground hover:text-foreground transition-colors"
+                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                  aria-label="Clear selected source"
                   title="Clear source"
                 >
                   <XCircle className="w-4 h-4" />
@@ -706,14 +741,21 @@ function SourcePicker({
               <button
                 type="button"
                 onClick={() => setDeviceListExpanded(!deviceListExpanded)}
-                className="p-1 text-muted-foreground hover:text-foreground transition-colors"
+                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                aria-label={
+                  deviceListExpanded
+                    ? "Collapse device list"
+                    : "Expand device list"
+                }
                 title={
-                  deviceListExpanded ? "Hide device list" : "Show device list"
+                  deviceListExpanded
+                    ? "Collapse device list"
+                    : "Expand device list"
                 }
               >
                 <ChevronRight
                   className={cn(
-                    "w-4 h-4 transition-transform",
+                    "w-4 h-4 transition-transform duration-200",
                     deviceListExpanded && "rotate-90",
                   )}
                 />
@@ -727,8 +769,12 @@ function SourcePicker({
               <motion.div
                 key="device-list"
                 initial={{ height: 0, opacity: 0 }}
-                animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
+                animate={{
+                  height: "auto",
+                  opacity: 1,
+                  transitionEnd: { overflow: "visible" },
+                }}
+                exit={{ height: 0, opacity: 0, overflow: "hidden" }}
                 transition={{ duration: 0.2, ease: "easeInOut" }}
                 className="overflow-hidden"
               >
@@ -991,6 +1037,12 @@ function SourcePicker({
                     const isRetrying = !!retryingMap[device.serial];
                     const coolingDown = !!retryCooldownMap[device.serial];
                     const retryBusy = isRetrying || coolingDown;
+                    // Check if this device is the currently selected one and is locked
+                    const isCurrentDeviceLocked =
+                      deviceLocked &&
+                      sourceRef?.type === "device" &&
+                      sourceRef.device_id.toLowerCase() ===
+                        device.serial.toLowerCase();
                     return (
                       <div
                         key={device.serial}
@@ -1041,12 +1093,20 @@ function SourcePicker({
                               <span
                                 className={cn(
                                   "text-[9px] px-1.5 py-0.5 rounded-pill border shrink-0",
-                                  meta.accentColor.badgeBg,
-                                  meta.accentColor.badgeText,
-                                  meta.accentColor.border,
+                                  isCurrentDeviceLocked
+                                    ? "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400 border-orange-300 dark:border-orange-700"
+                                    : meta.accentColor.badgeBg,
+                                  isCurrentDeviceLocked
+                                    ? ""
+                                    : meta.accentColor.badgeText,
+                                  isCurrentDeviceLocked
+                                    ? ""
+                                    : meta.accentColor.border,
                                 )}
                               >
-                                {meta.platformBadge}
+                                {isCurrentDeviceLocked
+                                  ? "Locked"
+                                  : meta.platformBadge}
                               </span>
                             </div>
                             <p className="text-[10px] text-muted-foreground truncate">
@@ -1064,33 +1124,45 @@ function SourcePicker({
                             className="flex items-center gap-1.5"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <span className="text-[9px] px-1.5 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-pill font-medium">
-                              Ready
-                            </span>
-                            {(serving === "tier1" ||
-                              serving === "wpd" ||
-                              serving === "tier2") && (
-                              <span className="text-[9px] text-muted-foreground shrink-0">
-                                via {tierLabel(serving)}
+                            {!isCurrentDeviceLocked && (
+                              <>
+                                <span className="text-[9px] px-1.5 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-pill font-medium">
+                                  Ready
+                                </span>
+                                {(serving === "tier1" ||
+                                  serving === "wpd" ||
+                                  serving === "tier2") && (
+                                  <span className="text-[9px] text-muted-foreground shrink-0">
+                                    via {tierLabel(serving)}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleRetryDevice(device.serial)
+                                  }
+                                  disabled={retryBusy}
+                                  title={
+                                    coolingDown
+                                      ? "Wait a few seconds before retrying this device"
+                                      : "Retry this device"
+                                  }
+                                  className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                                >
+                                  {isRetrying ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <RefreshCw className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              </>
+                            )}
+                            {isCurrentDeviceLocked && (
+                              <span className="text-[9px] px-1.5 py-0.5 bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400 rounded-pill font-medium flex items-center gap-1">
+                                <Lock className="w-3 h-3" />
+                                Locked
                               </span>
                             )}
-                            <button
-                              type="button"
-                              onClick={() => handleRetryDevice(device.serial)}
-                              disabled={retryBusy}
-                              title={
-                                coolingDown
-                                  ? "Wait a few seconds before retrying this device"
-                                  : "Retry this device"
-                              }
-                              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
-                            >
-                              {isRetrying ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <RefreshCw className="w-3.5 h-3.5" />
-                              )}
-                            </button>
                             <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                           </div>
                         </div>
@@ -2464,7 +2536,10 @@ export default function DeviceSetupPage() {
 
   // Bumped on every recovery so the device preview panel remounts and
   // re-fetches from the (possibly re-enumerated) live device.
+  const queryClient = useQueryClient();
   const [previewNonce, setPreviewNonce] = useState(0);
+  const [deviceLocked, setDeviceLocked] = useState(false);
+  const [scanId, setScanId] = useState<string | null>(null);
 
   // Lane 3: after a successful recovery, migrate the preview source onto
   // the live Tier-1 READY serial whose canonical id matches the current
@@ -2536,6 +2611,21 @@ export default function DeviceSetupPage() {
   }, [sourceRef, retryDevicePreview, showNotification]);
   const hasDeviceState = !!deviceImportState?.last_successful_cutoff;
   const isIOSDevice = sourceRef?.type === "device";
+
+  // Handle device lock state from preview panel
+  const handleDeviceLocked = useCallback(() => {
+    setDeviceLocked(true);
+    // Invalidate device queries so the row flips to Locked
+    queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
+    queryClient.invalidateQueries({ queryKey: ["device-preview"] });
+  }, []);
+
+  const handleDeviceUnlocked = useCallback(() => {
+    setDeviceLocked(false);
+    // Invalidate device queries so the row flips back to Ready
+    queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
+    queryClient.invalidateQueries({ queryKey: ["device-preview"] });
+  }, []);
 
   // Preflight validation
   const transferActive = useTransferStore((s) =>
@@ -2626,6 +2716,7 @@ export default function DeviceSetupPage() {
           folder_layout: folderLayout,
           selected_files: files.length > 0 ? files : null,
           batch_size: batchSize,
+          scan_id: scanId ?? undefined,
         });
         initTransfer(session);
         resetSetup();
@@ -2645,6 +2736,7 @@ export default function DeviceSetupPage() {
       onlyNewMode,
       folderLayout,
       batchSize,
+      scanId,
       createSession,
       initTransfer,
       resetSetup,
@@ -2861,6 +2953,7 @@ export default function DeviceSetupPage() {
           sourceRef={sourceRef}
           onSourceChange={setSourceRef}
           onRecovered={handleRecovered}
+          deviceLocked={deviceLocked}
         />
         {sourcePathStale && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-300">
@@ -2887,23 +2980,30 @@ export default function DeviceSetupPage() {
         {sourceRef?.type === "device" &&
           sourceRef.device_id &&
           sourceRef.device_path && (
-            <div
-              key={`device-preview:${sourceRef.device_id}:${previewNonce}`}
-              className="border border-border rounded-xl p-3 bg-card"
-            >
-              <SourcePreviewPanel
-                sourcePath={null}
-                deviceSource={{
-                  device_id: sourceRef.device_id,
-                  device_path: sourceRef.device_path,
-                }}
-                onSelectionConfirm={handleSelectionConfirm}
-                onTransferStart={handleTransferStart}
-                onTryAnotherDriver={handlePreviewTryAnotherDriver}
-                onRetryDriver={handlePreviewRetryDriver}
-                isRetryingDriver={retryDevicePreview.isPending}
-              />
-            </div>
+            <>
+              <KeepAwakeBanner />
+              <div
+                key={`device-preview:${sourceRef.device_id}:${previewNonce}`}
+                className="border border-border rounded-xl p-3 bg-card"
+              >
+                <SourcePreviewPanel
+                  sourcePath={null}
+                  deviceSource={{
+                    device_id: sourceRef.device_id,
+                    device_path: sourceRef.device_path,
+                  }}
+                  onSelectionConfirm={handleSelectionConfirm}
+                  onTransferStart={handleTransferStart}
+                  onTryAnotherDriver={handlePreviewTryAnotherDriver}
+                  onRetryDriver={handlePreviewRetryDriver}
+                  isRetryingDriver={retryDevicePreview.isPending}
+                  onDeviceLocked={handleDeviceLocked}
+                  onDeviceUnlocked={handleDeviceUnlocked}
+                  deviceLocked={deviceLocked}
+                  onScanId={setScanId}
+                />
+              </div>
+            </>
           )}
 
         {/* Destination: existing folder picker */}

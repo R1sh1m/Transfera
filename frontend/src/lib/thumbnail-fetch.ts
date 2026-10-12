@@ -69,20 +69,30 @@ export async function fetchThumbnail(
     }
 
     const statusHeader = res.headers.get("X-Thumbnail-Status");
-    if (statusHeader === "ready") {
+    if (statusHeader === "failed") {
+      _thumbFailCache.set(mediaId, Date.now());
+      return null;
+    } else if (statusHeader === "not_found") {
+      // Clear negative cache so immediate retry works when thumbnail becomes available
+      _thumbFailCache.delete(mediaId);
+      return null;
+    } else if (
+      statusHeader === "ready" ||
+      (!statusHeader && res.status === 200)
+    ) {
       _thumbFailCache.delete(mediaId);
       const blob = await res.blob();
+      if (blob.size === 0) {
+        return null;
+      }
       // Replace (and revoke) any previous URL for this item so refreshes
       // can't accumulate orphaned blobs.
       revokeThumbnail(mediaId);
       const objectUrl = URL.createObjectURL(blob);
       _liveUrls.set(mediaId, objectUrl);
       return objectUrl;
-    } else if (statusHeader === "failed") {
-      _thumbFailCache.set(mediaId, Date.now());
-      return null;
     } else {
-      // 'not_found' or other pending state — do not cache in fail cache
+      // Pending state — do not cache in fail cache
       return null;
     }
   } catch (err) {

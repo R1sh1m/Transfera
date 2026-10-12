@@ -200,6 +200,33 @@ function NotificationToast() {
           >
             {message}
           </p>
+          {notification.actions && notification.actions.length > 0 && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              {notification.actions.map((action) => (
+                <button
+                  key={action.id}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    window.dispatchEvent(
+                      new CustomEvent("transfera:notification-action", {
+                        detail: { id: action.id },
+                      }),
+                    );
+                    clearNotification();
+                  }}
+                  className={cn(
+                    "px-3 py-1 rounded-pill text-xs font-normal active:scale-[0.95] transition-all",
+                    action.primary
+                      ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                      : "border border-border text-foreground hover:bg-muted",
+                  )}
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          )}
           {long && (
             <ChevronDown
               className={cn(
@@ -521,6 +548,10 @@ function BackendDownScreen() {
         ? "Still starting — loading local metadata and checking device health."
         : "Taking longer than usual — still working. You can leave this screen open.";
 
+  // Background task progress from health endpoint (display-only).
+  // Fixed height reserves the space so the splash never shifts when the bar appears or updates.
+  const bgTask = health?.background_task;
+
   // Show a clean loading screen while the backend is in the process of starting up
   if (isStarting && !serverDown) {
     return (
@@ -541,6 +572,30 @@ function BackendDownScreen() {
           <p className="text-xs text-muted-foreground tabular-nums">
             {elapsed}s elapsed
           </p>
+          {/* Background-task progress from the health endpoint (display-only).
+              Fixed height reserves the space so the splash never shifts when the bar appears or updates. */}
+          <div
+            className="h-10 flex flex-col items-center justify-center gap-1.5"
+            aria-live="polite"
+          >
+            {bgTask ? (
+              <>
+                <div className="w-56 h-1.5 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all duration-300"
+                    style={{
+                      width: `${Math.min(100, Math.max(0, bgTask.progress_percent))}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground truncate max-w-xs">
+                  {bgTask.label}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs text-transparent select-none">{"\u00A0"}</p>
+            )}
+          </div>
         </div>
       </motion.div>
     );

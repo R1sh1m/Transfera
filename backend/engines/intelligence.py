@@ -302,18 +302,227 @@ def compute_blur_score(file_path: str | Path) -> float | None:
         return None
 
 
-def extract_faces(file_path: str | Path) -> list[dict]:
-    """Face detection stub: returns [] unless SCRFD ONNX models exist.
+_face_sessions_lock = threading.Lock()
+_scrfd_sess = None
+_arcface_sess = None
 
-    Real inference (SCRFD-10G + ArcFace via onnxruntime) plugs in here;
-    the schema (bbox, embedding, confidence) is already stable so the
-    DB + API layers work today with zero models installed.
+
+def _get_face_sessions():
+    global _scrfd_sess, _arcface_sess
+    with _face_sessions_lock:
+        if _scrfd_sess is None or _arcface_sess is None:
+            try:
+                import os
+
+                import onnxruntime as ort
+
+                caps = get_capabilities()
+                if not caps.get("faces_available"):
+                    return None, None
+                md = Path(caps["models_dir"])
+                scrfd_p = md / "scrfd_10g.onnx"
+                arcface_p = md / "arcface_r50.onnx"
+                if not scrfd_p.is_file() or not arcface_p.is_file():
+                    return None, None
+                # Optimize execution providers and threads
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
+                _scrfd_sess = ort.InferenceSession(str(scrfd_p), sess_options=opts)
+                _arcface_sess = ort.InferenceSession(str(arcface_p), sess_options=opts)
+            except Exception as exc:
+                logger.warning("Failed to initialize face ONNX sessions: %s", exc)
+                return None, None
+        return _scrfd_sess, _arcface_sess
+
+
+def extract_faces(file_path: str | Path) -> list[dict]:
+    """Detect faces (SCRFD-10G) and extract embeddings (ArcFace-R50) via ONNX Runtime.
+
+    Returns a list of dicts:
+        {"bbox": [x1, y1, x2, y2], "confidence": float, "embedding": list[float]}
+    Returns [] if models are absent or no faces are detected.
     """
-    caps = get_capabilities()
-    if not caps["faces_available"]:
+    scrfd, arcface = _get_face_sessions()
+    if scrfd is None or arcface is None:
         return []
-    logger.debug("Face models present but inference not yet wired; returning []")
-    return []
+
+    try:
+        import numpy as np
+        from PIL import Image, ImageOps
+
+        p = Path(file_path)
+        if not p.is_file():
+            return []
+
+        with Image.open(p) as raw_img:
+            img = ImageOps.exif_transpose(raw_img) or raw_img
+            img = img.convert("RGB")
+            orig_w, orig_h = img.size
+
+        # Letterbox into 640x640 for static-shape SCRFD-10G
+        scale = min(640.0 / orig_w, 640.0 / orig_h)
+        new_w, new_h = max(1, int(orig_w * scale)), max(1, int(orig_h * scale))
+        resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+
+        canvas = Image.new("RGB", (640, 640), (0, 0, 0))
+        canvas.paste(resized, (0, 0))
+
+        # SCRFD expects BGR and (x - 127.5) / 128.0
+        arr = np.array(canvas, dtype=np.float32)[:, :, ::-1]
+        blob = ((arr - 127.5) / 128.0).transpose(2, 0, 1)[np.newaxis, :].astype(np.float32)
+
+        outs = scrfd.run(None, {"input.1": blob})
+
+        # Strides: 8, 16, 32
+        strides = [8, 16, 32]
+        scores_list = []
+        bboxes_list = []
+
+        for idx, s in enumerate(strides):
+            score = np.asarray(outs[idx])  # (num_anchors, 1)
+            bbox = np.asarray(outs[idx + 3])  # (num_anchors, 4)
+            h, w = 640 // s, 640 // s
+
+            grid_y, grid_x = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+            anchor_centers = np.stack([grid_x * s, grid_y * s], axis=-1).reshape(-1, 2)
+            # 2 anchors per spatial location
+            anchor_centers = np.repeat(anchor_centers, 2, axis=0)
+
+            pos = np.where(score[:, 0] >= 0.5)[0]
+            if len(pos) == 0:
+                continue
+
+            s_pos = score[pos, 0]
+            b_pos = bbox[pos] * s
+            a_pos = anchor_centers[pos]
+
+            x1 = a_pos[:, 0] - b_pos[:, 0]
+            y1 = a_pos[:, 1] - b_pos[:, 1]
+            x2 = a_pos[:, 0] + b_pos[:, 2]
+            y2 = a_pos[:, 1] + b_pos[:, 3]
+
+            boxes = np.stack([x1, y1, x2, y2], axis=-1)
+            scores_list.append(s_pos)
+            bboxes_list.append(boxes)
+
+        if not scores_list:
+            return []
+
+        all_scores = np.concatenate(scores_list, axis=0)
+        all_boxes = np.concatenate(bboxes_list, axis=0)
+
+        # Non-Maximum Suppression (IoU 0.4)
+        order = all_scores.argsort()[::-1]
+        keep = []
+        while len(order) > 0:
+            i = order[0]
+            keep.append(i)
+            if len(order) == 1:
+                break
+            xx1 = np.maximum(all_boxes[i, 0], all_boxes[order[1:], 0])
+            yy1 = np.maximum(all_boxes[i, 1], all_boxes[order[1:], 1])
+            xx2 = np.minimum(all_boxes[i, 2], all_boxes[order[1:], 2])
+            yy2 = np.minimum(all_boxes[i, 3], all_boxes[order[1:], 3])
+
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            area1 = (all_boxes[i, 2] - all_boxes[i, 0]) * (all_boxes[i, 3] - all_boxes[i, 1])
+            area2 = (all_boxes[order[1:], 2] - all_boxes[order[1:], 0]) * (all_boxes[order[1:], 3] - all_boxes[order[1:], 1])
+            union = area1 + area2 - inter
+            iou = inter / np.maximum(union, 1e-6)
+
+            inds = np.where(iou <= 0.4)[0]
+            order = order[inds + 1]
+
+        faces = []
+        for k in keep[:10]:  # Cap at 10 most prominent faces per image
+            score_val = float(all_scores[k])
+            bx = all_boxes[k]
+            # Map back to original image resolution
+            orig_x1 = max(0, int(bx[0] / scale))
+            orig_y1 = max(0, int(bx[1] / scale))
+            orig_x2 = min(orig_w, int(bx[2] / scale))
+            orig_y2 = min(orig_h, int(bx[3] / scale))
+
+            bw = orig_x2 - orig_x1
+            bh = orig_y2 - orig_y1
+            if bw < 16 or bh < 16:
+                continue
+
+            # Crop face with 15% margin
+            margin_x = int(bw * 0.15)
+            margin_y = int(bh * 0.15)
+            crop_x1 = max(0, orig_x1 - margin_x)
+            crop_y1 = max(0, orig_y1 - margin_y)
+            crop_x2 = min(orig_w, orig_x2 + margin_x)
+            crop_y2 = min(orig_h, orig_y2 + margin_y)
+
+            crop = img.crop((crop_x1, crop_y1, crop_x2, crop_y2)).resize((112, 112), Image.Resampling.BILINEAR)
+            crop_arr = np.array(crop, dtype=np.float32)[:, :, ::-1]  # BGR
+            crop_blob = ((crop_arr - 127.5) / 127.5).transpose(2, 0, 1)[np.newaxis, :].astype(np.float32)
+
+            arc_outs = arcface.run(None, {"input.1": crop_blob})
+            emb = np.asarray(arc_outs[0])[0]
+            norm = np.linalg.norm(emb)
+            if norm > 1e-6:
+                emb = emb / norm
+            emb_list = [round(float(v), 5) for v in emb]
+
+            faces.append({
+                "bbox": [orig_x1, orig_y1, orig_x2, orig_y2],
+                "confidence": round(score_val, 4),
+                "embedding": emb_list,
+            })
+
+        return faces
+    except Exception as exc:
+        logger.warning("Face extraction failed for %s: %s", file_path, exc)
+        return []
+
+
+def cluster_faces_greedy(face_items: list[dict], threshold: float = 0.55) -> list[list[int]]:
+    """Greedy cosine clustering of face embeddings.
+
+    Takes a list of face dicts/tuples containing 'id' and 'embedding'.
+    Returns a list of clusters, where each cluster is a list of face IDs.
+    """
+    import numpy as np
+
+    clusters: list[list[int]] = []
+    cluster_centroids: list[np.ndarray] = []
+
+    for item in face_items:
+        fid = item["id"]
+        vec = np.array(item["embedding"], dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        if norm > 1e-6:
+            vec = vec / norm
+        else:
+            continue
+
+        best_sim = -1.0
+        best_cluster_idx = -1
+        for c_idx, centroid in enumerate(cluster_centroids):
+            sim = float(np.dot(vec, centroid))
+            if sim > best_sim:
+                best_sim = sim
+                best_cluster_idx = c_idx
+
+        if best_sim >= threshold and best_cluster_idx >= 0:
+            clusters[best_cluster_idx].append(fid)
+            # Update centroid
+            cluster_centroids[best_cluster_idx] = (
+                cluster_centroids[best_cluster_idx] * len(clusters[best_cluster_idx]) + vec
+            )
+            c_norm = np.linalg.norm(cluster_centroids[best_cluster_idx])
+            if c_norm > 1e-6:
+                cluster_centroids[best_cluster_idx] /= c_norm
+        else:
+            clusters.append([fid])
+            cluster_centroids.append(vec.copy())
+
+    return clusters
 
 
 def keyword_tags(file_name: str, camera_model: str | None = None) -> list[str]:

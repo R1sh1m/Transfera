@@ -122,6 +122,12 @@ class SessionCreate(BaseModel):
         le=500,
         description="Files per transfer batch (smaller = more responsive progress on flaky links). Defaults to server BATCH_SIZE.",
     )
+    preview_scan_id: str | None = Field(
+        None,
+        description="Optional scan_id from GET /api/device/ios-preview: lets session creation reuse the frozen "
+        "preview enumeration (files + total bytes) instead of re-walking the device. Purely advisory — "
+        "a missing/expired id falls back to normal behavior with no shape change.",
+    )
 
 
 class SessionInfo(BaseModel):
@@ -139,6 +145,7 @@ class SessionInfo(BaseModel):
     folder_layout: str = "year/month"
     total_bytes_volume: int | None = None
     session_report_path: str | None = None
+    error_message: str | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
@@ -341,6 +348,7 @@ class BackfillResponse(BaseModel):
     dims_filled: int = 0
     tags_filled: int = 0
     embeddings_filled: int = 0
+    faces_filled: int = 0
     message: str = ""
 
 

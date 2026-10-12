@@ -90,11 +90,19 @@ export interface LibraryState {
   isLoadingMore: boolean;
 }
 
+export interface NotificationAction {
+  /** Dispatched as `transfera:notification-action` with `{ id }` detail. */
+  id: string;
+  label: string;
+  primary?: boolean;
+}
+
 export interface UIState {
   currentPage: "dashboard" | "setup" | "transfer" | "library";
   notification: {
     type: "success" | "error" | "warning" | "info";
     message: string;
+    actions?: NotificationAction[];
   } | null;
   defaultTransferMode: TransferMode;
   serverDown: boolean;
@@ -158,6 +166,7 @@ export interface TransferStore {
   showNotification: (
     type: "success" | "error" | "warning" | "info",
     message: string,
+    actions?: NotificationAction[],
   ) => void;
   clearNotification: () => void;
   requestUpdateCheck: () => void;
@@ -756,9 +765,9 @@ export const useTransferStore = create<TransferStore>()(
       setDefaultTransferMode: (mode) =>
         set((s) => ({ ui: { ...s.ui, defaultTransferMode: mode } })),
 
-      showNotification: (type, message) =>
+      showNotification: (type, message, actions) =>
         set((s) => ({
-          ui: { ...s.ui, notification: { type, message } },
+          ui: { ...s.ui, notification: { type, message, actions } },
         })),
 
       clearNotification: () =>

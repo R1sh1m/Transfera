@@ -4,7 +4,7 @@
 // Polling-based: REST is the source of truth, WebSocket is a bonus.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo, useCallback } from "react";
 import type { ThumbQueue } from "@/lib/thumb-queue";
 import { createThumbQueue } from "@/lib/thumb-queue";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
@@ -40,13 +40,10 @@ import { useTransferStore } from "@/store/transfer";
 import { useTransferWs } from "@/hooks/use-transfer-ws";
 import { cn } from "@/lib/utils";
 import { isDesktop, openPath, setTrayProgress } from "@/lib/desktop";
-import { getLocalToken } from "@/lib/api-client";
+import { getLocalToken, API_BASE_URL } from "@/lib/api-client";
 import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
-import type {
-  SessionInfo,
-  SessionProgress,
-  RecentItemProgress,
-} from "@/types/api";
+import KeepAwakeBanner from "@/components/KeepAwakeBanner";
+import type { SessionProgress, RecentItemProgress } from "@/types/api";
 
 // Keep track of session IDs that have already been started to prevent double-triggering
 // on component mount/remount in React Strict Mode.
@@ -61,10 +58,6 @@ const STATUS_LABELS: Record<string, string> = {
   failed: "Failed",
   cancelled: "Stopped",
 };
-
-// Backend includes error_message on failed sessions, but it is not part of
-// the generated SessionInfo type — read it defensively without touching types.
-type SessionWithError = SessionInfo & { error_message?: string };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -139,21 +132,24 @@ function formatElapsed(ms: number) {
 
 // ---------------------------------------------------------------------------
 // PreviewThumbnail — Lazy loaded thumbnail with concurrency queue
+// Supports fallback chain: library thumbnail → device preview thumbnail
 // ---------------------------------------------------------------------------
 function PreviewThumbnail({
   itemId,
   updatedAt,
   name,
   thumbQueue,
+  sourceRoot,
 }: {
   itemId: number | null;
   updatedAt?: string | Date;
   name: string;
   thumbQueue: ThumbQueue;
+  sourceRoot?: string | null;
 }) {
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<
-    "idle" | "loading" | "loaded" | "error"
+    "idle" | "loading" | "loaded" | "error" | "generating"
   >("idle");
   const [retryCount, setRetryCount] = useState(0);
   const [isIntersecting, setIsIntersecting] = useState(false);
@@ -208,6 +204,31 @@ function PreviewThumbnail({
     return () => obs.disconnect();
   }, [itemId, isIntersecting]);
 
+  // Build device preview thumbnail URL from session source info
+  const buildDevicePreviewUrl = useCallback(
+    (updatedAt?: string | Date) => {
+      if (!sourceRoot) return null;
+      const token = getLocalToken();
+      const t = updatedAt ? new Date(updatedAt).getTime() : "";
+      const params = new URLSearchParams({
+        ...(token ? { token } : {}),
+        ...(t ? { t: String(t) } : {}),
+      });
+      if (sourceRoot.startsWith("ios://")) {
+        const raw = sourceRoot.slice("ios://".length);
+        const slashIdx = raw.indexOf("/");
+        const devId = slashIdx === -1 ? raw : raw.slice(0, slashIdx);
+        const vPath = slashIdx === -1 ? "/" : "/" + raw.slice(slashIdx + 1);
+        params.set("device_id", devId);
+        params.set("path", vPath);
+        return `${API_BASE_URL}/api/device/ios-thumbnail?${params}`;
+      }
+      params.set("path", sourceRoot);
+      return `${API_BASE_URL}/api/device/thumbnail?${params}`;
+    },
+    [sourceRoot],
+  );
+
   useEffect(() => {
     if (
       !itemId ||
@@ -232,7 +253,8 @@ function PreviewThumbnail({
 
         setLoadState("loading");
         try {
-          const url = await fetchThumbnail(
+          // First try: library thumbnail
+          const libraryUrl = await fetchThumbnail(
             itemId,
             updatedAt,
             controller.signal,
@@ -243,23 +265,49 @@ function PreviewThumbnail({
             return;
           }
 
-          if (url) {
-            setImgSrc(url);
+          if (libraryUrl) {
+            setImgSrc(libraryUrl);
             setLoadState("loaded");
             slotHeld.current = false;
             thumbQueue.release();
-          } else {
-            slotHeld.current = false;
-            thumbQueue.release();
+            return;
+          }
 
-            if (retryCount < 10) {
-              timeoutRef.current = setTimeout(() => {
-                if (cancelled) return;
-                setRetryCount((c) => c + 1);
-              }, 2000);
-            } else {
-              setLoadState("error");
+          // Library thumbnail not ready — try device preview fallback
+          const deviceUrl = buildDevicePreviewUrl(updatedAt);
+          if (deviceUrl) {
+            setLoadState("generating");
+            // Fetch device preview thumbnail directly
+            const res = await fetch(deviceUrl, { signal: controller.signal });
+            if (cancelled) {
+              slotHeld.current = false;
+              thumbQueue.release();
+              return;
             }
+            if (res.ok) {
+              const blob = await res.blob();
+              if (blob.size > 0) {
+                const objectUrl = URL.createObjectURL(blob);
+                setImgSrc(objectUrl);
+                setLoadState("loaded");
+                slotHeld.current = false;
+                thumbQueue.release();
+                return;
+              }
+            }
+          }
+
+          // Neither available yet
+          slotHeld.current = false;
+          thumbQueue.release();
+
+          if (retryCount < 10) {
+            timeoutRef.current = setTimeout(() => {
+              if (cancelled) return;
+              setRetryCount((c) => c + 1);
+            }, 2000);
+          } else {
+            setLoadState("error");
           }
         } catch {
           slotHeld.current = false;
@@ -294,7 +342,14 @@ function PreviewThumbnail({
         thumbQueue.release();
       }
     };
-  }, [itemId, isIntersecting, retryCount, thumbQueue]);
+  }, [
+    itemId,
+    isIntersecting,
+    retryCount,
+    thumbQueue,
+    updatedAt,
+    buildDevicePreviewUrl,
+  ]);
 
   if (!itemId) {
     return (
@@ -308,6 +363,14 @@ function PreviewThumbnail({
     <div ref={cellRef} className="w-full h-full min-h-[80px]">
       {loadState === "loading" && (
         <div className="w-full h-20 animate-pulse bg-muted" />
+      )}
+      {loadState === "generating" && (
+        <div className="w-full h-20 flex items-center justify-center bg-muted">
+          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Generating preview…
+          </span>
+        </div>
       )}
       {imgSrc && loadState === "loaded" && (
         <img
@@ -338,6 +401,9 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
     progress?.imported_files ?? progress?.completed_items ?? 0;
   const totalItems = progress?.total_files ?? progress?.total_items ?? 0;
   const isRunning = status === "running";
+
+  // Get session source info for device preview fallback
+  const sourceRoot = useTransferStore((s) => s.transfer.sourceRoot);
 
   const thumbQueue = useMemo(() => createThumbQueue(8), []);
   useEffect(
@@ -465,6 +531,7 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
                       updatedAt={file.updated_at}
                       name={file.file_name}
                       thumbQueue={thumbQueue}
+                      sourceRoot={sourceRoot}
                     />
                     <span className="text-[10px] text-muted-foreground truncate w-full text-center px-1 py-0.5 block">
                       {file.file_name}
@@ -582,8 +649,8 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
     isCancelled,
   ].some(Boolean);
 
-  // Failure reason (defensive — field exists on the backend payload only).
-  const sessionError = (session as SessionWithError | undefined)?.error_message;
+  // Failure reason
+  const sessionError = session?.error_message;
 
   // Follow SessionRow handleViewReport pattern in DashboardPage:
   // desktop opens the report path directly, browser opens the report endpoint.
@@ -1058,10 +1125,7 @@ export default function TransferPage() {
         } else if (transfer.status === "failed") {
           useTransferStore
             .getState()
-            .showNotification(
-              "error",
-              "Transfer failed. Check the details below.",
-            );
+            .showNotification("error", "Check the errors.");
         }
       }
     }
@@ -1177,6 +1241,10 @@ export default function TransferPage() {
     "failed",
     "cancelled",
   ].includes(transfer.status);
+
+  // Show keep-awake banner for iOS device transfers
+  const isIOSDevice = transfer.sourceRoot?.startsWith("ios://") ?? false;
+  const showKeepAwake = isIOSDevice && (isRunning || isPaused);
 
   return (
     <div className="h-full flex flex-col space-y-4">
@@ -1301,6 +1369,9 @@ export default function TransferPage() {
           )}
         </div>
       </div>
+
+      {/* Keep-awake banner for iOS device transfers */}
+      {showKeepAwake && <KeepAwakeBanner />}
 
       {/* Duplicates Paused Banner */}
       <AnimatePresence>

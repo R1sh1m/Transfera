@@ -49,6 +49,7 @@ from backend.ios_device import (
     IOSDevice,
     canonical_device_serial,
     check_driver_status,
+    drop_afc_slots,
     is_ios_support_available,
 )
 from backend.ios_device import (
@@ -1648,6 +1649,13 @@ class DeviceBackendManager:
                 # The device is either locked or untrusted, and no other tier
                 # can bypass that.  Re-raise immediately so the API layer
                 # returns the correct status to the frontend.
+                # Lock is transient: drop pooled AFC slots so a stale
+                # session can never report Ready on the next poll — the
+                # next caller reconnects and re-probes trust fresh.
+                try:
+                    drop_afc_slots(serial)
+                except Exception:
+                    pass
                 logger.warning(
                     "DeviceBackend: %s %s terminal for device %s: %s",
                     backend.tier.value,
@@ -1667,6 +1675,10 @@ class DeviceBackendManager:
                             serial,
                             exc,
                         )
+                        try:
+                            drop_afc_slots(serial)
+                        except Exception:
+                            pass
                         raise DeviceLockedError(
                             serial,
                             detail="Your iPhone is locked. Please unlock it and tap "
@@ -1683,6 +1695,10 @@ class DeviceBackendManager:
                             serial,
                             exc,
                         )
+                        try:
+                            drop_afc_slots(serial)
+                        except Exception:
+                            pass
                         raise DeviceNotTrustedError(
                             serial,
                             detail="Please tap 'Trust This Computer' on your iPhone "

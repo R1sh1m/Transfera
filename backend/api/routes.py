@@ -1153,9 +1153,7 @@ async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_lo
                 "name": d.name,
                 "model": d.model,
                 "status": d.status.value,
-                "active_tier": (
-                    tier.value if (tier := mgr.get_device_tier(d.serial)) is not None else serving
-                ),
+                "active_tier": (tier.value if (tier := mgr.get_device_tier(d.serial)) is not None else serving),
             }
             for d in devices
         ],
@@ -1318,6 +1316,13 @@ async def _run_scan_background(session_id: int, source_path: str) -> None:
 # ---------------------------------------------------------------------------
 @router.post("/sessions", response_model=SessionInfo)
 async def create_session(req: SessionCreate, _: None = Depends(require_local_token)) -> SessionInfo:
+    # Latency budget: this endpoint must respond in well under 2s even for
+    # 5k-file device selections (client ECONNABORTED otherwise). It therefore
+    # performs NO device enumeration inline — only DB writes + O(n) path
+    # normalization. Any heavy enumeration belongs in the transfer
+    # background task (_run_transfer_background) or a dedicated background
+    # prescan, never on this request path.
+    create_t0 = time.perf_counter()
     # Resolve source: prefer source_ref, fall back to source_root string
     source_ref = req.source_ref
     if source_ref is None and req.source_root:
@@ -1327,6 +1332,35 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
 
     # Convert to legacy string for DB storage
     source_root_str = source_ref_to_legacy_string(source_ref)
+
+    # Snapshot-based enumeration reuse: when the client passes the scan_id
+    # it received from GET /api/device/ios-preview, validate it against the
+    # frozen listing cache instead of re-walking AFC. Advisory only — a
+    # miss/expired id falls back to normal behavior (same response shape).
+    scan_reuse: dict | None = None
+    if req.preview_scan_id:
+        try:
+            from backend.api.device_preview import find_listing_by_scan_id
+
+            scan_reuse = find_listing_by_scan_id(req.preview_scan_id)
+            if scan_reuse is not None:
+                logger.info(
+                    "Session create reusing preview scan %s (device=%s path=%s total=%d bytes=%d age=%.0fs)",
+                    req.preview_scan_id,
+                    scan_reuse.get("device_id"),
+                    scan_reuse.get("path"),
+                    scan_reuse.get("total"),
+                    scan_reuse.get("total_size_bytes"),
+                    scan_reuse.get("age_s", -1.0),
+                )
+            else:
+                logger.debug(
+                    "Session create scan_id %s not in preview cache (expired/unknown) — normal path",
+                    req.preview_scan_id,
+                )
+        except Exception as exc:
+            logger.debug("Session create scan reuse lookup skipped: %s", exc)
+            scan_reuse = None
 
     if os.path.normpath(source_root_str) == os.path.normpath(req.dest_root):
         raise HTTPException(status_code=400, detail="Source and destination cannot be the same directory")
@@ -1358,8 +1392,8 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
         await session.flush()
 
         # Persist selected_files to DB for consumption during batch building
+        normalized: list[str] = []
         if req.selected_files:
-            normalized = []
             for p in req.selected_files:
                 if p.startswith("ios://"):
                     normalized.append(p.replace("\\", "/").lower())
@@ -1408,6 +1442,14 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
             except Exception:
                 logger.debug("Session %d: selection diagnostics logging skipped", ts.id)
 
+        create_ms = (time.perf_counter() - create_t0) * 1000.0
+        logger.info(
+            "Session %d created in %.0fms (selected=%d scan_reuse=%s)",
+            ts.id,
+            create_ms,
+            len(normalized) if req.selected_files else 0,
+            req.preview_scan_id if scan_reuse is not None else "no",
+        )
         return _session_to_info(ts)
 
 
@@ -3032,6 +3074,12 @@ async def get_media_thumbnail(item_id: int, request: Request):
 
     # File not found anywhere — return placeholder but do NOT permanently mark as failed
     # (the file may be on a disconnected external drive; marking failed prevents future regen)
+    # Update DB status to "not_found" (transient) so retries work when drive reconnects
+    async with session_scope() as session:
+        upd = await session.get(MediaItem, item_id)
+        if upd and upd.thumbnail_status != "not_found":
+            upd.thumbnail_status = "not_found"
+            upd.touch()
     return Response(
         content=_get_placeholder_jpeg(),
         media_type="image/jpeg",
@@ -3100,7 +3148,7 @@ async def regenerate_thumbnails(_: None = Depends(require_local_token)):
             select(MediaItem)
             .options(joinedload(MediaItem.session))
             .where(MediaItem.thumbnail_path.is_(None))
-            .where(MediaItem.final_status == HopStatus.COMPLETED.value)
+            .where(MediaItem.final_status.in_(["completed", "loading", "archived"]))
         )
         result = await session.execute(q)
         items = list(result.unique().scalars().all())
@@ -4108,6 +4156,7 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
         folder_layout=ts.folder_layout,
         total_bytes_volume=ts.total_bytes_volume,
         session_report_path=ts.session_report_path,
+        error_message=ts.error_message,
         created_at=ts.created_at,
         updated_at=ts.updated_at,
         started_at=ts.started_at,

@@ -12,6 +12,7 @@ import {
   RefreshCw,
   X,
   Loader2,
+  Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { API_BASE_URL, getLocalToken } from "@/lib/api-client";
@@ -39,6 +40,18 @@ export interface SourcePreviewPanelProps {
   /** Device sources only: retry reaching the device when preview is empty. */
   onRetryDriver?: () => void;
   isRetryingDriver?: boolean;
+  /** Fired once per source when the preview API answers 423 (device locked)
+   *  so the page can flip the device row + gate transfer actions. */
+  onDeviceLocked?: () => void;
+  /** Fired when a preview fetch succeeds after a lock was reported, so the
+   *  page can clear its locked state (row badge, transfer gates). */
+  onDeviceUnlocked?: () => void;
+  /** When the page already knows the device is locked, force the lock UI
+   *  (hides Import-all, disables Start transfer, hides counts). */
+  deviceLocked?: boolean;
+  /** Reports the backend scan id (when served from a scan cache) so session
+   *  create can pin its totals to this scan. */
+  onScanId?: (scanId: string | null) => void;
 }
 
 function authHeaders(
@@ -889,6 +902,10 @@ function SourcePreviewPanelInner({
   onTryAnotherDriver,
   onRetryDriver,
   isRetryingDriver,
+  onDeviceLocked,
+  deviceLocked: _deviceLocked,
+  onScanId,
+  onDeviceUnlocked,
 }: SourcePreviewPanelProps) {
   const [items, setItems] = useState<MediaPreviewItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -920,6 +937,18 @@ function SourcePreviewPanelInner({
   const [knownSizes, setKnownSizes] = useState<Map<string, number>>(new Map());
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
+  // Consecutive failed preview attempts for this source (timeout or HTTP
+  // error). Success resets it. After 3 in a row the error panel adds a
+  // cable/unlock hint — Retry itself is never taken away.
+  const [failStreak, setFailStreak] = useState(0);
+  // True when the preview API answered 423 (device locked). Drives the lock
+  // panel + hides Import-all / Start transfer / counts until cleared.
+  const [locked, setLocked] = useState(false);
+  const lockNotifiedRef = useRef(false);
+  // Frozen totals per source: the backend scan cache can report a drifting
+  // total across refetches — the UI pins the first value per source so the
+  // header, pills and footer never drift mid-session.
+  const frozenMetaRef = useRef<{ key: string; total: number } | null>(null);
   const [importAllData, setImportAllData] = useState<{
     items: MediaPreviewItem[];
     total: number;
@@ -931,14 +960,21 @@ function SourcePreviewPanelInner({
 
   const abortRef = useRef<AbortController | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  // Latest callbacks without re-triggering the preview fetch effect.
+  const onDeviceLockedRef = useRef(onDeviceLocked);
+  onDeviceLockedRef.current = onDeviceLocked;
+  const onDeviceUnlockedRef = useRef(onDeviceUnlocked);
+  onDeviceUnlockedRef.current = onDeviceUnlocked;
+  const onScanIdRef = useRef(onScanId);
+  onScanIdRef.current = onScanId;
   // Device thumbnails decode over USB — cap at 4 concurrent gated fetches.
-  // Local disk is cheap — allow 8.
+  // Local disk is cheap — allow 6.
   const isDeviceSource = Boolean(deviceSource);
   const thumbQueueRef = useRef<ThumbQueue>(
-    createThumbQueue(isDeviceSource ? 4 : 8),
+    createThumbQueue(isDeviceSource ? 4 : 6),
   );
   useEffect(() => {
-    thumbQueueRef.current.setMaxConcurrent(isDeviceSource ? 4 : 8);
+    thumbQueueRef.current.setMaxConcurrent(isDeviceSource ? 4 : 6);
   }, [isDeviceSource]);
 
   // Adopt the per-source default page size until the user overrides it.
@@ -978,6 +1014,18 @@ function SourcePreviewPanelInner({
       selectedRef.current = new Set();
       setSelected(new Set());
       onSelectionConfirm([], true);
+      // Drop the previous folder's grid + frozen totals + lock state here
+      // (not in the fetch effect) so page/sort turns keep the stale grid
+      // visible while the next page loads — no full-skeleton flash.
+      setItems([]);
+      setMetadata({ total: 0, photos: 0, videos: 0, total_size_bytes: 0 });
+      setTotalPages(1);
+      setPreviewError(null);
+      setLocked(false);
+      setFailStreak(0);
+      lockNotifiedRef.current = false;
+      frozenMetaRef.current = null;
+      onScanIdRef.current?.(null);
     }
   }, [currentSourceKey, deviceSource, onSelectionConfirm]);
 
@@ -1050,13 +1098,31 @@ function SourcePreviewPanelInner({
     setLoading(true);
     setPreviewError(null);
     if (page === 1) {
-      setItems([]);
       setFocusedIndex(null);
     }
 
     // Always respect user-selected page size (default 100) — bounds DOM and thumbnail queue
     const effPageSize = pageSize;
     const url = getPreviewUrl(page, effPageSize, sortBy);
+
+    // Client-side ceiling so the skeleton can never spin forever: abort a
+    // hung preview after 15 s and show the error panel (with Retry) instead.
+    // Cleared on response, error, or effect cleanup (device/page change also
+    // aborts the in-flight request via the cleanup below).
+    const timeout = setTimeout(() => {
+      if (cancelled) return;
+      cancelled = true;
+      try {
+        controller.abort();
+      } catch {
+        /* ignore */
+      }
+      setFailStreak((n) => n + 1);
+      setPreviewError(
+        "Preview timed out after 15 seconds. Your device may be busy — try again.",
+      );
+      setLoading(false);
+    }, 15000);
 
     fetch(url, {
       signal: controller.signal,
@@ -1073,14 +1139,32 @@ function SourcePreviewPanelInner({
           } catch {
             /* keep default */
           }
+          // 423 = device locked mid-preview. Flag it (lock panel, hide
+          // Import-all, gate Start) and notify the page exactly once per
+          // source so it can flip the device row + invalidate caches.
+          if (res.status === 423) {
+            if (!lockNotifiedRef.current) {
+              lockNotifiedRef.current = true;
+              onDeviceLockedRef.current?.();
+            }
+            const lockedErr = new Error(message) as Error & {
+              locked?: boolean;
+            };
+            lockedErr.locked = true;
+            throw lockedErr;
+          }
           throw new Error(message);
         }
         return res.json();
       })
       .then((data) => {
         if (cancelled) return;
+        clearTimeout(timeout);
         // Replace, don't append: pages are navigated, not grown. This
         // bounds the DOM and the concurrent thumbnail work per page.
+        // The previous page's items stay visible until this resolves
+        // (stale-while-revalidate) — pagination/sort never flashes a full
+        // skeleton and never triggers a full rescan (backend scan cache).
         const freshItems = data.items || [];
         setItems(freshItems);
         setKnownSizes((prev) => {
@@ -1091,23 +1175,54 @@ function SourcePreviewPanelInner({
           return next;
         });
         if (page === 1) setFocusedIndex(null);
-        setMetadata({
-          total: data.total || 0,
-          photos: data.photos || 0,
-          videos: data.videos || 0,
-          total_size_bytes: data.total_size_bytes || 0,
-        });
-        setTotalPages(data.pages || 1);
+        // Freeze totals per source: pin the first reported total so later
+        // refetches can't drift the header/pills/footer mid-session.
+        // Page count derives from the frozen total + current page size.
+        const freezeKey = `${currentSourceKey}|${isRecursive}`;
+        const incomingTotal = data.total || 0;
+        let displayTotal = incomingTotal;
+        if (!frozenMetaRef.current || frozenMetaRef.current.key !== freezeKey) {
+          frozenMetaRef.current = { key: freezeKey, total: incomingTotal };
+          setMetadata({
+            total: incomingTotal,
+            photos: data.photos || 0,
+            videos: data.videos || 0,
+            total_size_bytes: data.total_size_bytes || 0,
+          });
+          onScanIdRef.current?.(
+            typeof data.scan_id === "string" ? data.scan_id : null,
+          );
+        } else {
+          displayTotal = frozenMetaRef.current.total;
+        }
+        setTotalPages(
+          Math.max(1, Math.ceil(Math.max(displayTotal, 1) / effPageSize)),
+        );
+        setLocked(false);
+        setFailStreak(0);
+        // Recovered after a lock: tell the page so it clears the row badge
+        // and transfer gates.
+        if (lockNotifiedRef.current) {
+          lockNotifiedRef.current = false;
+          onDeviceUnlockedRef.current?.();
+        }
         setLoading(false);
       })
       .catch((err) => {
         if (err.name === "AbortError" || cancelled) return;
+        clearTimeout(timeout);
+        if ((err as { locked?: boolean }).locked) {
+          setLocked(true);
+        } else {
+          setFailStreak((n) => n + 1);
+        }
         setPreviewError(err?.message || "Preview fetch failed");
         setLoading(false);
       });
 
     return () => {
       cancelled = true;
+      clearTimeout(timeout);
       controller.abort();
     };
   }, [
@@ -1201,6 +1316,8 @@ function SourcePreviewPanelInner({
 
   const handleRetry = useCallback(() => {
     setPage(1);
+    setLocked(false);
+    lockNotifiedRef.current = false;
     setRetryNonce((n) => n + 1);
   }, []);
 
@@ -1419,7 +1536,7 @@ function SourcePreviewPanelInner({
             <span className="text-xs font-semibold text-foreground">
               Source preview
             </span>
-            {!loading && metadata.total > 0 && (
+            {!loading && metadata.total > 0 && !locked && (
               <span className="text-xs text-muted-foreground">
                 {metadata.total} file{metadata.total !== 1 ? "s" : ""} &middot;{" "}
                 {formatBytes(metadata.total_size_bytes)}
@@ -1427,7 +1544,7 @@ function SourcePreviewPanelInner({
               </span>
             )}
           </div>
-          {!loading && items.length > 0 && (
+          {!loading && items.length > 0 && !locked && (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1594,6 +1711,24 @@ function SourcePreviewPanelInner({
                   <p className="text-xs text-muted-foreground max-w-xs">
                     {previewError}
                   </p>
+                  {locked && (
+                    <div className="mt-3 flex flex-col items-center gap-2 text-xs text-muted-foreground max-w-xs">
+                      <p className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+                        <Lock className="w-3.5 h-3.5 shrink-0" />
+                        Device is locked — unlock your iPhone and tap Trust to
+                        continue
+                      </p>
+                      <p className="text-[11px] text-muted-foreground/80">
+                        Transfers pause automatically when the phone locks.
+                        Auto-lock cannot be disabled from this PC.
+                      </p>
+                    </div>
+                  )}
+                  {failStreak >= 3 && !locked && (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400 max-w-xs">
+                      Check your USB cable and make sure the iPhone is unlocked.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -1604,7 +1739,7 @@ function SourcePreviewPanelInner({
                     <RefreshCw className="w-3.5 h-3.5" />
                     Retry
                   </button>
-                  {deviceSource && (
+                  {deviceSource && !locked && (
                     <button
                       type="button"
                       onClick={handleImportAll}
@@ -1724,48 +1859,78 @@ function SourcePreviewPanelInner({
         )}
 
         {/* Bottom action bar */}
-        <div className="flex items-center justify-between pt-1">
-          <div>
-            <p className="text-xs font-normal text-foreground">
-              {selectedCount > 0
-                ? `${selectedCount} selected`
-                : `0 of ${items.length} selected`}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {selectedCount > 0
-                ? `${formatBytes(selectedBytes)} to transfer`
-                : `${metadata.total} total files in folder (${formatBytes(metadata.total_size_bytes)})`}
-            </p>
+        {!locked && (
+          <div className="flex items-center justify-between pt-1">
+            <div>
+              <p className="text-xs font-normal text-foreground">
+                {selectedCount > 0
+                  ? `${selectedCount} selected`
+                  : `0 of ${items.length} selected`}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {selectedCount > 0
+                  ? `${formatBytes(selectedBytes)} to transfer`
+                  : `${metadata.total} total files in folder (${formatBytes(metadata.total_size_bytes)})`}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleImportAll}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-pill text-xs font-normal border border-border text-foreground hover:bg-muted active:scale-[0.95] transition-all"
+              >
+                <Upload className="w-3.5 h-3.5 text-action" />
+                Import all ({metadata.total})
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const paths = Array.from(selected);
+                  onSelectionConfirm(paths);
+                  onTransferStart?.(paths);
+                }}
+                disabled={selectedCount === 0}
+                className={cn(
+                  "inline-flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal transition-all",
+                  selectedCount > 0
+                    ? "bg-action text-white hover:bg-action/90 active:scale-[0.95]"
+                    : "bg-muted text-muted-foreground cursor-default opacity-40",
+                )}
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Start transfer {selectedCount > 0 ? `(${selectedCount})` : ""}
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleImportAll}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-pill text-xs font-normal border border-border text-foreground hover:bg-muted active:scale-[0.95] transition-all"
-            >
-              <Upload className="w-3.5 h-3.5 text-action" />
-              Import all ({metadata.total})
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const paths = Array.from(selected);
-                onSelectionConfirm(paths);
-                onTransferStart?.(paths);
-              }}
-              disabled={selectedCount === 0}
-              className={cn(
-                "inline-flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal transition-all",
-                selectedCount > 0
-                  ? "bg-action text-white hover:bg-action/90 active:scale-[0.95]"
-                  : "bg-muted text-muted-foreground cursor-default opacity-40",
-              )}
-            >
-              <Upload className="w-3.5 h-3.5" />
-              Start transfer {selectedCount > 0 ? `(${selectedCount})` : ""}
-            </button>
+        )}
+        {locked && (
+          <div className="flex items-center justify-between pt-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Lock className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Device locked — unlock iPhone and tap Trust to continue
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-pill text-xs font-normal border border-border text-muted-foreground cursor-default opacity-40"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Import all
+              </button>
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal bg-muted text-muted-foreground cursor-default opacity-40"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Start transfer
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
       <ImportAllModal
         data={importAllData}

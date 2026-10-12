@@ -11,7 +11,7 @@ detection — never a replacement for it.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -67,7 +67,10 @@ async def get_cutoff_datetime(device_id: str) -> datetime | None:
     state = await get_device_state(device_id)
     if state is None or state.last_successful_cutoff is None:
         return None
-    return state.last_successful_cutoff - CUTOFF_SAFETY_OVERLAP
+    cutoff = state.last_successful_cutoff - CUTOFF_SAFETY_OVERLAP
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=UTC)
+    return cutoff
 
 
 async def list_all_device_states() -> list[DeviceImportState]:
@@ -93,6 +96,8 @@ async def upsert_device_state(
     incremental imports.
     """
     device_id = _canonical(device_id)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=UTC)
     async with session_scope() as session:
         result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         state = result.scalar_one_or_none()
@@ -248,4 +253,6 @@ async def compute_cutoff_from_session(
                     cutoff.isoformat(),
                 )
 
+        if cutoff is not None and cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
         return cutoff
