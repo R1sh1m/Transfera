@@ -249,14 +249,31 @@ function MediaThumbCell({
 
   const startFetch = useCallback(() => {
     const absPath = item.abs_path;
+    // Generation guard: retries scheduled here must not fire after a page
+    // turn bumps the queue epoch (reset() clears queued but not in-flight
+    // work; the catch + timer below re-check this before re-queueing).
+    const epochAtStart = thumbQueue.getEpoch();
     const controller = new AbortController();
     fetchAbortRef.current = controller;
     const url = makeThumbnailUrl(item);
+    // Server-driven backoff: a 503 carries Retry-After (seconds); capture
+    // it before throwing so the catch below can honor it instead of the
+    // static USB-relief delays.
+    let retryAfterMs: number | null = null;
 
     fetch(url, { signal: controller.signal })
       .then((res) => {
         if (!mountedRef.current) return null;
-        if (!res.ok) throw new Error(`thumb http ${res.status}`);
+        if (!res.ok) {
+          const ra = res.headers.get("Retry-After");
+          if (ra != null) {
+            const secs = Number(ra);
+            if (Number.isFinite(secs) && secs >= 0) {
+              retryAfterMs = Math.min(Math.max(secs * 1000, 500), 15000);
+            }
+          }
+          throw new Error(`thumb http ${res.status}`);
+        }
         if (isGreyFallbackResponse(res)) {
           throw new Error("thumb grey fallback");
         }
@@ -284,14 +301,25 @@ function MediaThumbCell({
       .catch((err) => {
         if (!mountedRef.current) return;
         if (err instanceof Error && err.name === "AbortError") return;
+        // Off-page cell (page turned while in flight): drop the slot
+        // ownership without touching the new page's accounting and never
+        // schedule a retry for a cell that is no longer visible.
+        if (thumbQueue.getEpoch() !== epochAtStart) {
+          slotHeldRef.current = false;
+          fetchAbortRef.current = null;
+          return;
+        }
         // Free the concurrency slot between attempts so retries don't
         // pin USB throughput while backing off.
         releaseSlot();
         fetchAbortRef.current = null;
         if (retryCountRef.current < THUMB_MAX_AUTO_RETRIES) {
-          const delay = THUMB_RETRY_DELAYS[retryCountRef.current] ?? 4000;
+          const delay =
+            retryAfterMs ?? THUMB_RETRY_DELAYS[retryCountRef.current] ?? 4000;
+          retryAfterMs = null;
           retryTimerRef.current = setTimeout(() => {
             if (!mountedRef.current) return;
+            if (thumbQueue.getEpoch() !== epochAtStart) return;
             retryCountRef.current += 1;
             setRetryCount(retryCountRef.current);
             if (isThumbBlocked(absPath)) {

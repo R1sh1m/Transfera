@@ -151,6 +151,18 @@ function formatDate(dateStr: string): string {
   }
 }
 
+// Stable device identity across Tier 1 / WPD serial formats. Mirrors
+// backend canonical_device_serial: a WPD PnP id often embeds the 40-hex
+// UDID — extracting it keeps import-state lookups and tier matching stable
+// when the serving tier flaps. (Backend canonicalizes too; this keeps the
+// query key stable on the client.)
+function canonicalSerial(serial: string | null | undefined): string | null {
+  if (!serial) return null;
+  const m = serial.match(/[0-9a-fA-F]{40}/);
+  if (m?.[0]) return m[0].toLowerCase();
+  return serial;
+}
+
 // ---------------------------------------------------------------------------
 // SourcePicker — Two distinct entry points
 // ---------------------------------------------------------------------------
@@ -159,9 +171,18 @@ type SourceMode = "none" | "folder" | "device";
 interface SourcePickerProps {
   sourceRef: SourceRef | null;
   onSourceChange: (ref: SourceRef | null) => void;
+  onRecovered?: (
+    devices: NonNullable<
+      import("@/types/api").IOSDeviceRecoverResponse["devices"]
+    >,
+  ) => void;
 }
 
-function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
+function SourcePicker({
+  sourceRef,
+  onSourceChange,
+  onRecovered,
+}: SourcePickerProps) {
   const [mode, setMode] = useState<SourceMode>(
     sourceRef?.type === "device"
       ? "device"
@@ -212,6 +233,21 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
     backendActiveTier !== "tier1";
 
   const recoverMutation = useRecoverIOSDevice();
+  // 10 s cooldown after each recovery settles so users can't hammer the
+  // Apple service / USB stack with rapid retries.
+  const [recoverCooldown, setRecoverCooldown] = useState(false);
+  const recoverSettled = recoverMutation.isSuccess || recoverMutation.isError;
+  useEffect(() => {
+    if (!recoverSettled) return;
+    setRecoverCooldown(true);
+    const t = setTimeout(() => setRecoverCooldown(false), 10000);
+    return () => clearTimeout(t);
+  }, [recoverSettled]);
+  const recoverBusy = recoverMutation.isPending || recoverCooldown;
+  const triggerRecover = useCallback(() => {
+    if (recoverMutation.isPending || recoverCooldown) return;
+    recoverMutation.mutate();
+  }, [recoverMutation, recoverCooldown]);
   const [appleElevationCommand, setAppleElevationCommand] = useState<
     string[] | null
   >(null);
@@ -263,7 +299,12 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
           "No Apple device found. Check your USB connection and try again.",
         );
     }
-  }, [recoverMutation.data]);
+    // Lane 3: forward re-enumerated devices so the page can auto-migrate
+    // the preview source onto the live Tier-1 serial + force a refetch.
+    if (r.devices && r.devices.length > 0) {
+      onRecovered?.(r.devices);
+    }
+  }, [recoverMutation.data, onRecovered]);
 
   // Resolve the initializing spinner when any tier finds a device
   const anyTierFoundDevice = iosAvailable || readyDevices.length > 0;
@@ -595,8 +636,13 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                   </div>
                                 </div>
                                 <button
-                                  onClick={() => recoverMutation.mutate()}
-                                  disabled={recoverMutation.isPending}
+                                  onClick={triggerRecover}
+                                  disabled={recoverBusy}
+                                  title={
+                                    recoverCooldown
+                                      ? "Wait a few seconds before retrying"
+                                      : undefined
+                                  }
                                   className="flex items-center gap-1.5 text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
                                 >
                                   <RefreshCw
@@ -604,7 +650,9 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                   />
                                   {recoverMutation.isPending
                                     ? "Recovering..."
-                                    : "Try Auto-Recovery"}
+                                    : recoverCooldown
+                                      ? "Wait before retrying..."
+                                      : "Try Auto-Recovery"}
                                 </button>
                               </div>
                             );
@@ -642,9 +690,14 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                                 </div>
                                 <button
                                   type="button"
-                                  onClick={() => recoverMutation.mutate()}
-                                  disabled={recoverMutation.isPending}
-                                  className="text-[11px] text-primary hover:underline flex items-center gap-1 shrink-0"
+                                  onClick={triggerRecover}
+                                  disabled={recoverBusy}
+                                  title={
+                                    recoverCooldown
+                                      ? "Wait a few seconds before retrying"
+                                      : undefined
+                                  }
+                                  className="text-[11px] text-primary hover:underline flex items-center gap-1 shrink-0 disabled:opacity-50"
                                 >
                                   <RefreshCw
                                     className={cn(
@@ -947,8 +1000,13 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                           </p>
                           <button
                             type="button"
-                            onClick={() => recoverMutation.mutate()}
-                            disabled={recoverMutation.isPending}
+                            onClick={triggerRecover}
+                            disabled={recoverBusy}
+                            title={
+                              recoverCooldown
+                                ? "Wait a few seconds before retrying"
+                                : undefined
+                            }
                             className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-pill text-xs font-normal active:scale-[0.95] transition-all"
                           >
                             {recoverMutation.isPending ? (
@@ -958,7 +1016,9 @@ function SourcePicker({ sourceRef, onSourceChange }: SourcePickerProps) {
                             )}
                             {recoverMutation.isPending
                               ? "Retrying…"
-                              : "Retry Apple driver"}
+                              : recoverCooldown
+                                ? "Wait before retrying…"
+                                : "Retry Apple driver"}
                           </button>
                         </div>
                       </div>
@@ -2149,6 +2209,7 @@ export default function DeviceSetupPage() {
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const selectedFilesRef = useRef(selectedFiles);
   selectedFilesRef.current = selectedFiles;
+
   const [startError, setStartError] = useState<string | null>(null);
   const [confirmForget, setConfirmForget] = useState(false);
   const [pendingDrive, setPendingDrive] = useState<{
@@ -2191,9 +2252,49 @@ export default function DeviceSetupPage() {
     }
   }, [sourcePath, parseSourcePath]);
 
-  // Device import state for incremental imports
+  // Bumped on every recovery so the device preview panel remounts and
+  // re-fetches from the (possibly re-enumerated) live device.
+  const [previewNonce, setPreviewNonce] = useState(0);
+
+  // Lane 3: after a successful recovery, migrate the preview source onto
+  // the live Tier-1 READY serial whose canonical id matches the current
+  // source (the tier flap changes the raw serial but not the identity).
+  const handleRecovered = useCallback(
+    (
+      devices: NonNullable<
+        import("@/types/api").IOSDeviceRecoverResponse["devices"]
+      >,
+    ) => {
+      setPreviewNonce((n) => n + 1);
+      if (sourceRef?.type !== "device") return;
+      const curCanon = canonicalSerial(sourceRef.device_id);
+      const live = devices.find(
+        (d) =>
+          d.status === "ready" &&
+          d.active_tier === "tier1" &&
+          canonicalSerial(d.serial) === curCanon,
+      );
+      if (live && live.serial !== sourceRef.device_id) {
+        setSourceRef({
+          type: "device",
+          device_id: live.serial,
+          device_path: sourceRef.device_path,
+          device_name: live.name ?? sourceRef.device_name,
+        });
+        showNotification(
+          "success",
+          "iPhone reconnected via Apple driver — preview refreshed",
+        );
+      }
+    },
+    [sourceRef, showNotification],
+  );
+
+  // Device import state for incremental imports. Canonicalize the serial
+  // (WPD PnP id vs UDID) so the query key is stable across tier flaps;
+  // the backend canonicalizes again before the DB lookup.
   const deviceSerial =
-    sourceRef?.type === "device" ? sourceRef.device_id : null;
+    sourceRef?.type === "device" ? canonicalSerial(sourceRef.device_id) : null;
   const { data: deviceImportState } = useDeviceImportState(deviceSerial);
   const clearDeviceState = useClearDeviceImportState();
   const hasDeviceState = !!deviceImportState?.last_successful_cutoff;
@@ -2519,7 +2620,11 @@ export default function DeviceSetupPage() {
         </div>
 
         {/* Source: Two distinct entry points */}
-        <SourcePicker sourceRef={sourceRef} onSourceChange={setSourceRef} />
+        <SourcePicker
+          sourceRef={sourceRef}
+          onSourceChange={setSourceRef}
+          onRecovered={handleRecovered}
+        />
         {sourcePathStale && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-300">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
@@ -2545,7 +2650,10 @@ export default function DeviceSetupPage() {
         {sourceRef?.type === "device" &&
           sourceRef.device_id &&
           sourceRef.device_path && (
-            <div className="border border-border rounded-xl p-3 bg-card">
+            <div
+              key={`device-preview:${sourceRef.device_id}:${previewNonce}`}
+              className="border border-border rounded-xl p-3 bg-card"
+            >
               <SourcePreviewPanel
                 sourcePath={null}
                 deviceSource={{

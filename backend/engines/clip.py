@@ -174,6 +174,13 @@ def start_background_download() -> dict:
                     _download_state["status"] = "downloading"
                 _download_state["last_activity"] = _now()
             ok = ensure_models()
+            if ok:
+                try:
+                    from backend.engines.intelligence import ensure_face_models
+
+                    ensure_face_models()
+                except Exception as exc:
+                    logger.debug("Follow-up face model download skipped: %s", exc)
             with _download_lock:
                 _download_state["status"] = "ready" if ok else "error"
                 if not ok and not _download_state["error"]:

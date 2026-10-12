@@ -13,13 +13,16 @@ export interface ThumbQueue {
 export function createThumbQueue(maxConcurrent = 4): ThumbQueue {
   let max = Math.max(1, maxConcurrent);
   let active = 0;
-  const queue: Array<{ run: () => void; cancelled: boolean }> = [];
+  const queue: Array<{ run: () => void; cancelled: boolean; epoch: number }> =
+    [];
   let epoch = 0;
 
   function drain() {
     while (queue.length > 0 && active < max) {
       const next = queue.shift()!;
-      if (next.cancelled) continue;
+      // Drop grants from a previous page generation: reset() bumps the
+      // epoch, so retries scheduled before a page turn never fire after.
+      if (next.cancelled || next.epoch !== epoch) continue;
       active++;
       next.run();
     }
@@ -27,12 +30,19 @@ export function createThumbQueue(maxConcurrent = 4): ThumbQueue {
 
   return {
     request(onGranted) {
+      // Capture the generation now; the grant fires only if no reset()
+      // happened in between (checked both here and in drain()).
+      const ep = epoch;
+      const guarded = () => {
+        if (ep !== epoch) return;
+        onGranted();
+      };
       if (active < max) {
         active++;
-        onGranted();
+        guarded();
         return () => {};
       }
-      const entry = { run: onGranted, cancelled: false };
+      const entry = { run: guarded, cancelled: false, epoch: ep };
       queue.push(entry);
       return () => {
         entry.cancelled = true;

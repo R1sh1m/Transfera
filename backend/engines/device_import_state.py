@@ -31,11 +31,27 @@ logger = logging.getLogger(__name__)
 CUTOFF_SAFETY_OVERLAP = timedelta(seconds=60)
 
 
+def _canonical(device_id: str) -> str:
+    """Normalize a device serial so WPD PnP ids and UDIDs hit the same row.
+
+    Defensive local import: backend.ios_device must never import this module
+    (it doesn't today), so a top-level import would be safe — but a local
+    import keeps this module importable even if that ever changes.
+    """
+    try:
+        from backend.ios_device import canonical_device_serial
+
+        return canonical_device_serial(device_id)
+    except Exception:
+        return device_id
+
+
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------
 async def get_device_state(device_id: str) -> DeviceImportState | None:
     """Return the import state for a device, or None if no record exists."""
+    device_id = _canonical(device_id)
     async with session_scope() as session:
         result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         return result.scalar_one_or_none()
@@ -76,6 +92,7 @@ async def upsert_device_state(
     Called after a session completes to advance the cutoff for future
     incremental imports.
     """
+    device_id = _canonical(device_id)
     async with session_scope() as session:
         result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         state = result.scalar_one_or_none()
@@ -117,6 +134,7 @@ async def clear_device_state(device_id: str) -> bool:
 
     Returns True if a record was deleted, False if no record existed.
     """
+    device_id = _canonical(device_id)
     async with session_scope() as session:
         result = await session.execute(select(DeviceImportState).where(DeviceImportState.device_id == device_id))
         state = result.scalar_one_or_none()

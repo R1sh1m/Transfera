@@ -140,18 +140,45 @@ async def capabilities(_: None = Depends(require_local_token)) -> CapabilitiesRe
 
 @router.get("/models/status")
 async def model_download_status(_: None = Depends(require_local_token)) -> dict:
-    """On-board AI model presence + background download progress (~207 MB)."""
+    """On-board AI model presence + background download progress (CLIP + Face models, ~400 MB)."""
     try:
         from backend.engines import clip as clip_engine
+        from backend.engines import intelligence as intel_engine
 
-        return clip_engine.download_status()
+        clip_st = clip_engine.download_status()
+        face_st = intel_engine.face_download_status()
+
+        is_downloading = (
+            clip_st.get("status") in ("downloading", "installing-packages")
+            or face_st.get("status") == "downloading"
+        )
+        has_error = clip_st.get("status") == "error" or face_st.get("status") == "error"
+        ready = bool(clip_st.get("ready")) and bool(face_st.get("ready"))
+
+        total_bytes = int(clip_st.get("total_bytes", 0)) + int(face_st.get("total_bytes", 0))
+        downloaded_bytes = int(clip_st.get("downloaded_bytes", 0)) + int(face_st.get("downloaded_bytes", 0))
+
+        status_str = (
+            "downloading"
+            if is_downloading
+            else ("ready" if ready else ("error" if has_error else clip_st.get("status", "idle")))
+        )
+        err_msg = clip_st.get("error") or face_st.get("error")
+
+        return {
+            "status": status_str,
+            "ready": ready,
+            "total_bytes": total_bytes,
+            "downloaded_bytes": downloaded_bytes,
+            "error": err_msg,
+        }
     except Exception as exc:
         return {"status": "error", "ready": False, "error": str(exc)[:200]}
 
 
 @router.post("/models/download")
 async def start_model_download(_: None = Depends(require_local_token)) -> dict:
-    """Start background download of the on-board CLIP models (idempotent).
+    """Start background download of on-board CLIP and Face models (idempotent).
 
     Returns immediately; poll ``GET /models/status`` for progress. The
     Library "Index library" backfill picks up embeddings on its next run
@@ -159,8 +186,11 @@ async def start_model_download(_: None = Depends(require_local_token)) -> dict:
     """
     try:
         from backend.engines import clip as clip_engine
+        from backend.engines import intelligence as intel_engine
 
-        return clip_engine.start_background_download()
+        clip_status = clip_engine.start_background_download()
+        intel_engine.start_background_face_download()
+        return clip_status
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Model download unavailable: {exc}")
 

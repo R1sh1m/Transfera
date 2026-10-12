@@ -245,6 +245,10 @@ def start_background_face_download() -> dict:
 
 def get_capabilities() -> dict:
     """Report which intelligence features are usable on this machine."""
+    try:
+        ensure_seeded_from_bundle()
+    except Exception:
+        pass
     md = models_dir()
     faces_ready = _onnx_available() and all((md / m).is_file() for m in FACE_MODELS)
     clip_ready = _onnx_available() and all((md / m).is_file() for m in CLIP_MODELS)

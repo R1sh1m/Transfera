@@ -385,15 +385,16 @@ async def _walk_ios_directory(serial: str, path: str, _sem: asyncio.Semaphore | 
 
     Returns a flat list of DeviceFileInfo for all files found.
 
-    Subdirectories fan out concurrently, bounded by a semaphore (4, matching
-    the AFC session pool): unbounded fan-out would stampede usbmuxd with one
+    Subdirectories fan out concurrently, bounded by a semaphore (3, leaving
+    one of the 4 AFC pool slots free for listing snapshot browses and gated
+    thumbnail reads): unbounded fan-out would stampede usbmuxd with one
     handshake per folder and starve the transfer streaming off the device.
     """
     from backend.ios_device import DeviceFileInfo
     from backend.tier2_manager import get_device_manager
 
     if _sem is None:
-        _sem = asyncio.Semaphore(4)
+        _sem = asyncio.Semaphore(3)
 
     all_files: list[DeviceFileInfo] = []
     manager = get_device_manager()

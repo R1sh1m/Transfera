@@ -47,6 +47,7 @@ from backend.ios_device import (
     DeviceFileInfo,
     DeviceStatus,
     IOSDevice,
+    canonical_device_serial,
     check_driver_status,
     is_ios_support_available,
 )
@@ -140,11 +141,24 @@ def _drop_shadowed_wpd_rows(
         return devices
 
     drop_serials: set[str] = set()
+    # Canonical identity: a Tier-1 UDID row and a WPD PnP path embedding
+    # that UDID share one canonical key (case-insensitive).
+    ready_canonicals: set[str] = set()
+    for r in ready_nonwpd:
+        if r.serial:
+            try:
+                ready_canonicals.add(canonical_device_serial(r.serial))
+            except Exception:
+                pass
     for w in apple_wpd:
         blob = (w.serial or "").replace("-", "").lower()
         udid_shadow = any((r.serial or "").replace("-", "").lower() in blob for r in ready_nonwpd if r.serial)
+        try:
+            canon_shadow = canonical_device_serial(w.serial) in ready_canonicals
+        except Exception:
+            canon_shadow = False
         lone_shadow = len(apple_wpd) == 1 and len(ready_apple) == 1
-        if udid_shadow or lone_shadow:
+        if udid_shadow or canon_shadow or lone_shadow:
             drop_serials.add(w.serial)
 
     if drop_serials:
@@ -590,12 +604,29 @@ class _BridgeFileReader:
 # Per-device tier preference persistence
 # ---------------------------------------------------------------------------
 def _load_device_tier_prefs() -> dict[str, str]:
-    """Load persisted per-device tier preferences from disk."""
+    """Load persisted per-device tier preferences from disk.
+
+    Keys are canonical device serials (see ``canonical_device_serial``):
+    legacy files keyed by raw WPD PnP paths are migrated on load so a
+    sticky WPD preference does not survive Tier-1 recovery under a new
+    key. On canonical collision the most capable tier wins
+    (tier1 > tier2 > wpd > none).
+    """
     if _DEVICE_TIER_FILE.exists():
         try:
-            return json.loads(_DEVICE_TIER_FILE.read_text(encoding="utf-8"))
+            raw: dict[str, str] = json.loads(_DEVICE_TIER_FILE.read_text(encoding="utf-8"))
         except Exception:
             return {}
+        migrated: dict[str, str] = {}
+        _rank = {"tier1": 3, "tier2": 2, "wpd": 1, "none": 0}
+        for key, value in raw.items():
+            try:
+                ckey = canonical_device_serial(key)
+            except Exception:
+                ckey = key
+            if ckey not in migrated or _rank.get(value, 0) > _rank.get(migrated[ckey], 0):
+                migrated[ckey] = value
+        return migrated
     return {}
 
 
@@ -938,7 +969,14 @@ class DeviceBackendManager:
 
     def get_device_tier(self, serial: str) -> DeviceAccessTier | None:
         """Return which tier is currently serving a specific device."""
-        return self._device_tier_map.get(serial)
+        try:
+            ckey = canonical_device_serial(serial)
+        except Exception:
+            ckey = serial
+        tier = self._device_tier_map.get(ckey)
+        if tier is None and serial != ckey:
+            tier = self._device_tier_map.get(serial)
+        return tier
 
     def get_orchestrator(self):
         """Return the WSL orchestrator (for Tier 2 setup routes)."""
@@ -1022,12 +1060,28 @@ class DeviceBackendManager:
         WPD PnP paths (e.g. ``\\\\?\\usb#vid_05ac...``) are excluded;
         only real iOS UDIDs are tracked.  This lets the waterfall skip
         WPD for iOS devices when prefer_tier2 is active.
+
+        Keys are canonical serials so Tier-1 recovery under a UDID row
+        matches later lookups for the same phone.
         """
+        ios_now: set[str] = set()
         for d in devices:
             if is_ios_serial(d.serial):
-                self._ios_serials.add(d.serial)
-            else:
-                self._ios_serials.discard(d.serial)
+                try:
+                    ios_now.add(canonical_device_serial(d.serial))
+                except Exception:
+                    ios_now.add(d.serial)
+        self._ios_serials |= ios_now
+        for d in devices:
+            if not is_ios_serial(d.serial):
+                try:
+                    ckey = canonical_device_serial(d.serial)
+                except Exception:
+                    ckey = d.serial
+                # A WPD PnP id embedding a Tier-1 UDID canonicalizes to
+                # that UDID -- never discard a live Tier-1 identity.
+                if ckey not in ios_now:
+                    self._ios_serials.discard(ckey)
 
     def _is_ios_device(self, serial: str) -> bool:
         """Return True if *serial* is known to be an iOS UDID.
@@ -1035,8 +1089,17 @@ class DeviceBackendManager:
         Checks both the runtime set (populated by device listings) and
         the static regex, so a serial is identified as iOS even before
         the first successful listing if it matches the UDID pattern.
+        WPD PnP paths are never iOS, even when they embed a UDID --
+        routing a WPD-keyed row through Tier 1 would break the WPD
+        fallback path.
         """
-        return serial in self._ios_serials or is_ios_serial(serial)
+        if serial.startswith(_WPD_PATH_PREFIX) or "vid_" in serial.lower():
+            return False
+        try:
+            ckey = canonical_device_serial(serial)
+        except Exception:
+            ckey = serial
+        return ckey in self._ios_serials or is_ios_serial(serial)
 
     # ------------------------------------------------------------------
     # Waterfall ordering
@@ -1093,7 +1156,13 @@ class DeviceBackendManager:
           always return truncated results.
         """
         is_ios = self._is_ios_device(serial)
-        preferred_tier_str = self._device_tier_prefs.get(serial)
+        try:
+            ckey = canonical_device_serial(serial)
+        except Exception:
+            ckey = serial
+        preferred_tier_str = self._device_tier_prefs.get(ckey)
+        if preferred_tier_str is None and serial != ckey:
+            preferred_tier_str = self._device_tier_prefs.get(serial)
         if preferred_tier_str:
             try:
                 preferred_tier = DeviceAccessTier(preferred_tier_str)
@@ -1213,11 +1282,25 @@ class DeviceBackendManager:
                 for d in devices:
                     is_dup = False
                     d_serial_clean = (d.serial or "").replace("-", "").lower()
+                    try:
+                        d_canonical = canonical_device_serial(d.serial)
+                    except Exception:
+                        d_canonical = d.serial
                     if backend.tier == DeviceAccessTier.WPD:
                         for apple_serial in known_apple_serials:
                             if apple_serial and apple_serial in d_serial_clean:
                                 is_dup = True
                                 break
+                        if not is_dup:
+                            # Canonical identity: a WPD PnP id embedding a
+                            # known Tier-1 UDID is the same phone.
+                            for existing in all_found_devices:
+                                try:
+                                    if canonical_device_serial(existing.serial) == d_canonical:
+                                        is_dup = True
+                                        break
+                                except Exception:
+                                    continue
                     elif any(
                         (d.serial or "").lower() == (existing.serial or "").lower() for existing in all_found_devices
                     ):
@@ -1226,8 +1309,8 @@ class DeviceBackendManager:
                     if not is_dup:
                         all_found_devices.append(d)
                         row_tiers[d.serial] = backend.tier
-                        self._device_tier_map[d.serial] = backend.tier
-                        self._device_tier_prefs[d.serial] = backend.tier.value
+                        self._device_tier_map[d_canonical] = backend.tier
+                        self._device_tier_prefs[d_canonical] = backend.tier.value
                         if backend.tier != DeviceAccessTier.WPD:
                             known_apple_serials.add(d_serial_clean)
                         if primary_tier == DeviceAccessTier.NONE:
@@ -1247,7 +1330,45 @@ class DeviceBackendManager:
 
         if all_found_devices:
             self._classify_serials(all_found_devices)
-            found_serials = {d.serial for d in all_found_devices}
+            # Demote sticky WPD: a Tier-1 READY row for canonical X proves
+            # the Apple driver recovered. A persisted WPD preference for X
+            # (kept under the raw PnP key before canonicalization) must
+            # not keep routing X at WPD.
+            ready_tier1_canonicals: set[str] = set()
+            for d in all_found_devices:
+                if row_tiers.get(d.serial) == DeviceAccessTier.TIER_1 and d.status == DeviceStatus.READY:
+                    try:
+                        ready_tier1_canonicals.add(canonical_device_serial(d.serial))
+                    except Exception:
+                        continue
+            demoted = False
+            for ckey in ready_tier1_canonicals:
+                if self._device_tier_map.get(ckey) == DeviceAccessTier.WPD:
+                    self._device_tier_map[ckey] = DeviceAccessTier.TIER_1
+                    demoted = True
+                if self._device_tier_prefs.get(ckey) == DeviceAccessTier.WPD.value:
+                    self._device_tier_prefs[ckey] = DeviceAccessTier.TIER_1.value
+                    demoted = True
+            # Drop shadowed WPD rows' canonical keys from the tier map so
+            # the PnP-keyed WPD entry cannot linger next to the UDID row.
+            kept_canonicals: set[str] = set()
+            for d in all_found_devices:
+                try:
+                    kept_canonicals.add(canonical_device_serial(d.serial))
+                except Exception:
+                    kept_canonicals.add(d.serial)
+            # Re-key any legacy raw entries that canonicalize into a kept
+            # row (e.g. PnP path embedding the recovered UDID).
+            for raw_key in list(self._device_tier_map):
+                try:
+                    ckey = canonical_device_serial(raw_key)
+                except Exception:
+                    continue
+                if ckey != raw_key and ckey in kept_canonicals and raw_key in self._device_tier_map:
+                    del self._device_tier_map[raw_key]
+                    self._device_tier_prefs.pop(raw_key, None)
+                    demoted = True
+            found_serials = {d.serial for d in all_found_devices} | kept_canonicals
             stale = [s for s in self._device_tier_map if s not in found_serials]
             for s in stale:
                 del self._device_tier_map[s]
@@ -1312,9 +1433,13 @@ class DeviceBackendManager:
 
             try:
                 result = await fn(backend, *args)
-                self._device_tier_map[serial] = backend.tier
+                try:
+                    ckey = canonical_device_serial(serial)
+                except Exception:
+                    ckey = serial
+                self._device_tier_map[ckey] = backend.tier
                 if backend.tier != preferred.tier:
-                    self._device_tier_prefs[serial] = backend.tier.value
+                    self._device_tier_prefs[ckey] = backend.tier.value
                     _save_device_tier_prefs(self._device_tier_prefs)
                 return result
             except (DeviceLockedError, DeviceNotTrustedError) as exc:
@@ -1376,7 +1501,11 @@ class DeviceBackendManager:
                         continue
                 # -- end pymobiledevice3 mapping --
                 error_msg = f"{type(exc).__name__}: {exc}"
-                is_known_device = serial in self._device_tier_map
+                try:
+                    ckey = canonical_device_serial(serial)
+                except Exception:
+                    ckey = serial
+                is_known_device = ckey in self._device_tier_map or serial in self._device_tier_map
 
                 if is_known_device:
                     logger.warning(
@@ -1480,7 +1609,13 @@ class DeviceBackendManager:
 
         Falls back to Tier 1 (AFC) if the device has no tier mapping yet.
         """
-        tier = self._device_tier_map.get(serial)
+        try:
+            ckey = canonical_device_serial(serial)
+        except Exception:
+            ckey = serial
+        tier = self._device_tier_map.get(ckey)
+        if tier is None and serial != ckey:
+            tier = self._device_tier_map.get(serial)
 
         normalised_path = path.replace("\\", "/")
 

@@ -658,6 +658,59 @@ async def _drop_afc_slot(serial: str, slot: _PooledAfcSlot) -> None:
         pass
 
 
+def drop_afc_slots(serial: str | None = None) -> int:
+    """Close and drop pooled AFC slots so the next caller reconnects.
+
+    Parameters
+    ----------
+    serial : str | None
+        Device serial/UDID to drop, or None to drop all slots.
+
+    Matching is by canonical equality (see ``canonical_device_serial``):
+    passing a Tier-1 UDID drops PnP-keyed slots embedding that UDID and
+    vice versa, and UDID case differences are ignored. Ids without an
+    embedded UDID match exactly.
+
+    Slots held by an in-flight op are closed and removed from the pool;
+    their owner's lock is left alone (the op fails, drops the no-longer
+    -pooled slot as a no-op, and releases normally). Returns the number
+    of slots dropped.
+    """
+    with _AFC_POOL_GUARD:
+        if serial is None:
+            keys = list(_AFC_POOL.keys())
+        else:
+            try:
+                wanted = canonical_device_serial(serial)
+            except Exception:
+                wanted = serial
+            keys = []
+            for key in list(_AFC_POOL.keys()):
+                try:
+                    match = canonical_device_serial(key) == wanted
+                except Exception:
+                    match = key == serial
+                if match:
+                    keys.append(key)
+        dropped_slots: list[_PooledAfcSlot] = []
+        for key in keys:
+            slots = _AFC_POOL.pop(key, [])
+            dropped_slots.extend(slots)
+    for slot in dropped_slots:
+        for closable in (slot.afc, slot.lockdown):
+            try:
+                closable.close()
+            except Exception:
+                pass
+    if dropped_slots:
+        logger.info(
+            "Dropped %d pooled AFC slot(s)%s",
+            len(dropped_slots),
+            f" for device {serial}" if serial is not None else "",
+        )
+    return len(dropped_slots)
+
+
 @asynccontextmanager
 async def pooled_afc_service(serial: str):
     """Yield a locked AFC service for one op, reusing pooled sessions."""

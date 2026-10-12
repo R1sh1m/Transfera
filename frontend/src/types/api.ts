@@ -785,6 +785,16 @@ export interface IOSDeviceRecoverResponse {
     needs_bind: string[];
     needs_elevation: boolean;
   };
+  /** Lane 3: re-enumerated devices after recovery (optional, backward-compat). */
+  devices?: {
+    serial: string;
+    name: string;
+    model?: string | null;
+    status: string;
+    active_tier?: string | null;
+  }[];
+  driver_status?: string;
+  active_tier?: string;
 }
 
 export interface Pymobiledevice3InstallResponse {

@@ -668,6 +668,72 @@ async def recover_ios_device(_: None = Depends(require_local_token)) -> dict:
     mgr = get_device_manager()
     result: dict = {"service": {}, "usb": {}, "overall": "no_recovery_needed"}
 
+    # Phase 0: drop stale AFC sessions/slots so wedged lockdown/AFC handles
+    # cannot survive the recovery. Lane 1 provides drop_afc_slots(); guard
+    # for trees where it does not exist yet.
+    try:
+        from backend import ios_device as _ios_mod
+
+        _drop = getattr(_ios_mod, "drop_afc_slots", None)
+        if callable(_drop):
+            try:
+                _drop_result = _drop(None)
+                if asyncio.iscoroutine(_drop_result):
+                    _drop_result = await _drop_result
+                logger.info("Recover: dropped %s AFC slot(s)", _drop_result)
+            except Exception as afc_exc:
+                logger.warning("Recover: drop_afc_slots failed: %s", afc_exc)
+    except Exception as afc_import_exc:
+        logger.debug("Recover: drop_afc_slots unavailable: %s", afc_import_exc)
+
+    # Phase 0b: clear Lane-1 Apple tier prefs if the helper exists. Do NOT
+    # implement device_backend edits here — call only if present.
+    try:
+        from backend import device_backend as _be_mod
+
+        _clear_prefs = getattr(_be_mod, "clear_apple_tier_prefs", None)
+        if callable(_clear_prefs):
+            try:
+                _maybe_coro = _clear_prefs(None)
+                if asyncio.iscoroutine(_maybe_coro):
+                    await _maybe_coro
+            except Exception as prefs_exc:
+                logger.warning("Recover: clear_apple_tier_prefs failed: %s", prefs_exc)
+    except Exception as prefs_import_exc:
+        logger.debug("Recover: clear_apple_tier_prefs unavailable: %s", prefs_import_exc)
+
+    # Phase 0c: purge Apple listing-cache keys so post-recovery browses and
+    # previews re-probe the device instead of serving stale snapshots.
+    # device_preview.py is NOT editable in this lane — reach into its cache
+    # defensively and clear only Apple (ios/wpd) keys.
+    try:
+        from backend.api import device_preview as _preview_mod
+
+        _cache = getattr(_preview_mod, "_listing_cache", None)
+        _lock = getattr(_preview_mod, "_listing_cache_lock", None)
+        if _cache is not None and _lock is not None:
+            with _lock:
+                _apple_keys = [
+                    k
+                    for k in list(_cache.keys())
+                    if isinstance(k, tuple)
+                    and k
+                    and isinstance(k[0], str)
+                    and (
+                        k[0].startswith("ios://")
+                        or k[0].startswith("wpd://")
+                        or "apple" in k[0].lower()
+                        or "iphone" in k[0].lower()
+                        or "ipad" in k[0].lower()
+                    )
+                ]
+                for k in _apple_keys:
+                    _cache.pop(k, None)
+            if _apple_keys:
+                logger.info("Recover: purged %d Apple listing-cache key(s)", len(_apple_keys))
+    except Exception as cache_exc:
+        logger.warning("Recover: listing-cache purge failed: %s", cache_exc)
+
     # Phase 1: ensure the Apple Windows service is running
     service = await mgr.ensure_apple_service_running()
     result["service"] = service
@@ -690,6 +756,42 @@ async def recover_ios_device(_: None = Depends(require_local_token)) -> dict:
 
     if service.get("needs_elevation") and service["state"] != "not_installed":
         result["overall"] = "elevation_required"
+
+    # Phase 3: re-enumerate devices + driver status so the frontend can
+    # auto-migrate the preview source onto the live Tier-1 serial without
+    # a second round-trip. Backward-compat: existing keys untouched.
+    try:
+        if is_ios_support_available():
+            result["driver_status"] = check_driver_status()
+        else:
+            result["driver_status"] = "no_pymobiledevice3"
+    except Exception as drv_exc:
+        logger.warning("Recover: driver status probe failed: %s", drv_exc)
+        result["driver_status"] = "unknown"
+
+    try:
+        from backend.device_backend import get_device_backend_manager as _get_be_mgr
+
+        _be_mgr = _get_be_mgr()
+        devices, tier = await mgr.list_devices()
+        result["devices"] = [
+            {
+                "serial": d.serial,
+                "name": d.name,
+                "model": d.model,
+                "status": d.status.value,
+                "active_tier": (_be_mgr.get_device_tier(d.serial) or tier).value,
+            }
+            for d in devices
+        ]
+        try:
+            result["active_tier"] = (await _be_mgr.get_active_tier()).value
+        except Exception:
+            result["active_tier"] = tier.value
+    except Exception as enum_exc:
+        logger.warning("Recover: device re-enumeration failed: %s", enum_exc)
+        result["devices"] = []
+        result["active_tier"] = "none"
 
     return result
 
@@ -854,10 +956,11 @@ async def get_device_import_state(device_id: str, _: None = Depends(require_loca
     whether a full scan is needed.
     """
     logger.debug("Device import state lookup: device_id=%r", device_id)
-    state = await get_device_state(device_id)
+    canonical_id = canonical_device_serial(device_id)
+    state = await get_device_state(canonical_id)
     if state is None:
         return DeviceImportStateResponse(
-            device_id=device_id,
+            device_id=canonical_id,
             device_name=None,
             last_successful_cutoff=None,
             last_import_session_id=None,
@@ -877,14 +980,15 @@ async def get_device_import_state(device_id: str, _: None = Depends(require_loca
 async def clear_device_import_state(device_id: str, _: None = Depends(require_local_token)) -> dict:
     """Clear/reset the import state for a device (forces full re-scan)."""
     logger.debug("Device import state clear: device_id=%r", device_id)
-    deleted = await clear_device_state(device_id)
+    canonical_id = canonical_device_serial(device_id)
+    deleted = await clear_device_state(canonical_id)
     if not deleted:
         raise HTTPException(
             status_code=404,
             detail=f"No import state found for device: {device_id!r}",
         )
 
-    return {"message": f"Import state cleared for device {device_id}"}
+    return {"message": f"Import state cleared for device {canonical_id}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1576,6 +1680,22 @@ async def _phase_scan_and_create_batches(
 
     if not item_ids:
         if selected_set is not None:
+            cutoff_hint = ""
+            if cutoff_datetime is not None:
+                cutoff_hint = (
+                    f" Incremental cutoff was active (cutoff={cutoff_datetime.isoformat()}): "
+                    "if every selected file is older than the cutoff it was skipped as "
+                    "already-imported — uncheck 'Only import new items' or 'Forget last import' "
+                    "for a full re-scan. Otherwise "
+                )
+                logger.warning(
+                    "Session %d: selective scan yielded 0 items with incremental cutoff %s active "
+                    "(%d selected path(s)) — either all selected files are older than the cutoff "
+                    "or none of the selected paths matched scanned media",
+                    session_id,
+                    cutoff_datetime.isoformat(),
+                    len(selected_set),
+                )
             # Selective-scan mismatch diagnostics: compare scan-time
             # source_root serial against a sample of selected paths so
             # serial flips vs cross-scheme mismatches are distinguishable.
@@ -1613,7 +1733,7 @@ async def _phase_scan_and_create_batches(
             _cmp_text = "; ".join(_cmp_notes) if _cmp_notes else "no samples"
             error_msg = (
                 f"None of the {len(selected_set)} selected file(s) matched scanned media "
-                f"at '{source_root}'. Sampled selection={_diag_sample_display}; "
+                f"at '{source_root}'.{cutoff_hint} Sampled selection={_diag_sample_display}; "
                 f"serial comparison: {_cmp_text}. This may be a path normalisation issue — "
                 "please try again by re-selecting files from the preview panel."
             )
@@ -1623,6 +1743,18 @@ async def _phase_scan_and_create_batches(
                 "The preflight validator counts all files, but the scanner "
                 "only processes media files (images, video, audio, documents)."
             )
+            if cutoff_datetime is not None:
+                error_msg += (
+                    f" Incremental cutoff was active (cutoff={cutoff_datetime.isoformat()}): "
+                    "all files may already have been imported — uncheck 'Only import new items' "
+                    "or 'Forget last import' for a full re-scan."
+                )
+                logger.warning(
+                    "Session %d: scan yielded 0 items with incremental cutoff %s active — "
+                    "all files may be older than the cutoff",
+                    session_id,
+                    cutoff_datetime.isoformat(),
+                )
         logger.warning("Session %d: %s", session_id, error_msg)
         async with session_scope() as session:
             ts = await session.get(TransferSession, session_id)
@@ -2052,7 +2184,6 @@ async def _phase_finalize(session_id: int) -> None:
             ts = await session.get(TransferSession, session_id)
             if (
                 ts is not None
-                and ts.only_new_mode
                 and ts.source_root.startswith("ios://")
                 and ts.status
                 in {
@@ -2082,10 +2213,23 @@ async def _phase_finalize(session_id: int) -> None:
                         session_id,
                     )
                     logger.info(
-                        "Session %d: device import cutoff updated to %s for %s",
+                        "Session %d: device import cutoff updated to %s for %s "
+                        "(only_new_mode=%s, imported=%d, failed=%d)",
                         session_id,
                         new_cutoff.isoformat(),
                         serial,
+                        bool(getattr(ts, "only_new_mode", False)),
+                        ts_imported_files,
+                        ts_failed_files,
+                    )
+                else:
+                    logger.info(
+                        "Session %d: no cutoff computed (only_new_mode=%s, "
+                        "imported=%d, failed=%d) — import state unchanged",
+                        session_id,
+                        bool(getattr(ts, "only_new_mode", False)),
+                        ts_imported_files,
+                        ts_failed_files,
                     )
     except Exception as cutoff_exc:
         logger.error(

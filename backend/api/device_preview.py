@@ -301,6 +301,23 @@ _LISTING_TTL_S = 45.0
 _LISTING_MAX_KEYS = 16
 
 
+# ---------------------------------------------------------------------------
+# iOS thumbnail concurrency gate (listing priority)
+# ---------------------------------------------------------------------------
+# The AFC pool has 4 slots; recursive walks and thumbnail reads compete for
+# them. Thumbnail device reads take this semaphore (3 permits) while the
+# listing/browse path (_listing_quick_snapshot, _fetch_ios_entries browse)
+# deliberately does NOT — so a page turn's single snapshot browse never
+# queues behind a page of in-flight thumbnail reads.
+_IOS_THUMB_MAX_CONCURRENT = 3
+_IOS_THUMB_SEMAPHORE = asyncio.Semaphore(_IOS_THUMB_MAX_CONCURRENT)
+
+# Device video prefix: first N bytes fetched for single-frame extraction.
+# 4 MB halves USB cost vs 8 MB; faststart moov-up-front files still resolve,
+# while moov-at-EOF prefixes keep 503 + Retry-After semantics (never grey).
+_VIDEO_PREFIX_BYTES = 4 * 1024 * 1024
+
+
 class _ListingCacheEntry:
     __slots__ = ("items", "photos", "videos", "total_size", "snapshot", "cached_at")
 
@@ -415,6 +432,24 @@ def _listing_purge_disconnected(current_serials: set) -> None:
         logger.debug("ios-preview listing cache purged %d entries for disconnected devices", len(stale_keys))
 
 
+def _sort_ios_preview_items(items: list, sort_by: str) -> list:
+    """Sort preview items in place per sort_by; returns the same list.
+
+    Extracted from _build_ios_preview_items so a cached walk result can be
+    re-sorted for a different sort_by without re-walking the device.
+    """
+    reverse = sort_by in ("newest", "size_desc", "name_desc")
+    key_fn = (
+        (lambda x: x["mtime"])
+        if sort_by in ("newest", "oldest")
+        else (lambda x: x["size_bytes"])
+        if sort_by in ("size_desc", "size_asc")
+        else (lambda x: x["filename"].lower())
+    )
+    items.sort(key=key_fn, reverse=reverse)
+    return items
+
+
 def _build_ios_preview_items(
     entries: list, *, device_id: str, path: str, recursive: bool, sort_by: str
 ) -> tuple[list, int, int, int]:
@@ -462,16 +497,29 @@ def _build_ios_preview_items(
         if len(items) >= _PREVIEW_MAX_FILES:
             break
 
-    reverse = sort_by in ("newest", "size_desc", "name_desc")
-    key_fn = (
-        (lambda x: x["mtime"])
-        if sort_by in ("newest", "oldest")
-        else (lambda x: x["size_bytes"])
-        if sort_by in ("size_desc", "size_asc")
-        else (lambda x: x["filename"].lower())
-    )
-    items.sort(key=key_fn, reverse=reverse)
+    _sort_ios_preview_items(items, sort_by)
     return items, total_photos, total_videos, total_size
+
+
+def _listing_find_reusable(
+    device_id: str, path: str, recursive: bool, snapshot: tuple[int, str] | None
+) -> tuple[tuple, _ListingCacheEntry] | None:
+    """Find any cached entry for the same walk regardless of sort_by.
+
+    The cache key includes sort_by, but the walk result does not depend on
+    it — when the snapshot matches, the caller can re-sort the cached items
+    instead of re-walking the device. Returns (key, entry) or None.
+    """
+    if snapshot is None:
+        return None
+    with _listing_cache_lock:
+        for k, ent in list(_listing_cache.items()):
+            if len(k) < 3:
+                continue
+            if k[0] == device_id and k[1] == path and bool(k[2]) == bool(recursive):
+                if ent.snapshot is not None and ent.snapshot == snapshot:
+                    return k, ent
+    return None
 
 
 async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive: bool) -> list:
@@ -1201,38 +1249,52 @@ async def ios_preview_directory(
     snap_ms = 0.0
 
     if recursive:
-        # Fast path: serve the cached item list when a single cheap
-        # top-level browse validates it — no full walk. Stale entries
-        # still serve immediately with a background refresh.
+        # Fast path: a fresh cache entry (age <= TTL) serves immediately
+        # WITHOUT awaiting the snapshot browse — that one AFC round trip
+        # would otherwise queue behind in-flight thumbnail reads and stall
+        # every page turn. A background refresh keeps it warm.
+        # Only aged/missing entries pay for a synchronous snapshot check,
+        # and a snapshot match under ANY sort_by re-sorts the cached walk
+        # instead of re-walking the device.
         cached = _listing_cache_get(cache_key)
-        if cached is not None:
+        now = time.monotonic()
+        if cached is not None and (now - cached.cached_at) <= _LISTING_TTL_S:
+            items, total_photos, total_videos, total_size = (
+                cached.items,
+                cached.photos,
+                cached.videos,
+                cached.total_size,
+            )
+            cache_status = "hit"
+            _listing_touch(cache_key, now)
+            _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
+        else:
             _s0 = time.perf_counter()
             snap = await _listing_quick_snapshot(manager, device_id, path)
             snap_ms = (time.perf_counter() - _s0) * 1000.0
-            age = time.monotonic() - cached.cached_at
-            if snap is not None and snap == cached.snapshot:
+            reused = _listing_find_reusable(device_id, path, True, snap)
+            if reused is not None:
+                reuse_key, reuse_ent = reused
+                items = _sort_ios_preview_items(list(reuse_ent.items), sort_by)
+                total_photos, total_videos, total_size = (
+                    reuse_ent.photos,
+                    reuse_ent.videos,
+                    reuse_ent.total_size,
+                )
+                cache_status = "hit" if reuse_key == cache_key else "hit-sort-reuse"
+                _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+            elif cached is not None and snap is None:
+                # Snapshot browse itself failed (transient USB): serve the
+                # aged page now and refresh in the background rather than
+                # blocking on a full walk that will likely fail too.
                 items, total_photos, total_videos, total_size = (
                     cached.items,
                     cached.photos,
                     cached.videos,
                     cached.total_size,
                 )
-                cache_status = "hit"
-                _listing_touch(cache_key, time.monotonic())
-            else:
-                # Stale (snapshot changed) or unvalidatable-but-aged: serve
-                # the cached page now, refresh in the background.
-                items, total_photos, total_videos, total_size = (
-                    cached.items,
-                    cached.photos,
-                    cached.videos,
-                    cached.total_size,
-                )
-                if snap is None and age <= _LISTING_TTL_S:
-                    cache_status = "hit-unvalidated"
-                else:
-                    cache_status = "stale"
-                    _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
+                cache_status = "hit-unvalidated"
+                _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
         if items is None:
             _w0 = time.perf_counter()
             entries = await _fetch_ios_entries(manager, device_id, path, True)
@@ -1262,10 +1324,23 @@ async def ios_preview_directory(
             cache_status = "hit"
             _listing_touch(cache_key, time.monotonic())
         else:
-            items, total_photos, total_videos, total_size = _build_ios_preview_items(
-                entries, device_id=device_id, path=path, recursive=False, sort_by=sort_by
-            )
-            _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+            # Same-walk, different-sort entry: re-sort instead of rebuilding.
+            reused = _listing_find_reusable(device_id, path, False, snap)
+            if reused is not None:
+                _reuse_key, reuse_ent = reused
+                items = _sort_ios_preview_items(list(reuse_ent.items), sort_by)
+                total_photos, total_videos, total_size = (
+                    reuse_ent.photos,
+                    reuse_ent.videos,
+                    reuse_ent.total_size,
+                )
+                cache_status = "hit-sort-reuse"
+                _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+            else:
+                items, total_photos, total_videos, total_size = _build_ios_preview_items(
+                    entries, device_id=device_id, path=path, recursive=False, sort_by=sort_by
+                )
+                _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
 
     assert items is not None
     total_ms = (time.perf_counter() - req_t0) * 1000.0
@@ -1360,7 +1435,10 @@ async def ios_thumbnail(
             partial_bytes: bytes | None = None
             partial_exc: BaseException | None = None
             try:
-                partial_bytes = await _read_device_file_partial(device_id, path, max_bytes=PARTIAL_READ_BYTES)
+                # Gated: listing/snapshot browses never take this semaphore,
+                # so thumbnail reads yield AFC slots to page-turn listings.
+                async with _IOS_THUMB_SEMAPHORE:
+                    partial_bytes = await _read_device_file_partial(device_id, path, max_bytes=PARTIAL_READ_BYTES)
             except Exception as exc:
                 partial_exc = exc
                 logger.debug("iOS partial read raised for %s: %s", path, exc)
@@ -1400,7 +1478,8 @@ async def ios_thumbnail(
             if not jpeg_bytes or len(jpeg_bytes) <= 10:
                 jpeg_bytes = None
                 try:
-                    file_bytes = await read_device_file(device_id, path)
+                    async with _IOS_THUMB_SEMAPHORE:
+                        file_bytes = await read_device_file(device_id, path)
                     if file_bytes and len(file_bytes) > 100:
                         jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail_from_bytes, file_bytes, size)
                         if jpeg_bytes and len(jpeg_bytes) > 10:
@@ -1446,17 +1525,20 @@ async def ios_thumbnail(
                     fail_reason = f"full-read-failed: {exc}"
 
         else:
-            # Video fast path: read only the first 8 MB and extract one
+            # Video fast path: read only the first 4 MB and extract one
             # frame with a single input-seek ffmpeg spawn (no duration
             # probe, no full download). Phone videos with the moov box up
             # front (faststart) resolve immediately; others resolve to a
             # retryable 503 (not a grey 200) so the frontend shows a badge
             # and can retry instead of thinking the thumbnail loaded.
             # ffmpeg runs in the threadpool (blocking subprocess).
-            _VIDEO_PREFIX_BYTES = 8 * 1024 * 1024
+            # NOTE: the prefix read below takes _IOS_THUMB_SEMAPHORE (the
+            # listing/browse path never does) so thumbnails yield AFC slots
+            # to page-turn snapshot browses.
             prefix_bytes: bytes | None = None
             try:
-                prefix_bytes = await _read_device_file_partial(device_id, path, max_bytes=_VIDEO_PREFIX_BYTES)
+                async with _IOS_THUMB_SEMAPHORE:
+                    prefix_bytes = await _read_device_file_partial(device_id, path, max_bytes=_VIDEO_PREFIX_BYTES)
             except Exception as exc:
                 logger.debug("iOS video prefix read raised for %s: %s", path, exc)
                 if _is_transient_thumb_error(exc):

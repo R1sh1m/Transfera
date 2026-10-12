@@ -235,6 +235,23 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Failed to pre-warm ExifTool: %s", exc)
 
+    # Seed AI models from bundle if present (offline installer support),
+    # or kick off background download if on-device AI is enabled but face models are missing.
+    try:
+        from backend.engines.intelligence import (
+            _onnx_available,
+            ensure_seeded_from_bundle,
+            missing_face_models,
+            start_background_face_download,
+        )
+
+        ensure_seeded_from_bundle()
+        if _onnx_available() and missing_face_models():
+            start_background_face_download()
+            logger.info("Auto-started background face model download for missing models")
+    except Exception as exc:
+        logger.debug("AI model seeding check skipped: %s", exc)
+
     # Fire up device manager in background — don't block server startup
     from backend.tier2_manager import get_device_manager
 
