@@ -90,7 +90,7 @@ def _to_near_item(mi: MediaItem) -> NearDuplicateItemSchema:
         width=mi.width,
         height=mi.height,
         date_taken=mi.date_taken,
-        favorite=bool(mi.favorite),
+        favorite=mi.favorite,
         thumbnail_url=_thumb_url(mi),
     )
 
@@ -122,8 +122,8 @@ def _to_media_info(mi: MediaItem) -> MediaItemInfo:
         camera_model=mi.camera_model,
         gps_lat=mi.gps_lat,
         gps_lon=mi.gps_lon,
-        favorite=bool(mi.favorite),
-        trashed=bool(mi.trashed),
+        favorite=mi.favorite,
+        trashed=mi.trashed,
         blur_score=mi.blur_score,
         tags=_tags_of(mi),
         caption=mi.caption,
@@ -222,7 +222,7 @@ async def duplicate_groups(
             "width": mi.width,
             "height": mi.height,
             "date_taken": mi.date_taken,
-            "favorite": bool(mi.favorite),
+            "favorite": mi.favorite,
         }
         for mi in items
     ]
@@ -338,7 +338,7 @@ async def list_people(_: None = Depends(require_local_token)) -> PeopleListRespo
     return PeopleListResponse(
         people=[
             PersonSchema(
-                id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=bool(p.hidden)
+                id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden
             )
             for p in people
         ],
@@ -357,11 +357,10 @@ async def rename_person(
         if p is None:
             raise HTTPException(status_code=404, detail="Person not found")
         p.name = (req.name or "").strip() or None
-        p.touch = getattr(p, "touch", None)
         # Person has no touch(); bump manually
         p.updated_at = datetime.now(UTC)
     return PersonSchema(
-        id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=bool(p.hidden)
+        id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden
     )
 
 
@@ -708,13 +707,10 @@ async def session_manifest(
     vaulted *when* — the OffShoot MHL workflow, democratized.
     Read-only: never touches the pipeline.
     """
-    _, items = await _session_manifest_items(session_id)
-    async with session_scope() as session:
-        sess = await session.get(TransferSession, session_id)
-        name = sess.session_name if sess else ""
+    sess, items = await _session_manifest_items(session_id)
     return SessionManifestResponse(
         session_id=session_id,
-        session_name=name,
+        session_name=sess.session_name,
         item_count=len(items),
         total_bytes=sum(i.file_size for i in items),
         chain_hash=_manifest_chain(items, session_id),
@@ -733,7 +729,7 @@ async def session_verify(
     Detects database tampering or record loss since the transfer ran.
     Read-only.
     """
-    _, items = await _session_manifest_items(session_id)
+    _sess, items = await _session_manifest_items(session_id)
     missing = sum(1 for i in items if not i.blake3)
     chain = _manifest_chain(items, session_id)
     ok = missing == 0

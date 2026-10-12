@@ -987,12 +987,12 @@ async def set_preferred_tier(
         try:
             from backend.device_backend import is_ios_serial as _is_ios_serial
 
-            looks_ios = bool(_is_ios_serial(req.serial))
+            looks_ios = _is_ios_serial(req.serial)
         except Exception:
             looks_ios = False
         if not looks_ios:
             try:
-                looks_ios = bool(mgr._is_ios_device(req.serial))
+                looks_ios = mgr._is_ios_device(req.serial)
             except Exception:
                 looks_ios = False
         if looks_ios:
@@ -1153,7 +1153,9 @@ async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_lo
                 "name": d.name,
                 "model": d.model,
                 "status": d.status.value,
-                "active_tier": (mgr.get_device_tier(d.serial).value if mgr.get_device_tier(d.serial) else serving),
+                "active_tier": (
+                    tier.value if (tier := mgr.get_device_tier(d.serial)) is not None else serving
+                ),
             }
             for d in devices
         ],

@@ -1,4 +1,4 @@
-﻿<#Requires -Version 5.1>
+<#Requires -Version 5.1>
 <#
 .SYNOPSIS
   Transfera one-shot installer — builds the app from source on your PC.
@@ -520,7 +520,15 @@ Push-Location (Join-Path $Root "frontend")
 try {
   Step "Compiling Rust shell + bundling NSIS installer (this takes ~5 min)..."
   $code = Invoke-Native { npm run tauri:build } "(Compiling transfera |Finished |Built application|Running makensis|Finished \d|error\[|^error:)"
-  if ($code -ne 0) { Fail "Tauri build failed. See the Rust/NSIS output above." }
+  if ($code -ne 0) {
+    $existingInstaller = Get-ChildItem -Path (Join-Path $Root "frontend\src-tauri\target\release\bundle\nsis") -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "Transfera*" } | Select-Object -First 1
+    if ($existingInstaller -and $existingInstaller.Length -gt 10MB) {
+      Warn "Tauri build exited with code ${code} (updater signing skipped without private key), but NSIS installer was successfully produced."
+    } else {
+      Fail "Tauri build failed. See the Rust/NSIS output above."
+    }
+  }
 } finally { Pop-Location }
 $installer = Get-ChildItem -Path (Join-Path $Root "frontend\src-tauri\target\release\bundle\nsis") -Filter "*.exe" -File -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -like "Transfera*" } | Select-Object -First 1

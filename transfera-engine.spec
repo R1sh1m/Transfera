@@ -90,7 +90,7 @@ a = Analysis(
         # DB stack
         "aiosqlite",
         "sqlite3",
-        *collect_submodules("sqlalchemy.dialects"),
+        *collect_submodules("sqlalchemy.dialects.sqlite"),
         # Imaging
         "PIL",
         "pillow_heif",
@@ -125,7 +125,8 @@ a = Analysis(
             filter=lambda name: "quantization" not in name
             and "tools" not in name
             and "datasets" not in name
-            and "transformers" not in name,
+            and "transformers" not in name
+            and "backend" not in name,
         ),
         "tokenizers",
         *collect_submodules("tokenizers"),
@@ -158,10 +159,15 @@ a = Analysis(
         # `pytest`, tests/ dirs are not shipped). Excluding them keeps the
         # filters from being re-pulled via other packages' modulegraphs.
         "onnx",
+        "onnxruntime.backend",
         "onnxruntime.quantization",
         "onnxruntime.tools",
         "onnxruntime.datasets",
         "onnxruntime.transformers",
+        "MySQLdb",
+        "pysqlite2",
+        "pycparser.lextab",
+        "pycparser.yacctab",
         "numpy.f2py",
         "numpy.tests",
         "numpy.testing",

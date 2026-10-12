@@ -29,6 +29,7 @@ import math
 import threading
 import time
 from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
@@ -518,7 +519,7 @@ def encode_image(image) -> list[float] | None:
     """Embed a PIL image -> 512-d normalized vector. None on failure."""
     try:
         sess, _ = _get_sessions()
-        out = sess.run(None, {sess.get_inputs()[0].name: _preprocess_image(image)})[0]
+        out: Any = sess.run(None, {sess.get_inputs()[0].name: _preprocess_image(image)})[0]
         row = out[0] if isinstance(out[0], list) else list(out[0])
         return _normalize([float(x) for x in row])
     except Exception as exc:
@@ -530,7 +531,7 @@ def encode_text(text: str) -> list[float] | None:
     """Embed a query string -> 512-d normalized vector. None on failure."""
     try:
         _, sess = _get_sessions()
-        out = sess.run(None, {sess.get_inputs()[0].name: _tokenize(text)})[0]
+        out: Any = sess.run(None, {sess.get_inputs()[0].name: _tokenize(text)})[0]
         row = out[0] if isinstance(out[0], list) else list(out[0])
         return _normalize([float(x) for x in row])
     except Exception as exc:

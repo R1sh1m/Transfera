@@ -23,6 +23,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -53,6 +54,29 @@ function sizeOf(p) {
   } catch {
     return -1;
   }
+}
+
+// -- 0. updater signing configuration ---------------------------------------
+// Tauri errors at bundle time if createUpdaterArtifacts is true and a pubkey
+// is configured but TAURI_SIGNING_PRIVATE_KEY is missing. In local source
+// builds (Install-Transfera.ps1 / dev machines), no private key exists — so
+// createUpdaterArtifacts must be false. In CI release builds, the secret is
+// injected — so createUpdaterArtifacts is dynamically enabled.
+try {
+  const confPath = join(SRC_TAURI, "tauri.conf.json");
+  if (existsSync(confPath)) {
+    const conf = JSON.parse(readFileSync(confPath, "utf-8"));
+    const hasKey = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
+    if (conf.bundle && conf.bundle.createUpdaterArtifacts !== hasKey) {
+      conf.bundle.createUpdaterArtifacts = hasKey;
+      writeFileSync(confPath, JSON.stringify(conf, null, 2) + "\n");
+      ok(
+        `tauri.conf.json: createUpdaterArtifacts set to ${hasKey} (signing key ${hasKey ? "present" : "absent"}).`,
+      );
+    }
+  }
+} catch (err) {
+  warn(`Unable to sync tauri.conf.json updater config: ${err.message}`);
 }
 
 // -- 1. frontend dist (warning only; beforeBuildCommand creates it) --------
