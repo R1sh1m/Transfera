@@ -16,6 +16,8 @@ import type {
   DeviceImportStateListResponse,
   DevicePreferenceRequest,
   DevicePreferenceResponse,
+  DeviceRetryRequest,
+  DeviceRetryResponse,
   DirSizeResponse,
   DiskSpaceResponse,
   FolderMetadataResponse,
@@ -28,6 +30,8 @@ import type {
   PackageVerificationResponse,
   PathValidateResponse,
   PreflightValidateResponse,
+  PreferredTierRequest,
+  PreferredTierResponse,
   Pymobiledevice3InstallResponse,
   SessionCreate,
   SessionInfo,
@@ -704,6 +708,55 @@ export function useSetDevicePreference() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["device-preference"] });
       qc.invalidateQueries({ queryKey: ["ios-devices"] });
+    },
+    onError: (error) => {
+      useTransferStore
+        .getState()
+        .showNotification("error", extractErrorMessage(error));
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Per-device driver picker (preferred tier + retry)
+// ---------------------------------------------------------------------------
+export function useSetPreferredTier() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (req: PreferredTierRequest) => {
+      const { data } = await apiClient.post<PreferredTierResponse>(
+        "/ios-devices/preferred-tier",
+        req,
+      );
+      return data;
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["ios-devices"] });
+      qc.invalidateQueries({ queryKey: ["device-preview"] });
+      qc.invalidateQueries({ queryKey: ["preferred-tier", vars.serial] });
+    },
+    onError: (error) => {
+      useTransferStore
+        .getState()
+        .showNotification("error", extractErrorMessage(error));
+    },
+  });
+}
+
+export function useRetryDevice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (req: DeviceRetryRequest) => {
+      const { data } = await apiClient.post<DeviceRetryResponse>(
+        "/ios-devices/retry",
+        req,
+      );
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ios-devices"] });
+      qc.invalidateQueries({ queryKey: ["device-preview"] });
+      qc.invalidateQueries({ queryKey: ["device-backend-status"] });
     },
     onError: (error) => {
       useTransferStore

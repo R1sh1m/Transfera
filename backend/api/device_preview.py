@@ -432,6 +432,42 @@ def _listing_purge_disconnected(current_serials: set) -> None:
         logger.debug("ios-preview listing cache purged %d entries for disconnected devices", len(stale_keys))
 
 
+def purge_listing_cache_for_serial(serial: str) -> int:
+    """Remove listing-cache entries belonging to *serial*.
+
+    Matches keys where the device id equals the serial, equals its
+    canonical form, or contains the serial/canonical as a substring
+    (covers UDIDs embedded in WPD PnP paths).  Returns the number of
+    keys purged.  Preview logic is otherwise untouched.
+    """
+    try:
+        from backend.ios_device import canonical_device_serial as _canon
+    except Exception:
+        _canon = None  # type: ignore[assignment]
+
+    candidates: set[str] = {serial}
+    if _canon is not None:
+        try:
+            candidates.add(_canon(serial))
+        except Exception:
+            pass
+    lowered = {c.lower() for c in candidates if c}
+
+    purged = 0
+    with _listing_cache_lock:
+        for k in list(_listing_cache.keys()):
+            if not isinstance(k, tuple) or not k or not isinstance(k[0], str):
+                continue
+            key_device = k[0]
+            key_lower = key_device.lower()
+            if key_device in candidates or any(c in key_lower for c in lowered if c):
+                _listing_cache.pop(k, None)
+                purged += 1
+    if purged:
+        logger.info("ios-preview listing cache purged %d key(s) for serial %s", purged, serial)
+    return purged
+
+
 def _sort_ios_preview_items(items: list, sort_by: str) -> list:
     """Sort preview items in place per sort_by; returns the same list.
 

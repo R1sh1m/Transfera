@@ -32,8 +32,6 @@ import {
   Clock,
   RefreshCw,
   RotateCcw,
-  Wifi,
-  Usb,
   X,
 } from "lucide-react";
 import { getDeviceMeta } from "@/lib/device-utils";
@@ -56,6 +54,8 @@ import {
   useDeviceBackendStatus,
   useInstallDriver,
   useRecoverIOSDevice,
+  useSetPreferredTier,
+  useRetryDevice,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
 import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
@@ -72,6 +72,8 @@ import type {
   IOSDeviceInfo,
   SourceRef,
   Tier2StepPreview,
+  DeviceTierChoice,
+  AvailableTierInfo,
 } from "@/types/api";
 import { IOS_SOURCE_PREFIX, sourceRefToString } from "@/types/api";
 import { DeviceFolderBrowser } from "@/components/DeviceFolderBrowser";
@@ -88,52 +90,112 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-function TierBadge({ tier }: { tier?: string | null }) {
-  if (!tier || tier === "none") return null;
+// ---------------------------------------------------------------------------
+// Per-device driver picker (TierSelect)
+// ---------------------------------------------------------------------------
+function tierLabel(tier?: string | null): string {
+  switch (tier) {
+    case "tier1":
+      return "Apple driver";
+    case "wpd":
+      return "Windows USB";
+    case "tier2":
+      return "Linux bridge";
+    case "auto":
+      return "Auto";
+    default:
+      return tier ?? "Unknown";
+  }
+}
 
-  const config = (() => {
-    switch (tier) {
-      case "tier1":
-        return {
-          label: "via Apple driver",
-          title: "Connected via: Apple Mobile Device Support",
-          icon: <Usb className="w-2.5 h-2.5" />,
-          className:
-            "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
-        };
-      case "wpd":
-        return {
-          label: "via USB",
-          title: "Connected via: Windows Portable Devices",
-          icon: <HardDrive className="w-2.5 h-2.5" />,
-          className: "bg-muted text-muted-foreground",
-        };
-      case "tier2":
-        return {
-          label: "via Linux bridge",
-          title: "Connected via: Open-source WSL bridge",
-          icon: <Wifi className="w-2.5 h-2.5" />,
-          className:
-            "bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400",
-        };
-      default:
-        return null;
+const TIER_OPTION_DESCRIPTIONS: Record<string, string> = {
+  auto: "Automatic — try the preferred driver first, fall back to the rest",
+  tier1: "Apple Mobile Device Support",
+  wpd: "Windows Portable Devices (photos only via DCIM)",
+  tier2: "Open-source WSL bridge",
+};
+
+function TierSelect({
+  value,
+  serving,
+  availableTiers,
+  disabled,
+  onChange,
+}: {
+  value: DeviceTierChoice;
+  serving?: string | null;
+  availableTiers?: Record<string, AvailableTierInfo> | null;
+  disabled?: boolean;
+  onChange: (tier: DeviceTierChoice) => void;
+}) {
+  const optionState = (tier: string) => {
+    const info = availableTiers?.[tier];
+    if (!info || info.available) {
+      return {
+        disabled: false,
+        title: TIER_OPTION_DESCRIPTIONS[tier] ?? tierLabel(tier),
+      };
     }
-  })();
+    return {
+      disabled: true,
+      title: info.error || `${tierLabel(tier)} is unavailable`,
+    };
+  };
 
-  if (!config) return null;
+  const t1 = optionState("tier1");
+  const tw = optionState("wpd");
+  const t2 = optionState("tier2");
 
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-0.5 text-[9px] px-1 py-0.5 rounded",
-        config.className,
-      )}
-      title={config.title}
-    >
-      {config.icon}
-      {config.label}
-    </span>
+    <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+      <span className="shrink-0">Driver</span>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value as DeviceTierChoice)}
+        onClick={(e) => e.stopPropagation()}
+        title={
+          serving
+            ? `Now serving via ${tierLabel(serving)}. Your choice is tried first; the rest are always tried as fallback.`
+            : "Your choice is tried first; the rest are always tried as fallback."
+        }
+        className="min-w-0 flex-1 px-1.5 py-1 bg-background border border-border rounded-md text-[10px] text-foreground focus:outline-hidden focus:ring-1 focus:ring-ring transition-colors disabled:opacity-50"
+      >
+        <option value="auto">{`Auto (recommended)`}</option>
+        <option value="tier1" disabled={t1.disabled} title={t1.title}>
+          Apple driver{t1.disabled ? " — unavailable" : ""}
+        </option>
+        <option value="wpd" disabled={tw.disabled} title={tw.title}>
+          Windows USB{tw.disabled ? " — unavailable" : ""}
+        </option>
+        <option value="tier2" disabled={t2.disabled} title={t2.title}>
+          Linux bridge{t2.disabled ? " — unavailable" : ""}
+        </option>
+      </select>
+    </label>
+  );
+}
+
+function TierMismatchNotice({
+  preferred,
+  serving,
+  availableTiers,
+}: {
+  preferred: DeviceTierChoice;
+  serving?: string | null;
+  availableTiers?: Record<string, AvailableTierInfo> | null;
+}) {
+  if (!preferred || preferred === "auto" || !serving || serving === preferred) {
+    return null;
+  }
+  const err = availableTiers?.[preferred]?.error;
+  return (
+    <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-snug">
+      Serving via {tierLabel(serving)}
+      {err
+        ? ` (${tierLabel(preferred)} failed: ${err})`
+        : ` (${tierLabel(preferred)} unavailable)`}
+    </p>
   );
 }
 
@@ -244,6 +306,75 @@ function SourcePicker({
     return () => clearTimeout(t);
   }, [recoverSettled]);
   const recoverBusy = recoverMutation.isPending || recoverCooldown;
+  const setPreferredTier = useSetPreferredTier();
+  const retryDevice = useRetryDevice();
+
+  // Per-device retry: 10 s cooldown scoped to each serial (mirrors the
+  // global recoverCooldown pattern, but one device retrying never blocks
+  // the others).
+  const [retryingMap, setRetryingMap] = useState<Record<string, boolean>>({});
+  const [retryCooldownMap, setRetryCooldownMap] = useState<
+    Record<string, boolean>
+  >({});
+  const retryCooldownTimers = useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
+  useEffect(
+    () => () => {
+      Object.values(retryCooldownTimers.current).forEach(clearTimeout);
+    },
+    [],
+  );
+  const handleRetryDevice = useCallback(
+    async (serial: string) => {
+      if (retryingMap[serial] || retryCooldownMap[serial]) return;
+      setRetryingMap((prev) => ({ ...prev, [serial]: true }));
+      try {
+        const res = await retryDevice.mutateAsync({ serial });
+        useTransferStore
+          .getState()
+          .showNotification(
+            "success",
+            `Device reconnected via ${tierLabel(res.serving_tier)}`,
+          );
+      } catch {
+        // Error toast is already shown by the mutation's onError.
+      } finally {
+        setRetryingMap((prev) => {
+          const next = { ...prev };
+          delete next[serial];
+          return next;
+        });
+        setRetryCooldownMap((prev) => ({ ...prev, [serial]: true }));
+        if (retryCooldownTimers.current[serial]) {
+          clearTimeout(retryCooldownTimers.current[serial]);
+        }
+        retryCooldownTimers.current[serial] = setTimeout(() => {
+          setRetryCooldownMap((prev) => {
+            const next = { ...prev };
+            delete next[serial];
+            return next;
+          });
+        }, 10000);
+      }
+    },
+    [retryDevice, retryingMap, retryCooldownMap],
+  );
+
+  const handleTierChange = useCallback(
+    (serial: string, tier: DeviceTierChoice) => {
+      setPreferredTier.mutate({ serial, tier });
+    },
+    [setPreferredTier],
+  );
+
+  // The preview empty-state ("Try another driver") asks the picker to
+  // expand the device list so the user can pick a different driver.
+  useEffect(() => {
+    const expand = () => setDeviceListExpanded(true);
+    window.addEventListener("transfera:show-drivers", expand);
+    return () => window.removeEventListener("transfera:show-drivers", expand);
+  }, []);
   const triggerRecover = useCallback(() => {
     if (recoverMutation.isPending || recoverCooldown) return;
     recoverMutation.mutate();
@@ -520,6 +651,7 @@ function SourcePicker({
 
         {/* Entry point 2: Connected devices */}
         <div
+          id="source-devices"
           className={cn(
             "border rounded-xl transition-colors",
             isIOS
@@ -846,73 +978,151 @@ function SourcePicker({
                       sourceRef?.type === "device" &&
                       sourceRef.device_id.toLowerCase() ===
                         device.serial.toLowerCase();
+                    const preferred: DeviceTierChoice =
+                      (device.user_tier as
+                        DeviceTierChoice | null | undefined) ?? "auto";
+                    const serving = device.active_tier ?? null;
+                    const isIOSRow =
+                      meta.category === "iphone" ||
+                      meta.category === "ipad" ||
+                      meta.category === "ipod" ||
+                      meta.platformBadge === "iOS" ||
+                      meta.platformBadge === "iPadOS";
+                    const isRetrying = !!retryingMap[device.serial];
+                    const coolingDown = !!retryCooldownMap[device.serial];
+                    const retryBusy = isRetrying || coolingDown;
                     return (
-                      <button
+                      <div
                         key={device.serial}
-                        type="button"
-                        onClick={() => handleSelectDevice(device)}
                         className={cn(
-                          "w-full flex items-center gap-2.5 p-2.5 rounded-lg transition-all text-left active:scale-[0.99]",
+                          "w-full rounded-lg transition-all",
                           isSelected
                             ? "bg-action/10 border-2 border-action text-foreground shadow-xs"
                             : "bg-background hover:bg-muted/60 border border-border",
                         )}
                       >
                         <div
-                          className={cn(
-                            "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                            meta.accentColor.bg,
-                          )}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => handleSelectDevice(device)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              handleSelectDevice(device);
+                            }
+                          }}
+                          className="w-full flex items-center gap-2.5 p-2.5 text-left cursor-pointer active:scale-[0.99]"
                         >
-                          {meta.iconType === "tablet" ? (
-                            <Tablet
-                              className={cn("w-4 h-4", meta.accentColor.text)}
-                            />
-                          ) : meta.iconType === "camera" ? (
-                            <Camera
-                              className={cn("w-4 h-4", meta.accentColor.text)}
-                            />
-                          ) : (
-                            <Smartphone
-                              className={cn("w-4 h-4", meta.accentColor.text)}
-                            />
+                          <div
+                            className={cn(
+                              "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                              meta.accentColor.bg,
+                            )}
+                          >
+                            {meta.iconType === "tablet" ? (
+                              <Tablet
+                                className={cn("w-4 h-4", meta.accentColor.text)}
+                              />
+                            ) : meta.iconType === "camera" ? (
+                              <Camera
+                                className={cn("w-4 h-4", meta.accentColor.text)}
+                              />
+                            ) : (
+                              <Smartphone
+                                className={cn("w-4 h-4", meta.accentColor.text)}
+                              />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-xs font-semibold text-foreground truncate">
+                                {meta.displayName}
+                              </p>
+                              <span
+                                className={cn(
+                                  "text-[9px] px-1.5 py-0.5 rounded-pill border shrink-0",
+                                  meta.accentColor.badgeBg,
+                                  meta.accentColor.badgeText,
+                                  meta.accentColor.border,
+                                )}
+                              >
+                                {meta.platformBadge}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground truncate">
+                              {device.model || meta.categoryLabel}
+                              {device.ios_version &&
+                              device.ios_version.toLowerCase() !== "unknown" &&
+                              !device.ios_version
+                                .toLowerCase()
+                                .includes("android")
+                                ? ` · iOS ${device.ios_version}`
+                                : null}
+                            </p>
+                          </div>
+                          <div
+                            className="flex items-center gap-1.5"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className="text-[9px] px-1.5 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-pill font-medium">
+                              Ready
+                            </span>
+                            {(serving === "tier1" ||
+                              serving === "wpd" ||
+                              serving === "tier2") && (
+                              <span className="text-[9px] text-muted-foreground shrink-0">
+                                via {tierLabel(serving)}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRetryDevice(device.serial)}
+                              disabled={retryBusy}
+                              title={
+                                coolingDown
+                                  ? "Wait a few seconds before retrying this device"
+                                  : "Retry this device"
+                              }
+                              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                            >
+                              {isRetrying ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                            <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                          </div>
+                        </div>
+                        <div
+                          className="px-2.5 pb-2.5 pl-[52px] space-y-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <TierSelect
+                            value={preferred}
+                            serving={serving}
+                            availableTiers={
+                              iosDevices?.available_tiers ?? undefined
+                            }
+                            disabled={setPreferredTier.isPending}
+                            onChange={(tier) =>
+                              handleTierChange(device.serial, tier)
+                            }
+                          />
+                          <TierMismatchNotice
+                            preferred={preferred}
+                            serving={serving}
+                            availableTiers={
+                              iosDevices?.available_tiers ?? undefined
+                            }
+                          />
+                          {preferred === "wpd" && isIOSRow && (
+                            <p className="text-[10px] text-muted-foreground leading-snug">
+                              Windows USB shows photos only (DCIM).
+                            </p>
                           )}
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <p className="text-xs font-semibold text-foreground truncate">
-                              {meta.displayName}
-                            </p>
-                            <span
-                              className={cn(
-                                "text-[9px] px-1.5 py-0.5 rounded-pill border shrink-0",
-                                meta.accentColor.badgeBg,
-                                meta.accentColor.badgeText,
-                                meta.accentColor.border,
-                              )}
-                            >
-                              {meta.platformBadge}
-                            </span>
-                          </div>
-                          <p className="text-[10px] text-muted-foreground truncate">
-                            {device.model || meta.categoryLabel}
-                            {device.ios_version &&
-                            device.ios_version.toLowerCase() !== "unknown" &&
-                            !device.ios_version
-                              .toLowerCase()
-                              .includes("android")
-                              ? ` · iOS ${device.ios_version}`
-                              : null}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <TierBadge tier={device.active_tier} />
-                          <span className="text-[9px] px-1.5 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-pill font-medium">
-                            Ready
-                          </span>
-                          <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                        </div>
-                      </button>
+                      </div>
                     );
                   })}
 
@@ -2297,6 +2507,33 @@ export default function DeviceSetupPage() {
     sourceRef?.type === "device" ? canonicalSerial(sourceRef.device_id) : null;
   const { data: deviceImportState } = useDeviceImportState(deviceSerial);
   const clearDeviceState = useClearDeviceImportState();
+  const retryDevicePreview = useRetryDevice();
+
+  // Empty-preview affordance: reveal the per-device driver picker, or retry
+  // reaching the device straight from the preview panel.
+  const handlePreviewTryAnotherDriver = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("transfera:show-drivers"));
+    requestAnimationFrame(() => {
+      document
+        .getElementById("source-devices")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, []);
+  const handlePreviewRetryDriver = useCallback(() => {
+    if (sourceRef?.type !== "device") return;
+    const serial = sourceRef.device_id;
+    retryDevicePreview.mutate(
+      { serial },
+      {
+        onSuccess: (res) => {
+          showNotification(
+            "success",
+            `Device reconnected via ${tierLabel(res.serving_tier)}`,
+          );
+        },
+      },
+    );
+  }, [sourceRef, retryDevicePreview, showNotification]);
   const hasDeviceState = !!deviceImportState?.last_successful_cutoff;
   const isIOSDevice = sourceRef?.type === "device";
 
@@ -2662,6 +2899,9 @@ export default function DeviceSetupPage() {
                 }}
                 onSelectionConfirm={handleSelectionConfirm}
                 onTransferStart={handleTransferStart}
+                onTryAnotherDriver={handlePreviewTryAnotherDriver}
+                onRetryDriver={handlePreviewRetryDriver}
+                isRetryingDriver={retryDevicePreview.isPending}
               />
             </div>
           )}

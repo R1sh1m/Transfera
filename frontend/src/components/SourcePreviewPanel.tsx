@@ -34,6 +34,11 @@ export interface SourcePreviewPanelProps {
   deviceSource?: { device_id: string; device_path: string } | null;
   onSelectionConfirm: (selectedPaths: string[], quiet?: boolean) => void;
   onTransferStart?: (paths?: string[]) => void;
+  /** Device sources only: reveal the driver picker when preview is empty. */
+  onTryAnotherDriver?: () => void;
+  /** Device sources only: retry reaching the device when preview is empty. */
+  onRetryDriver?: () => void;
+  isRetryingDriver?: boolean;
 }
 
 function authHeaders(
@@ -581,11 +586,17 @@ function EmptyState({
   sourcePath,
   onImportAll,
   isImporting,
+  onTryAnotherDriver,
+  onRetryDriver,
+  isRetryingDriver,
 }: {
   devicePath?: string | null;
   sourcePath?: string | null;
   onImportAll?: () => void;
   isImporting?: boolean;
+  onTryAnotherDriver?: () => void;
+  onRetryDriver?: () => void;
+  isRetryingDriver?: boolean;
 }) {
   const displayFolder = devicePath || sourcePath;
   if (!displayFolder) {
@@ -636,6 +647,40 @@ function EmptyState({
           </>
         )}
       </button>
+      {isDevice && (onTryAnotherDriver || onRetryDriver) && (
+        <div className="space-y-1.5 pt-1">
+          <div className="flex items-center justify-center gap-2">
+            {onTryAnotherDriver && (
+              <button
+                type="button"
+                onClick={onTryAnotherDriver}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-border text-foreground rounded-pill text-xs font-normal hover:bg-muted active:scale-[0.95] transition-all"
+              >
+                Try another driver
+              </button>
+            )}
+            {onRetryDriver && (
+              <button
+                type="button"
+                onClick={onRetryDriver}
+                disabled={isRetryingDriver}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-border text-foreground rounded-pill text-xs font-normal hover:bg-muted active:scale-[0.95] transition-all disabled:opacity-50"
+              >
+                {isRetryingDriver ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                {isRetryingDriver ? "Retrying..." : "Retry"}
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground/80 max-w-xs">
+            An empty folder can mean the wrong driver — switching drivers or
+            retrying often brings photos back.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -841,6 +886,9 @@ function SourcePreviewPanelInner({
   deviceSource,
   onSelectionConfirm,
   onTransferStart,
+  onTryAnotherDriver,
+  onRetryDriver,
+  isRetryingDriver,
 }: SourcePreviewPanelProps) {
   const [items, setItems] = useState<MediaPreviewItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1583,6 +1631,9 @@ function SourcePreviewPanelInner({
                 sourcePath={sourcePath ?? null}
                 onImportAll={handleImportAll}
                 isImporting={loading}
+                onTryAnotherDriver={onTryAnotherDriver}
+                onRetryDriver={onRetryDriver}
+                isRetryingDriver={isRetryingDriver}
               />
             </motion.div>
           )}

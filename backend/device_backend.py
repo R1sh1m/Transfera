@@ -87,6 +87,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _PREFERENCE_DIR = Path.home() / ".transfera"
 _DEVICE_TIER_FILE = _PREFERENCE_DIR / "device_tier_preferences.json"
+_DEVICE_TIER_USER_FILE = _PREFERENCE_DIR / "device_tier_user_prefs.json"
+
+# Valid per-device user override values. "auto" clears the override.
+_VALID_USER_TIERS = frozenset({"auto", "tier1", "wpd", "tier2"})
 
 # Regex for iOS UDID detection.
 # iOS UDIDs are either 40-character hex strings or the "0000XXXX-XXXXXXXX"
@@ -639,6 +643,46 @@ def _save_device_tier_prefs(prefs: dict[str, str]) -> None:
     )
 
 
+def _load_device_tier_user_prefs() -> dict[str, str]:
+    """Load persistent per-device *user* tier overrides from disk.
+
+    Keys are canonical device serials; values are tier names
+    (``tier1`` / ``wpd`` / ``tier2``).  The ``auto`` sentinel is never
+    persisted -- setting ``auto`` removes the key.
+    """
+    if _DEVICE_TIER_USER_FILE.exists():
+        try:
+            raw = json.loads(_DEVICE_TIER_USER_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        cleaned: dict[str, str] = {}
+        if isinstance(raw, dict):
+            # Support both the flat {serial: tier} layout and a wrapped
+            # {"user_overrides": {...}} layout for forward compat.
+            payload = raw.get("user_overrides") if isinstance(raw.get("user_overrides"), dict) else raw
+            for key, value in payload.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    continue
+                if value not in ("tier1", "wpd", "tier2"):
+                    continue
+                try:
+                    ckey = canonical_device_serial(key)
+                except Exception:
+                    ckey = key
+                cleaned[ckey] = value
+        return cleaned
+    return {}
+
+
+def _save_device_tier_user_prefs(prefs: dict[str, str]) -> None:
+    """Persist per-device user tier overrides to disk."""
+    _PREFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    _DEVICE_TIER_USER_FILE.write_text(
+        json.dumps(prefs, indent=2),
+        encoding="utf-8",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Structured error types for iOS device access failures
 # ---------------------------------------------------------------------------
@@ -717,6 +761,11 @@ class DeviceBackendManager:
 
         # Load persisted per-device preferences (serial -> tier value)
         self._device_tier_prefs = _load_device_tier_prefs()
+
+        # Persistent per-device *user* overrides (canonical serial -> tier).
+        # Never written by automatic success tracking -- only via
+        # set_user_tier() / reset_user_tier_preferences().
+        self._device_tier_user_prefs = _load_device_tier_user_prefs()
 
         # Tier 2 probe result (error details)
         self._tier2_error: str | None = None
@@ -946,13 +995,74 @@ class DeviceBackendManager:
         logger.info("DeviceBackend: prefer_tier2 set to %s", value)
 
     def reset_device_tier_preferences(self) -> None:
-        """Clear all per-device tier preference mappings (in-memory and on disk)."""
+        """Clear all per-device tier preference mappings (in-memory and on disk).
+
+        Also clears persistent user overrides so a full reset returns
+        every device to automatic waterfall selection.
+        """
         self._device_tier_prefs = {}
         if _DEVICE_TIER_FILE.exists():
             try:
                 _DEVICE_TIER_FILE.unlink()
             except OSError as exc:
                 logger.warning("Could not delete device tier prefs file: %s", exc)
+        self.reset_user_tier_preferences()
+
+    # ------------------------------------------------------------------
+    # Per-device user tier overrides (persistent, never auto-written)
+    # ------------------------------------------------------------------
+    def _canonical_key(self, serial: str) -> str:
+        try:
+            return canonical_device_serial(serial)
+        except Exception:
+            return serial
+
+    def get_user_tier(self, serial: str) -> str | None:
+        """Return the persistent user override tier for *serial*, if any.
+
+        Returns the tier string (``tier1``/``wpd``/``tier2``) or None when
+        the device is on automatic selection.
+        """
+        store = getattr(self, "_device_tier_user_prefs", None)
+        if store is None:
+            store = self._device_tier_user_prefs = {}
+        ckey = self._canonical_key(serial)
+        tier = self._device_tier_user_prefs.get(ckey)
+        if tier is None and serial != ckey:
+            tier = self._device_tier_user_prefs.get(serial)
+        return tier
+
+    def set_user_tier(self, serial: str, tier: str) -> str:
+        """Persist a per-device user tier override.
+
+        *tier* must be one of ``auto`` / ``tier1`` / ``wpd`` / ``tier2``.
+        ``auto`` clears the override (automatic waterfall selection).
+        Returns the canonical serial the override was stored under.
+        """
+        if tier not in _VALID_USER_TIERS:
+            raise ValueError(f"Invalid tier {tier!r}: expected one of {sorted(_VALID_USER_TIERS)}")
+        if getattr(self, "_device_tier_user_prefs", None) is None:
+            self._device_tier_user_prefs = {}
+        ckey = self._canonical_key(serial)
+        if tier == "auto":
+            self._device_tier_user_prefs.pop(ckey, None)
+            if serial != ckey:
+                self._device_tier_user_prefs.pop(serial, None)
+        else:
+            self._device_tier_user_prefs[ckey] = tier
+            if serial != ckey:
+                self._device_tier_user_prefs.pop(serial, None)
+        _save_device_tier_user_prefs(self._device_tier_user_prefs)
+        return ckey
+
+    def reset_user_tier_preferences(self) -> None:
+        """Clear all per-device user tier overrides (in-memory and on disk)."""
+        self._device_tier_user_prefs = {}
+        if _DEVICE_TIER_USER_FILE.exists():
+            try:
+                _DEVICE_TIER_USER_FILE.unlink()
+            except OSError as exc:
+                logger.warning("Could not delete device tier user prefs file: %s", exc)
 
     async def get_active_tier(self) -> DeviceAccessTier:
         """Return the overall active tier (first *available* backend in waterfall order)."""
@@ -1104,7 +1214,12 @@ class DeviceBackendManager:
     # ------------------------------------------------------------------
     # Waterfall ordering
     # ------------------------------------------------------------------
-    def _waterfall_order(self, is_ios_query: bool = False) -> list[DeviceBackend]:
+    def _waterfall_order(
+        self,
+        is_ios_query: bool = False,
+        serial: str | None = None,
+        override_tier: str | None = None,
+    ) -> list[DeviceBackend]:
         """
         Return all backends in the order they should be tried.
 
@@ -1118,6 +1233,17 @@ class DeviceBackendManager:
           AFC filesystem that the user actually needs.  Only AFC (Tier 1)
           and the WSL bridge (Tier 2) support complete iOS filesystem
           access.
+
+        Per-device user override (serial set):
+          When a persistent user override exists for *serial* and the
+          corresponding backend is configured, it is moved to the front;
+          the remaining backends keep default waterfall order so the
+          full fallback chain is always tried.
+
+        One-shot override (*override_tier* set):
+          An explicit, non-persisted tier for a single operation (e.g. a
+          retry probe).  Takes precedence over the stored user override
+          and never touches ``_device_tier_user_prefs``.
         """
         all_backends: list[DeviceBackend] = [self._tier1, self._tier2]
         if self._wpd and self._wpd.is_configured:
@@ -1138,15 +1264,41 @@ class DeviceBackendManager:
         if is_ios_query:
             order = [b for b in order if b.tier != DeviceAccessTier.WPD]
 
+        # Per-device user override first (when configured).  The rest
+        # keep default waterfall order so fallback always tries them.
+        # An explicit one-shot *override_tier* wins over the stored
+        # override and never touches _device_tier_user_prefs.
+        effective_tier: str | None = None
+        if override_tier in ("tier1", "wpd", "tier2"):
+            effective_tier = override_tier
+        elif serial is not None:
+            try:
+                effective_tier = self.get_user_tier(serial)
+            except Exception:
+                effective_tier = None
+        if effective_tier in ("tier1", "wpd", "tier2"):
+            try:
+                wanted = DeviceAccessTier(effective_tier)
+            except ValueError:
+                wanted = None
+            if wanted is not None:
+                # iOS isolation wins over a stale WPD override.
+                if not (is_ios_query and wanted == DeviceAccessTier.WPD):
+                    match = next((b for b in order if b.tier == wanted), None)
+                    if match is not None and match.is_configured:
+                        order = [match] + [b for b in order if b is not match]
+
         return order
 
-    def _resolve_backend(self, serial: str) -> DeviceBackend:
+    def _resolve_backend(self, serial: str, override_tier: str | None = None) -> DeviceBackend:
         """
         Resolve which backend to try first for a given device.
 
-        Uses per-device persisted preference as an optimization hint.
-        If the preferred backend isn't available, falls through to the
-        normal waterfall order -- this method never blocks the chain.
+        Priority: one-shot *override_tier* (when given) > persistent user
+        override (when configured) > per-device automatic preference hint
+        > first configured backend in waterfall order.  If the preferred
+        backend isn't available, the caller falls through to the normal
+        waterfall order -- this method never blocks the chain.
 
         Strict type filtering:
           If the serial matches an iOS UDID pattern, WPD is NEVER
@@ -1160,6 +1312,26 @@ class DeviceBackendManager:
             ckey = canonical_device_serial(serial)
         except Exception:
             ckey = serial
+        # 1. One-shot override, then persistent user override (when that
+        # backend is configured).  Neither path writes user prefs here.
+        user_tier_str: str | None = None
+        if override_tier in ("tier1", "wpd", "tier2"):
+            user_tier_str = override_tier
+        else:
+            try:
+                user_tier_str = self.get_user_tier(serial)
+            except Exception:
+                user_tier_str = None
+        if user_tier_str in ("tier1", "wpd", "tier2"):
+            try:
+                user_tier = DeviceAccessTier(user_tier_str)
+            except ValueError:
+                user_tier = None
+            if user_tier is not None and not (is_ios and user_tier == DeviceAccessTier.WPD):
+                for backend in self._waterfall_order(is_ios_query=is_ios, serial=serial, override_tier=override_tier):
+                    if backend.tier == user_tier and backend.is_configured:
+                        return backend
+        # 2. Automatic last-successful-tier hint (never a user override).
         preferred_tier_str = self._device_tier_prefs.get(ckey)
         if preferred_tier_str is None and serial != ckey:
             preferred_tier_str = self._device_tier_prefs.get(serial)
@@ -1185,9 +1357,21 @@ class DeviceBackendManager:
 
         return order[0] if order else self._tier1
 
-    def _fallback_chain(self, preferred: DeviceBackend, is_ios: bool) -> list[DeviceBackend]:
-        """Return the ordered fallback backends after *preferred*."""
-        order = self._waterfall_order(is_ios_query=is_ios)
+    def _fallback_chain(
+        self,
+        preferred: DeviceBackend,
+        is_ios: bool,
+        serial: str | None = None,
+        override_tier: str | None = None,
+    ) -> list[DeviceBackend]:
+        """Return the ordered fallback backends after *preferred*.
+
+        When *serial* is given the user-override-aware waterfall order is
+        used so the chain is [user_tier] + rest in default order.  An
+        explicit *override_tier* takes precedence over the stored override
+        for this chain only and never touches user prefs.
+        """
+        order = self._waterfall_order(is_ios_query=is_ios, serial=serial, override_tier=override_tier)
         try:
             idx = order.index(preferred)
             return order[idx + 1 :]
@@ -1402,6 +1586,7 @@ class DeviceBackendManager:
         operation: str,
         fn,
         *args,
+        override_tier: str | None = None,
     ):
         """
         Run an operation with the 3-step waterfall.
@@ -1418,17 +1603,30 @@ class DeviceBackendManager:
         3. If all fail, raise a single error with per-step details.
         """
         is_ios = self._is_ios_device(serial)
-        preferred = self._resolve_backend(serial)
-        chain = [preferred] + self._fallback_chain(preferred, is_ios)
+        preferred = self._resolve_backend(serial, override_tier=override_tier)
+        chain = [preferred] + self._fallback_chain(preferred, is_ios, serial=serial, override_tier=override_tier)
         attempted: list[tuple[DeviceAccessTier, str]] = []
         last_exc: Exception | None = None
+        seen: set[DeviceAccessTier] = set()
 
         for backend in chain:
+            if backend.tier in seen:
+                continue
+            seen.add(backend.tier)
             if not backend.is_configured:
                 continue
 
-            probe = await backend.is_available()
+            # Live re-probe per attempt: never skip a fallback backend due
+            # to a stale configured/available snapshot.  Unavailable tiers
+            # are recorded in attempted[] for diagnostics.
+            try:
+                probe = await backend.is_available()
+            except Exception as exc:
+                attempted.append((backend.tier, f"{type(exc).__name__}: {exc}"))
+                last_exc = exc
+                continue
             if not probe.available:
+                attempted.append((backend.tier, probe.error or "not available"))
                 continue
 
             try:
@@ -1437,6 +1635,9 @@ class DeviceBackendManager:
                     ckey = canonical_device_serial(serial)
                 except Exception:
                     ckey = serial
+                # Serving-tier bookkeeping only: the automatic map/prefs may
+                # be updated, but a persistent user override is NEVER
+                # overwritten here.
                 self._device_tier_map[ckey] = backend.tier
                 if backend.tier != preferred.tier:
                     self._device_tier_prefs[ckey] = backend.tier.value
@@ -1540,6 +1741,7 @@ class DeviceBackendManager:
         self,
         serial: str,
         path: str,
+        override_tier: str | None = None,
     ) -> list[DeviceFileInfo]:
         """Browse a directory on a device with automatic 3-step fallback."""
 
@@ -1553,12 +1755,27 @@ class DeviceBackendManager:
         async def _browse(backend: DeviceBackend, p: str):
             return await backend.browse(serial, p)
 
-        return await self._run_operation(serial, "browse", _browse, normalised_path)
+        return await self._run_operation(serial, "browse", _browse, normalised_path, override_tier=override_tier)
+
+    async def browse_device_with_override(
+        self,
+        serial: str,
+        path: str,
+        override_tier: str | None = None,
+    ) -> list[DeviceFileInfo]:
+        """Browse with an explicit one-shot tier override (never persisted).
+
+        Convenience wrapper around :meth:`browse_device`; the override only
+        reorders the waterfall for this call and never touches
+        ``_device_tier_user_prefs``.
+        """
+        return await self.browse_device(serial, path, override_tier=override_tier)
 
     async def get_device_file_info(
         self,
         serial: str,
         path: str,
+        override_tier: str | None = None,
     ) -> DeviceFileInfo:
         """Get file info with automatic 3-step fallback."""
 
@@ -1567,12 +1784,13 @@ class DeviceBackendManager:
         async def _file_info(backend: DeviceBackend, p: str):
             return await backend.file_info(serial, p)
 
-        return await self._run_operation(serial, "file_info", _file_info, normalised_path)
+        return await self._run_operation(serial, "file_info", _file_info, normalised_path, override_tier=override_tier)
 
     async def read_device_file(
         self,
         serial: str,
         path: str,
+        override_tier: str | None = None,
     ) -> bytes:
         """Read a file from the device with automatic 3-step fallback."""
 
@@ -1581,13 +1799,14 @@ class DeviceBackendManager:
         async def _read(backend: DeviceBackend, p: str):
             return await backend.read_file(serial, p)
 
-        return await self._run_operation(serial, "read", _read, normalised_path)
+        return await self._run_operation(serial, "read", _read, normalised_path, override_tier=override_tier)
 
     async def read_device_file_partial(
         self,
         serial: str,
         path: str,
         max_bytes: int,
+        override_tier: str | None = None,
     ) -> bytes | None:
         """Read a file prefix with automatic 3-step fallback (thumbnail fast path)."""
 
@@ -1596,7 +1815,9 @@ class DeviceBackendManager:
         async def _read_partial(backend: DeviceBackend, p: str):
             return await backend.read_partial(serial, p, max_bytes)
 
-        return await self._run_operation(serial, "read_partial", _read_partial, normalised_path)
+        return await self._run_operation(
+            serial, "read_partial", _read_partial, normalised_path, override_tier=override_tier
+        )
 
     def create_file_reader(self, serial: str, path: str) -> Any:
         """
@@ -1645,6 +1866,30 @@ class DeviceBackendManager:
         for backend in self._waterfall_order(is_ios_query=False):
             results.append(await backend.is_available())
         return results
+
+    async def get_available_tiers(self) -> dict[str, dict[str, Any]]:
+        """Return per-tier availability for UI consumption.
+
+        Shape: ``{tier_value: {"available": bool, "error": str | None}}``.
+        Covers tier1/wpd/tier2; unconfigured backends report
+        available=False with an explanatory error.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for backend in self._waterfall_order(is_ios_query=False):
+            try:
+                probe = await backend.is_available()
+                out[backend.tier.value] = {
+                    "available": bool(probe.available),
+                    "error": probe.error,
+                }
+            except Exception as exc:
+                out[backend.tier.value] = {
+                    "available": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        for tier_value in ("tier1", "wpd", "tier2"):
+            out.setdefault(tier_value, {"available": False, "error": "not configured"})
+        return out
 
     # Legacy compatibility -- callers that expect a 2-tuple
     async def probe_both_tiers(self) -> tuple[TierProbeResult, TierProbeResult]:

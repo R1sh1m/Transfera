@@ -623,6 +623,15 @@ class IOSDeviceInfo(BaseModel):
         None,
         description="Which tier is serving this device: 'tier1' (Apple driver) or 'tier2' (WSL bridge)",
     )
+    user_tier: str | None = Field(
+        None,
+        description="Persistent user override tier ('tier1'/'wpd'/'tier2'); None means automatic",
+    )
+
+
+class AvailableTierInfo(BaseModel):
+    available: bool
+    error: str | None = None
 
 
 class IOSDeviceListResponse(BaseModel):
@@ -633,6 +642,10 @@ class IOSDeviceListResponse(BaseModel):
         description="Global preference: when True, Tier 2 (open-source bridge) is tried first",
     )
     devices: list[IOSDeviceInfo]
+    available_tiers: dict[str, AvailableTierInfo] | None = Field(
+        None,
+        description="Per-tier availability for the driver picker UI",
+    )
 
 
 class IOSBrowseRequest(BaseModel):
@@ -711,6 +724,53 @@ class DevicePreferenceRequest(BaseModel):
     prefer_tier2: bool = Field(
         description="Set to True to prefer the open-source bridge over Apple's driver",
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-device tier preference (persistent driver picker with fallback)
+# ---------------------------------------------------------------------------
+class DeviceTierPreferenceRequest(BaseModel):
+    serial: str = Field(..., min_length=1, description="Device serial / UDID")
+    tier: Literal["auto", "tier1", "tier2", "wpd"] = Field(
+        ...,
+        description="Preferred tier; 'auto' clears the override",
+    )
+
+
+class DeviceTierPreferenceResponse(BaseModel):
+    serial: str = Field(description="Serial as requested")
+    tier: str = Field(description="Effective tier: 'auto' when no override is set")
+    canonical_serial: str = Field(description="Canonical serial the override is keyed by")
+    warning: str | None = Field(
+        default=None,
+        description="Non-blocking notice, e.g. WPD selected for an iOS device",
+    )
+
+
+class DeviceRetryAttempt(BaseModel):
+    tier: str
+    ok: bool
+    error: str | None = None
+
+
+class DeviceRetryRequest(BaseModel):
+    serial: str = Field(..., min_length=1, description="Device serial / UDID")
+    tier: Literal["tier1", "tier2", "wpd"] | None = Field(
+        None,
+        description="Optional one-shot tier for this retry only (not persisted)",
+    )
+    persist: bool = Field(
+        False,
+        description="When True with tier set, persist the tier as the user override",
+    )
+
+
+class DeviceRetryResponse(BaseModel):
+    serial: str
+    serving_tier: str
+    preferred_tier: str = Field(description="'auto' when no user override is set")
+    attempted: list[DeviceRetryAttempt] = Field(default_factory=list)
+    devices: list[dict] | None = Field(None, description="Re-enumerated device rows")
 
 
 # ---------------------------------------------------------------------------

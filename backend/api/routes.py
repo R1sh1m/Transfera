@@ -36,6 +36,10 @@ from backend.api.schemas import (
     DeviceImportStateResponse,
     DevicePreferenceRequest,
     DevicePreferenceResponse,
+    DeviceRetryRequest,
+    DeviceRetryResponse,
+    DeviceTierPreferenceRequest,
+    DeviceTierPreferenceResponse,
     DirSizeRequest,
     DirSizeResponse,
     DiskSpaceRequest,
@@ -247,6 +251,14 @@ async def device_backend_status(request: Request) -> dict:
     init_task = getattr(request.app.state, "device_manager_init_task", None)
     initializing = init_task is not None and not init_task.done()
     active_tier = (await mgr.get_active_tier()).value if not initializing else "none"
+    try:
+        available_tiers = await mgr.get_available_tiers()
+    except Exception:
+        available_tiers = {}
+    try:
+        user_overrides = dict(getattr(mgr, "_device_tier_user_prefs", {}) or {})
+    except Exception:
+        user_overrides = {}
     return {
         "apple_driver_installable": mgr.apple_driver_installable,
         "apple_driver_package_name": mgr.apple_driver_package_name,
@@ -259,6 +271,9 @@ async def device_backend_status(request: Request) -> dict:
         "tier2_available": mgr.tier2_available,
         "tier2_error": mgr.tier2_error,
         "ios_available": mgr.ios_available,
+        "available_tiers": available_tiers,
+        "user_overrides": user_overrides,
+        "user_overrides_count": len(user_overrides),
     }
 
 
@@ -364,10 +379,16 @@ async def list_ios_devices(_: None = Depends(require_local_token)) -> IOSDeviceL
             devices=[],
         )
 
+    try:
+        available_tiers = await backend_mgr.get_available_tiers()
+    except Exception:
+        available_tiers = None
+
     return IOSDeviceListResponse(
         available=True,
         driver_status=driver_status,
         prefer_tier2=backend_mgr.prefer_tier2,
+        available_tiers=available_tiers,
         devices=[
             IOSDeviceInfoSchema(
                 serial=d.serial,
@@ -378,6 +399,7 @@ async def list_ios_devices(_: None = Depends(require_local_token)) -> IOSDeviceL
                 status=d.status.value,
                 error_detail=getattr(d, "error_detail", None),
                 active_tier=(backend_mgr.get_device_tier(d.serial) or tier).value,
+                user_tier=backend_mgr.get_user_tier(d.serial),
             )
             for d in devices
         ],
@@ -920,6 +942,223 @@ async def set_device_preference(
     mgr = get_device_backend_manager()
     mgr.prefer_tier2 = req.prefer_tier2
     return DevicePreferenceResponse(prefer_tier2=mgr.prefer_tier2)
+
+
+# ---------------------------------------------------------------------------
+# Per-device tier preference (persistent driver picker with fallback)
+# ---------------------------------------------------------------------------
+@router.get("/ios-devices/preferred-tier", response_model=DeviceTierPreferenceResponse)
+async def get_preferred_tier(
+    serial: str = Query(..., min_length=1), _: None = Depends(require_local_token)
+) -> DeviceTierPreferenceResponse:
+    """Return the persistent user tier override for a device ('auto' if none)."""
+    mgr = get_device_backend_manager()
+    user_tier = mgr.get_user_tier(serial)
+    try:
+        ckey = canonical_device_serial(serial)
+    except Exception:
+        ckey = serial
+    return DeviceTierPreferenceResponse(
+        serial=serial,
+        tier=user_tier or "auto",
+        canonical_serial=ckey,
+    )
+
+
+@router.post("/ios-devices/preferred-tier", response_model=DeviceTierPreferenceResponse)
+async def set_preferred_tier(
+    req: DeviceTierPreferenceRequest, _: None = Depends(require_local_token)
+) -> DeviceTierPreferenceResponse:
+    """Set or clear the persistent per-device tier override.
+
+    ``tier="auto"`` clears the override (automatic waterfall selection).
+    The override only reorders the waterfall -- the remaining tiers are
+    always tried as fallback.
+    """
+    mgr = get_device_backend_manager()
+    try:
+        ckey = mgr.set_user_tier(req.serial, req.tier)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    effective = mgr.get_user_tier(req.serial) or "auto"
+    warning: str | None = None
+    if req.tier == "wpd":
+        looks_ios = False
+        try:
+            from backend.device_backend import is_ios_serial as _is_ios_serial
+
+            looks_ios = bool(_is_ios_serial(req.serial))
+        except Exception:
+            looks_ios = False
+        if not looks_ios:
+            try:
+                looks_ios = bool(mgr._is_ios_device(req.serial))
+            except Exception:
+                looks_ios = False
+        if looks_ios:
+            warning = (
+                "WPD provides DCIM-only MTP view for iPhones; full filesystem needs "
+                "Apple driver or Linux bridge. Override saved but ignored for iOS filesystem ops."
+            )
+    return DeviceTierPreferenceResponse(
+        serial=req.serial,
+        tier=effective,
+        canonical_serial=ckey,
+        warning=warning,
+    )
+
+
+@router.post("/ios-devices/retry", response_model=DeviceRetryResponse)
+async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_local_token)) -> DeviceRetryResponse:
+    """Retry reaching a device after clearing stale per-device caches.
+
+    Steps (scoped to *serial* only):
+      1. Optionally persist ``tier`` when ``persist=True``; otherwise a
+         provided ``tier`` is a one-shot override for this retry only.
+      2. Drop the serial from the automatic tier cache (``_device_tier_map``).
+      3. Purge listing-cache keys for the serial via
+         ``purge_listing_cache_for_serial``.
+      4. Drop AFC slots when the backend exposes ``drop_afc_slots``.
+      5. Re-enumerate via ``manager.list_devices()`` and probe
+         ``browse_device(serial, /DCIM)`` (falling back to ``file_info``),
+         collecting the per-tier ``attempted`` trail.
+
+    Terminal Locked/NotTrusted errors abort without further fallback and
+    are surfaced with their HTTP status preserved.
+    """
+    from backend.device_backend import DeviceAccessTier as _Tier
+
+    mgr = get_device_backend_manager()
+    try:
+        ckey = canonical_device_serial(req.serial)
+    except Exception:
+        ckey = req.serial
+
+    one_shot_tier: str | None = None
+    if req.tier is not None:
+        if req.tier not in ("tier1", "wpd", "tier2"):
+            raise HTTPException(status_code=400, detail=f"Invalid tier {req.tier!r}")
+        if req.persist:
+            try:
+                mgr.set_user_tier(req.serial, req.tier)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            one_shot_tier = req.tier
+
+    # 2. Clear the automatic tier cache for this serial only (user
+    # override is preserved -- it only reorders the waterfall).
+    for key in (ckey, req.serial):
+        try:
+            mgr._device_tier_map.pop(key, None)
+        except Exception:
+            pass
+
+    # 3. Purge listing-cache keys for this serial (scoped, not global).
+    try:
+        from backend.api import device_preview as _preview_mod
+
+        _purge = getattr(_preview_mod, "purge_listing_cache_for_serial", None)
+        if callable(_purge):
+            try:
+                _purge(req.serial)
+            except Exception as exc:
+                logger.warning("Retry: listing-cache purge failed for %s: %s", req.serial, exc)
+            try:
+                _purge(ckey)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("Retry: listing-cache purge unavailable: %s", exc)
+
+    # 4. Drop AFC slots when supported (mirrors /ios-devices/recover).
+    try:
+        from backend import ios_device as _ios_mod
+
+        _drop = getattr(_ios_mod, "drop_afc_slots", None)
+        if callable(_drop):
+            try:
+                _res = _drop(None)
+                if asyncio.iscoroutine(_res):
+                    await _res
+            except Exception as exc:
+                logger.warning("Retry: drop_afc_slots failed: %s", exc)
+    except Exception as exc:
+        logger.debug("Retry: drop_afc_slots unavailable: %s", exc)
+
+    # 5. Re-enumerate + probe.  A one-shot tier is threaded through as an
+    # explicit override for the probe calls only (never persisted, never
+    # touches _device_tier_user_prefs).
+    async def _probe_with_order() -> tuple[list, list[dict]]:
+        attempted: list[dict] = []
+        if one_shot_tier is not None:
+            devices, _tier = await mgr.list_devices()
+            try:
+                await mgr.browse_device(req.serial, "/DCIM", override_tier=one_shot_tier)
+                attempted.append({"tier": one_shot_tier, "ok": True, "error": None})
+            except (DeviceLockedError, DeviceNotTrustedError):
+                raise
+            except Exception as exc:
+                attempted.append({"tier": one_shot_tier, "ok": False, "error": str(exc)})
+                # Fall through to the normal waterfall probe below.
+                try:
+                    await mgr.get_device_file_info(req.serial, "/DCIM", override_tier=one_shot_tier)
+                    attempted.append({"tier": "fallback", "ok": True, "error": None})
+                except (DeviceLockedError, DeviceNotTrustedError):
+                    raise
+                except Exception as exc2:
+                    attempted.append({"tier": "fallback", "ok": False, "error": str(exc2)})
+            return devices, attempted
+        devices, _tier = await mgr.list_devices()
+        # Probe the device through the real waterfall so attempted[]
+        # reflects per-tier fallback.  browse first, file_info as a
+        # second probe when browse raises a non-terminal error.
+        try:
+            await mgr.browse_device(req.serial, "/DCIM")
+            serving = mgr.get_device_tier(req.serial)
+            attempted.append({"tier": serving.value if serving else "unknown", "ok": True, "error": None})
+        except (DeviceLockedError, DeviceNotTrustedError):
+            raise
+        except Exception as exc:
+            attempted.append({"tier": "browse", "ok": False, "error": str(exc)[:500]})
+            try:
+                await mgr.get_device_file_info(req.serial, "/DCIM")
+                serving2 = mgr.get_device_tier(req.serial)
+                attempted.append({"tier": serving2.value if serving2 else "unknown", "ok": True, "error": None})
+            except (DeviceLockedError, DeviceNotTrustedError):
+                raise
+            except Exception as exc2:
+                attempted.append({"tier": "file_info", "ok": False, "error": str(exc2)[:500]})
+        return devices, attempted
+
+    try:
+        devices, attempted_raw = await _probe_with_order()
+    except DeviceLockedError as exc:
+        raise HTTPException(status_code=423, detail={"status": "locked", "message": exc.message})
+    except DeviceNotTrustedError as exc:
+        raise HTTPException(status_code=403, detail={"status": "not_trusted", "message": exc.message})
+
+    serving_tier_obj = mgr.get_device_tier(req.serial)
+    serving = serving_tier_obj.value if serving_tier_obj is not None else "none"
+    preferred = mgr.get_user_tier(req.serial) or "auto"
+    return DeviceRetryResponse(
+        serial=req.serial,
+        serving_tier=serving,
+        preferred_tier=preferred,
+        attempted=[
+            {"tier": a.get("tier", "unknown"), "ok": bool(a.get("ok")), "error": a.get("error")} for a in attempted_raw
+        ],
+        devices=[
+            {
+                "serial": d.serial,
+                "name": d.name,
+                "model": d.model,
+                "status": d.status.value,
+                "active_tier": (mgr.get_device_tier(d.serial).value if mgr.get_device_tier(d.serial) else serving),
+            }
+            for d in devices
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

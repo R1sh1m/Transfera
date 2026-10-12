@@ -497,6 +497,14 @@ export interface IOSDeviceInfo {
   status: IOSDeviceStatus;
   error_detail?: string | null;
   active_tier?: "tier1" | "tier2" | "wpd" | null;
+  user_tier?: DeviceTierChoice | null;
+}
+
+export type DeviceTierChoice = "auto" | "tier1" | "wpd" | "tier2";
+
+export interface AvailableTierInfo {
+  available: boolean;
+  error?: string | null;
 }
 
 export interface IOSDeviceListResponse {
@@ -504,6 +512,7 @@ export interface IOSDeviceListResponse {
   driver_status: "ready" | "no_driver" | "no_pymobiledevice3" | "unknown";
   prefer_tier2: boolean;
   devices: IOSDeviceInfo[];
+  available_tiers?: Record<string, AvailableTierInfo> | null;
 }
 
 export interface IOSBrowseRequest {
@@ -744,6 +753,39 @@ export interface DevicePreferenceResponse {
   prefer_tier2: boolean;
 }
 
+// --- Per-device driver picker (preferred tier + retry) ----------------------
+export interface PreferredTierRequest {
+  serial: string;
+  tier: DeviceTierChoice;
+}
+
+export interface PreferredTierResponse {
+  serial: string;
+  tier: string;
+  canonical_serial: string;
+  warning?: string | null;
+}
+
+export interface DeviceRetryAttempt {
+  tier: string;
+  ok: boolean;
+  error?: string | null;
+}
+
+export interface DeviceRetryRequest {
+  serial: string;
+  tier?: "tier1" | "tier2" | "wpd" | null;
+  persist?: boolean;
+}
+
+export interface DeviceRetryResponse {
+  serial: string;
+  serving_tier: string;
+  preferred_tier: string;
+  attempted: DeviceRetryAttempt[];
+  devices?: Record<string, unknown>[] | null;
+}
+
 // --- Auto-Activation Status -------------------------------------------------
 export interface DeviceBackendStatusResponse {
   apple_driver_installable: boolean;
@@ -757,6 +799,9 @@ export interface DeviceBackendStatusResponse {
   tier2_available: boolean;
   tier2_error: string | null;
   ios_available: boolean;
+  available_tiers?: Record<string, AvailableTierInfo> | null;
+  user_overrides?: Record<string, string> | null;
+  user_overrides_count?: number;
 }
 
 // --- iOS Device Recovery ----------------------------------------------------
