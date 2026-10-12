@@ -887,9 +887,9 @@ async def patch_media(
         if mi is None:
             raise HTTPException(status_code=404, detail="Media item not found")
         if req.favorite is not None:
-            mi.favorite = bool(req.favorite)
+            mi.favorite = req.favorite
         if req.trashed is not None:
-            mi.trashed = bool(req.trashed)
+            mi.trashed = req.trashed
             mi.trashed_at = datetime.now(UTC) if req.trashed else None
         mi.touch()
         # Re-read for response while session is open

@@ -1026,7 +1026,6 @@ async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_lo
     Terminal Locked/NotTrusted errors abort without further fallback and
     are surfaced with their HTTP status preserved.
     """
-    from backend.device_backend import DeviceAccessTier as _Tier
 
     mgr = get_device_backend_manager()
     try:

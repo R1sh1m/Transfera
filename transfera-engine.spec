@@ -112,12 +112,31 @@ a = Analysis(
         # Frozen-import check: clip.ensure_ai_packages() skips pip when
         # sys.frozen and clip.ai_packages_missing() needs onnxruntime +
         # tokenizers importable, so every entry here must survive freezing.
+        # Narrow filters (not bare collect_submodules): bare collection walks
+        # into dev-only tooling whose optional deps are not installed —
+        # onnxruntime.quantization/tools need `onnx`, numpy.f2py.tests needs
+        # `pytest` — producing "Failed to collect submodules" warnings and
+        # bloating the one-dir. clip.py only uses ort.InferenceSession /
+        # SessionOptions (capi) + numpy.asarray, so those branches are
+        # excluded by design.
         "onnxruntime",
-        *collect_submodules("onnxruntime"),
+        *collect_submodules(
+            "onnxruntime",
+            filter=lambda name: "quantization" not in name
+            and "tools" not in name
+            and "datasets" not in name
+            and "transformers" not in name,
+        ),
         "tokenizers",
         *collect_submodules("tokenizers"),
         "numpy",
-        *collect_submodules("numpy"),
+        *collect_submodules(
+            "numpy",
+            filter=lambda name: ".tests" not in name
+            and "numpy.f2py" not in name
+            and "numpy.distutils" not in name
+            and ".testing" not in name,
+        ),
     ],
     hookspath=[],
     hooksconfig={},
@@ -133,6 +152,21 @@ a = Analysis(
         "scipy",
         "notebook",
         "jupyter",
+        # Dev-only branches pruned by the collect_submodules filters above:
+        # never imported by backend/main.py or backend/engines/clip.py at
+        # runtime (quantization tooling needs `onnx`, f2py tests need
+        # `pytest`, tests/ dirs are not shipped). Excluding them keeps the
+        # filters from being re-pulled via other packages' modulegraphs.
+        "onnx",
+        "onnxruntime.quantization",
+        "onnxruntime.tools",
+        "onnxruntime.datasets",
+        "onnxruntime.transformers",
+        "numpy.f2py",
+        "numpy.tests",
+        "numpy.testing",
+        "numpy.distutils",
+        "pytest",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -181,3 +215,9 @@ coll = COLLECT(
 #     we use sqlite3/aiosqlite.  coredll.lib via ctypes not found — WinCE
 #     artifact.  Suppressing warnings globally would also hide real bundle
 #     gaps (e.g. a missing hidden import that breaks a frozen feature).
+# Narrow-collection note: "Failed to collect submodules for
+# 'onnxruntime.quantization' (needs `onnx`)" and "'numpy.f2py.tests'
+# (needs `pytest`)" are dev-only branches pruned by the
+# collect_submodules filters + excludes above — not installed
+# intentionally, never imported by clip.py at runtime. Do not "fix" by
+# adding onnx/pytest to requirements; the filters are the fix.
