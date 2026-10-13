@@ -78,8 +78,11 @@ import type {
 import { IOS_SOURCE_PREFIX, sourceRefToString } from "@/types/api";
 import { DeviceFolderBrowser } from "@/components/DeviceFolderBrowser";
 import SourcePreviewPanel from "@/components/SourcePreviewPanel";
+import {
+  useBackendReady,
+  ENGINE_WAITING_LABEL,
+} from "@/hooks/use-backend-ready";
 import { PillSelect, type PillSelectOption } from "@/components/PillSelect";
-import KeepAwakeBanner from "@/components/KeepAwakeBanner";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -230,7 +233,9 @@ function TierMismatchNotice({
   }
   const err = availableTiers?.[preferred]?.error;
   const isTier2Unavailable =
-    preferred === "tier2" && availableTiers?.tier2 && !availableTiers.tier2.available;
+    preferred === "tier2" &&
+    availableTiers?.tier2 &&
+    !availableTiers.tier2.available;
 
   return (
     <div className="flex items-center gap-1.5 text-[10px] text-amber-600 dark:text-amber-400 leading-snug">
@@ -576,7 +581,9 @@ function SourcePicker({
   const readyDevices = allDevices.filter((d) => d.status === "ready");
   const nonReadyDevices = allDevices.filter((d) => d.status !== "ready");
   const [tier2ModalOpen, setTier2ModalOpen] = useState(false);
-  const [activeSetupSerial, setActiveSetupSerial] = useState<string | null>(null);
+  const [activeSetupSerial, setActiveSetupSerial] = useState<string | null>(
+    null,
+  );
 
   const recoverMutation = useRecoverIOSDevice();
   // 10 s cooldown after each recovery settles so users can't hammer the
@@ -1924,7 +1931,8 @@ function LinuxBridgeSetupModal({
     }
   }, [hasStarted, currentStep, nextStep, completedSteps, notificationShown]);
 
-  const allCompleted = steps.length > 0 && completedSteps.length >= steps.length;
+  const allCompleted =
+    steps.length > 0 && completedSteps.length >= steps.length;
 
   useEffect(() => {
     if (allCompleted) {
@@ -2052,7 +2060,9 @@ function LinuxBridgeSetupModal({
                       Linux Bridge is Ready
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      The open-source bridge service is running on port 18920. You can now use it for iOS device transfers without Apple drivers.
+                      The open-source bridge service is running on port 18920.
+                      You can now use it for iOS device transfers without Apple
+                      drivers.
                     </p>
                   </div>
                 </div>
@@ -2069,7 +2079,9 @@ function LinuxBridgeSetupModal({
             ) : (
               <div className="space-y-4">
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Transfera uses an open-source bridge running inside your WSL2 Ubuntu environment to talk to your iOS device. Follow the steps below to download and configure it.
+                  Transfera uses an open-source bridge running inside your WSL2
+                  Ubuntu environment to talk to your iOS device. Follow the
+                  steps below to download and configure it.
                 </p>
 
                 <AnimatePresence>
@@ -2160,7 +2172,8 @@ function LinuxBridgeSetupModal({
                   >
                     <Loader2 className="w-4 h-4 text-action animate-spin shrink-0" />
                     <span className="text-xs font-semibold text-foreground">
-                      {steps.find((s) => s.step_id === currentStep)?.title || "Executing step..."}
+                      {steps.find((s) => s.step_id === currentStep)?.title ||
+                        "Executing step..."}
                     </span>
                   </motion.div>
                 )}
@@ -2188,7 +2201,11 @@ function LinuxBridgeSetupModal({
                       {errorCode === "NO_WSL_DISTRO" ? (
                         <button
                           type="button"
-                          onClick={() => openExternal("https://apps.microsoft.com/detail/9PDXGNCFSCZV")}
+                          onClick={() =>
+                            openExternal(
+                              "https://apps.microsoft.com/detail/9PDXGNCFSCZV",
+                            )
+                          }
                           className="px-3 py-1 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
                         >
                           Open Microsoft Store
@@ -2235,15 +2252,18 @@ function LinuxBridgeSetupModal({
                           key={step.step_id}
                           className={cn(
                             "flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs transition-colors border",
-                            isCompleted && "bg-emerald-500/5 border-emerald-500/20",
+                            isCompleted &&
+                              "bg-emerald-500/5 border-emerald-500/20",
                             isActive && "bg-action/5 border-action/30",
-                            isPending && "bg-muted/30 border-transparent opacity-70",
+                            isPending &&
+                              "bg-muted/30 border-transparent opacity-70",
                           )}
                         >
                           <div
                             className={cn(
                               "w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px] font-semibold",
-                              isCompleted && "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400",
+                              isCompleted &&
+                                "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400",
                               isActive && "bg-action/20 text-action",
                               isPending && "bg-muted text-muted-foreground",
                             )}
@@ -2639,6 +2659,9 @@ export default function DeviceSetupPage() {
 
   const { data: config, isLoading: configLoading } = useConfig();
   const createSession = useCreateSession();
+  // Centralized engine-readiness flag — the Start action gates on this while
+  // navigation and cached previews stay interactive.
+  const backendReady = useBackendReady();
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const initTransfer = useTransferStore((s) => s.initTransfer);
   const showNotification = useTransferStore((s) => s.showNotification);
@@ -2785,7 +2808,9 @@ export default function DeviceSetupPage() {
 
   const isDeviceConnected =
     sourceRef?.type === "device"
-      ? !pageIosLoading && !!pageConnectedDevice && pageConnectedDevice.status === "ready"
+      ? !pageIosLoading &&
+        !!pageConnectedDevice &&
+        pageConnectedDevice.status === "ready"
       : true;
 
   const isIOSDevice = useMemo(() => {
@@ -2799,6 +2824,29 @@ export default function DeviceSetupPage() {
       meta.category === "ipod"
     );
   }, [sourceRef, pageConnectedDevice]);
+
+  // Keep-awake reminder as a notification when an iOS device is connected
+  const keepAwakeNotifiedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      isDeviceConnected &&
+      isIOSDevice &&
+      sourceRef?.type === "device" &&
+      sourceRef.device_id
+    ) {
+      const canonicalId =
+        canonicalSerial(sourceRef.device_id) ?? sourceRef.device_id;
+      if (keepAwakeNotifiedRef.current !== canonicalId) {
+        keepAwakeNotifiedRef.current = canonicalId;
+        showNotification(
+          "warning",
+          "Keep your iPhone unlocked — preview and transfer pause if it locks. Your phone's auto-lock can't be turned off from this PC, so tap the screen now and then to keep it awake.",
+        );
+      }
+    } else if (!isDeviceConnected || sourceRef?.type !== "device") {
+      keepAwakeNotifiedRef.current = null;
+    }
+  }, [isDeviceConnected, isIOSDevice, sourceRef, showNotification]);
 
   // Handle device lock state from preview panel
   const handleDeviceLocked = useCallback(() => {
@@ -2847,6 +2895,7 @@ export default function DeviceSetupPage() {
     !isSamePath &&
     !needsMoveConfirm &&
     !createSession.isPending &&
+    backendReady &&
     (sourceRef?.type !== "device" || isDeviceConnected);
 
   // Sync sourceRef changes from this page back to store
@@ -3166,34 +3215,75 @@ export default function DeviceSetupPage() {
           </div>
         )}
 
+        {sourceRef?.type === "device" && deviceLocked && (
+          <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-3.5">
+            <Lock className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                iPhone locked — transfers pause, they don&apos;t fail
+              </p>
+              <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5 leading-snug">
+                Unlock your iPhone and tap Trust once, then retry the preview.
+                Pauses, not failed — Resume reuses the session and skips
+                completed files (current file restarts; preview re-scans).
+              </p>
+            </div>
+          </div>
+        )}
+
+        {sourceRef?.type === "device" &&
+          isIOSDevice &&
+          isDeviceConnected &&
+          !deviceLocked && (
+            <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-3.5">
+              <Smartphone className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-blue-700 dark:text-blue-300">
+                  Keep your iPhone awake during preview &amp; transfer
+                </p>
+                <ul className="text-[11px] text-blue-600 dark:text-blue-400 mt-1 space-y-0.5 leading-snug list-disc list-inside">
+                  <li>Tap the screen now and then to keep it awake</li>
+                  <li>
+                    iPhone Settings &gt; Display &gt; Auto-Lock &gt; Never
+                    (while transferring)
+                  </li>
+                  <li>Use a good cable + rear USB port</li>
+                  <li>Tap Trust once when asked</li>
+                </ul>
+                <p className="text-[10px] text-blue-600/70 dark:text-blue-400/70 mt-1.5 leading-snug">
+                  Brief hiccups retry on their own. If a preview takes longer
+                  than 15 seconds we keep this page so you can retry without
+                  losing your place.
+                </p>
+              </div>
+            </div>
+          )}
+
         {sourceRef?.type === "device" &&
           sourceRef.device_id &&
           sourceRef.device_path && (
-            <>
-              {isDeviceConnected && isIOSDevice && <KeepAwakeBanner />}
-              <div
-                key={`device-preview:${sourceRef.device_id}:${previewNonce}`}
-                className="border border-border rounded-xl p-3 bg-card"
-              >
-                <SourcePreviewPanel
-                  sourcePath={null}
-                  deviceSource={{
-                    device_id: sourceRef.device_id,
-                    device_path: sourceRef.device_path,
-                  }}
-                  isDeviceConnected={isDeviceConnected}
-                  onSelectionConfirm={handleSelectionConfirm}
-                  onTransferStart={handleTransferStart}
-                  onTryAnotherDriver={handlePreviewTryAnotherDriver}
-                  onRetryDriver={handlePreviewRetryDriver}
-                  isRetryingDriver={retryDevicePreview.isPending}
-                  onDeviceLocked={handleDeviceLocked}
-                  onDeviceUnlocked={handleDeviceUnlocked}
-                  deviceLocked={deviceLocked}
-                  onScanId={setScanId}
-                />
-              </div>
-            </>
+            <div
+              key={`device-preview:${sourceRef.device_id}:${previewNonce}`}
+              className="border border-border rounded-xl p-3 bg-card"
+            >
+              <SourcePreviewPanel
+                sourcePath={null}
+                deviceSource={{
+                  device_id: sourceRef.device_id,
+                  device_path: sourceRef.device_path,
+                }}
+                isDeviceConnected={isDeviceConnected}
+                onSelectionConfirm={handleSelectionConfirm}
+                onTransferStart={handleTransferStart}
+                onTryAnotherDriver={handlePreviewTryAnotherDriver}
+                onRetryDriver={handlePreviewRetryDriver}
+                isRetryingDriver={retryDevicePreview.isPending}
+                onDeviceLocked={handleDeviceLocked}
+                onDeviceUnlocked={handleDeviceUnlocked}
+                deviceLocked={deviceLocked}
+                onScanId={setScanId}
+              />
+            </div>
           )}
 
         {/* Destination: existing folder picker */}
@@ -3658,15 +3748,17 @@ export default function DeviceSetupPage() {
           disabled={!canStart || createSession.isPending}
           onClick={() => handleTransferStart()}
           title={
-            canStart
-              ? undefined
-              : !hasPaths
-                ? "Select both source and destination directories to continue"
-                : isSamePath
-                  ? "Source and destination cannot be the same"
-                  : needsMoveConfirm
-                    ? "Confirm that you understand the move operation"
-                    : "Free up disk space on the destination to continue"
+            !backendReady
+              ? ENGINE_WAITING_LABEL
+              : canStart
+                ? undefined
+                : !hasPaths
+                  ? "Select both source and destination directories to continue"
+                  : isSamePath
+                    ? "Source and destination cannot be the same"
+                    : needsMoveConfirm
+                      ? "Confirm that you understand the move operation"
+                      : "Free up disk space on the destination to continue"
           }
           className={cn(
             "no-drag w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-pill text-sm font-semibold active:scale-[0.99] transition-colors",

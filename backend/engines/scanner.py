@@ -292,15 +292,9 @@ async def _scan_ios_device(
                 file_mtime_dt = _ts_to_datetime(fi.mtime)
                 if file_mtime_dt is not None:
                     _c_dt = (
-                        cutoff_datetime
-                        if cutoff_datetime.tzinfo is not None
-                        else cutoff_datetime.replace(tzinfo=UTC)
+                        cutoff_datetime if cutoff_datetime.tzinfo is not None else cutoff_datetime.replace(tzinfo=UTC)
                     )
-                    _f_dt = (
-                        file_mtime_dt
-                        if file_mtime_dt.tzinfo is not None
-                        else file_mtime_dt.replace(tzinfo=UTC)
-                    )
+                    _f_dt = file_mtime_dt if file_mtime_dt.tzinfo is not None else file_mtime_dt.replace(tzinfo=UTC)
                     if _f_dt <= _c_dt:
                         skipped_by_cutoff += 1
                         continue
@@ -392,22 +386,40 @@ async def _scan_ios_device(
     return inserted_ids
 
 
-async def _walk_ios_directory(serial: str, path: str, _sem: asyncio.Semaphore | None = None) -> list:
+async def _walk_ios_directory(
+    serial: str,
+    path: str,
+    _sem: asyncio.Semaphore | None = None,
+    *,
+    strict: bool = False,
+) -> list:
     """
     Recursively walk an iOS device directory via unified manager.
 
     Returns a flat list of DeviceFileInfo for all files found.
 
-    Subdirectories fan out concurrently, bounded by a semaphore (3, leaving
-    one of the 4 AFC pool slots free for listing snapshot browses and gated
-    thumbnail reads): unbounded fan-out would stampede usbmuxd with one
-    handshake per folder and starve the transfer streaming off the device.
+    Subdirectories fan out concurrently, bounded by a semaphore (2, leaving
+    headroom in the 4-slot AFC pool for listing snapshot browses and gated
+    thumbnail reads alongside in-flight walks): unbounded fan-out would
+    stampede usbmuxd with one handshake per folder and starve the transfer
+    streaming off the device. Thumbnail reads take their own gate
+    (``_IOS_THUMB_SEMAPHORE`` = 3 in device_preview) and never the walk
+    semaphore, so a page-turn snapshot browse never queues behind 25
+    thumbnails.
+
+    When *strict* is True, any per-subdirectory failure raises
+    :class:`PartialWalkError` (carrying the partial file list) instead of
+    being swallowed, and a top-level browse failure re-raises instead of
+    returning ``[]`` — so preview callers never cache a partial walk as
+    complete (which drifts totals and empties latter pages). The default
+    ``strict=False`` preserves the legacy best-effort behavior for the
+    import scan path.
     """
     from backend.ios_device import DeviceFileInfo
     from backend.tier2_manager import get_device_manager
 
     if _sem is None:
-        _sem = asyncio.Semaphore(3)
+        _sem = asyncio.Semaphore(2)
 
     all_files: list[DeviceFileInfo] = []
     manager = get_device_manager()
@@ -416,6 +428,8 @@ async def _walk_ios_directory(serial: str, path: str, _sem: asyncio.Semaphore | 
             entries = await manager.browse_device(serial, path)
     except Exception as exc:
         logger.warning("Failed to browse %s on device %s: %s", path, serial, exc)
+        if strict:
+            raise
         return all_files
 
     subdirs: list[str] = []
@@ -429,15 +443,52 @@ async def _walk_ios_directory(serial: str, path: str, _sem: asyncio.Semaphore | 
             all_files.append(entry)
 
     if subdirs:
-        tasks = [_walk_ios_directory(serial, sd, _sem) for sd in subdirs]
+        tasks = [_walk_ios_directory(serial, sd, _sem, strict=strict) for sd in subdirs]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures = 0
+        first_err: BaseException | None = None
         for res in results:
             if isinstance(res, BaseException):
+                failures += 1
+                if first_err is None:
+                    first_err = res
                 logger.warning("Subdirectory walk failed: %s", res)
             elif isinstance(res, list):
                 all_files.extend(res)
 
+        if failures and strict:
+            raise PartialWalkError(
+                f"Partial walk of {path} on device {serial}: "
+                f"{failures}/{len(results)} subdirectories failed "
+                f"(first: {first_err})",
+                partial=all_files,
+                failures=failures,
+                total=len(results),
+            ) from first_err
+
     return all_files
+
+
+class PartialWalkError(RuntimeError):
+    """A strict recursive walk finished with ≥1 failed subdirectory.
+
+    Carries the partial file list so callers can decide (serve stale,
+    serve partial with ``cache_status="partial-not-cached"``, or 503)
+    without ever storing the partial result as a complete listing.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial: list | None = None,
+        failures: int = 0,
+        total: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.partial = partial if partial is not None else []
+        self.failures = failures
+        self.total = total
 
 
 # ---------------------------------------------------------------------------

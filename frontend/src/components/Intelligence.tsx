@@ -34,6 +34,10 @@ import {
 } from "@/lib/queries";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
 import { useTransferStore } from "@/store/transfer";
+import {
+  useBackendReady,
+  ENGINE_WAITING_LABEL,
+} from "@/hooks/use-backend-ready";
 import type { Moment } from "@/types/api";
 
 function Thumb({
@@ -83,6 +87,7 @@ export function CapabilitiesBadge() {
   const { data } = useCapabilities();
   const backfill = useBackfill();
   const downloadModels = useDownloadModels();
+  const backendReady = useBackendReady();
   const { data: modelStatus } = useModelStatus(false);
   const busy =
     modelStatus?.status === "downloading" ||
@@ -168,9 +173,13 @@ export function CapabilitiesBadge() {
           </span>
           <button
             onClick={() => downloadModels.mutate()}
-            disabled={downloadModels.isPending}
+            disabled={downloadModels.isPending || !backendReady}
             className="px-3 py-1 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
-            title="Retry downloading on-board AI models"
+            title={
+              backendReady
+                ? "Retry downloading on-board AI models"
+                : ENGINE_WAITING_LABEL
+            }
           >
             {downloadModels.isPending ? "Starting…" : "Retry"}
           </button>
@@ -207,9 +216,13 @@ export function CapabilitiesBadge() {
             },
           });
         }}
-        disabled={backfill.isPending}
+        disabled={backfill.isPending || !backendReady}
         className="px-3 py-1 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40"
-        title="Fill missing perceptual hashes, dimensions and tags (offline, idempotent)"
+        title={
+          backendReady
+            ? "Fill missing perceptual hashes, dimensions and tags (offline, idempotent)"
+            : ENGINE_WAITING_LABEL
+        }
       >
         {backfill.isPending ? "Indexing…" : "Index library"}
       </button>
@@ -221,9 +234,13 @@ export function CapabilitiesBadge() {
       {!clipReady && !downloading && (
         <button
           onClick={() => downloadModels.mutate()}
-          disabled={downloadModels.isPending}
+          disabled={downloadModels.isPending || !backendReady}
           className="px-3 py-1 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
-          title="Download on-board AI models (~218 MB, one time) to enable semantic search, auto-tags and face grouping"
+          title={
+            backendReady
+              ? "Download on-board AI models (~218 MB, one time) to enable semantic search, auto-tags and face grouping"
+              : ENGINE_WAITING_LABEL
+          }
         >
           {downloadModels.isPending ? "Starting…" : "Download AI models"}
         </button>
@@ -369,6 +386,7 @@ export function MomentsGrid({
 export function DuplicatesPanel() {
   const { data, isLoading } = useDuplicateGroups(8);
   const resolve = useResolveDuplicateGroup();
+  const backendReady = useBackendReady();
   const [kept, setKept] = useState<Record<number, number>>({});
   if (isLoading)
     return (
@@ -430,7 +448,7 @@ export function DuplicatesPanel() {
               ))}
             </div>
             <button
-              disabled={resolve.isPending}
+              disabled={resolve.isPending || !backendReady}
               onClick={() =>
                 resolve.mutate({
                   keep_id: keepId,
@@ -439,6 +457,7 @@ export function DuplicatesPanel() {
                     .filter((id) => id !== keepId),
                 })
               }
+              title={backendReady ? undefined : ENGINE_WAITING_LABEL}
               className="px-3 py-1.5 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40 flex items-center gap-1"
             >
               <Trash2 className="w-3 h-3" /> Keep #{keepId}, move rest to Trash
@@ -455,6 +474,7 @@ export function PeoplePanel() {
   const rename = useRenamePerson();
   const backfill = useBackfill();
   const downloadModels = useDownloadModels();
+  const backendReady = useBackendReady();
   const { data: modelStatus } = useModelStatus(downloadModels.isPending);
   const { data: capabilities } = useCapabilities();
   const [editing, setEditing] = useState<number | null>(null);
@@ -491,18 +511,26 @@ export function PeoplePanel() {
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <button
             onClick={() => backfill.mutate()}
-            disabled={backfill.isPending}
+            disabled={backfill.isPending || !backendReady}
             className="px-3 py-1.5 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40"
-            title="Fill missing perceptual hashes, dimensions and tags, then group faces (offline, idempotent)"
+            title={
+              backendReady
+                ? "Fill missing perceptual hashes, dimensions and tags, then group faces (offline, idempotent)"
+                : ENGINE_WAITING_LABEL
+            }
           >
             {backfill.isPending ? "Indexing…" : "Index library"}
           </button>
           {!modelsReady && !modelsBusy && (
             <button
               onClick={() => downloadModels.mutate()}
-              disabled={downloadModels.isPending}
+              disabled={downloadModels.isPending || !backendReady}
               className="px-3 py-1.5 rounded-pill border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-muted active:scale-[0.95] disabled:opacity-40"
-              title="Download on-board AI models (~218 MB, one time) to enable face grouping"
+              title={
+                backendReady
+                  ? "Download on-board AI models (~218 MB, one time) to enable face grouping"
+                  : ENGINE_WAITING_LABEL
+              }
             >
               {downloadModels.isPending ? "Starting…" : "Get AI models"}
             </button>

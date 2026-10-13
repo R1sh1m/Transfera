@@ -51,6 +51,10 @@ import {
   useIOSDevices,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
+import {
+  useBackendReady,
+  ENGINE_WAITING_LABEL,
+} from "@/hooks/use-backend-ready";
 import { cn, extractErrorMessage, parseBackendDate } from "@/lib/utils";
 import { isDesktop, openPath, openDirectory, runElevated } from "@/lib/desktop";
 import { formatDevicePath, getDeviceMeta } from "@/lib/device-utils";
@@ -554,6 +558,7 @@ function DirMetricsCard({
 function ResumeAlert() {
   const { data: sessionList } = useSessionList(1, 100);
   const recovery = useRecovery();
+  const backendReady = useBackendReady();
   const [expanded, setExpanded] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const pausedSessions =
@@ -648,7 +653,8 @@ function ResumeAlert() {
                   onSuccess: () => setDismissed(true),
                 });
               }}
-              disabled={recovery.isPending}
+              disabled={recovery.isPending || !backendReady}
+              title={backendReady ? undefined : ENGINE_WAITING_LABEL}
               className="no-drag inline-flex items-center gap-1 px-3 py-1.5 bg-amber-500 text-white rounded text-xs font-normal hover:bg-amber-600 transition-colors disabled:opacity-50"
             >
               <RefreshCw
@@ -735,6 +741,7 @@ function ConfirmDialog({
 function ClearSessionsButton({ sessionCount }: { sessionCount: number }) {
   const [showDialog, setShowDialog] = useState(false);
   const clearSessions = useClearSessions();
+  const backendReady = useBackendReady();
 
   const handleConfirm = () => {
     clearSessions.mutate(undefined, {
@@ -748,8 +755,9 @@ function ClearSessionsButton({ sessionCount }: { sessionCount: number }) {
     <>
       <button
         onClick={() => setShowDialog(true)}
-        className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 border border-input rounded-md transition-colors"
-        title="Clear session history"
+        disabled={!backendReady}
+        className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 border border-input rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        title={backendReady ? "Clear session history" : ENGINE_WAITING_LABEL}
       >
         <Trash2 className="w-3.5 h-3.5" />
         Clear Sessions
@@ -1064,6 +1072,7 @@ function SessionRow({ session }: { session: SessionInfo }) {
   const showNotification = useTransferStore((s) => s.showNotification);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const deleteSession = useDeleteSession();
+  const backendReady = useBackendReady();
 
   const handleResume = () => {
     initTransfer(session);
@@ -1212,8 +1221,9 @@ function SessionRow({ session }: { session: SessionInfo }) {
             )}
             <button
               onClick={handleDeleteClick}
-              className="no-drag inline-flex items-center px-2 py-1 rounded text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 transition-colors active:scale-[0.95]"
-              title="Delete session"
+              disabled={!backendReady}
+              className="no-drag inline-flex items-center px-2 py-1 rounded text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 transition-colors active:scale-[0.95] disabled:opacity-50 disabled:cursor-not-allowed"
+              title={backendReady ? "Delete session" : ENGINE_WAITING_LABEL}
             >
               <Trash2 className="w-3 h-3" />
             </button>

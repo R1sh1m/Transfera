@@ -23,6 +23,10 @@ import {
 } from "lucide-react";
 import { useTransferStore } from "@/store/transfer";
 import { useResolveDuplicates } from "@/lib/queries";
+import {
+  useBackendReady,
+  ENGINE_WAITING_LABEL,
+} from "@/hooks/use-backend-ready";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
 import { cn, parseBackendDate } from "@/lib/utils";
 import type { DuplicateAction, DuplicateEntry } from "@/types/api";
@@ -417,6 +421,7 @@ export default function DuplicateModal() {
   const closeDuplicates = useTransferStore((s) => s.closeDuplicates);
   const clearResolutions = useTransferStore((s) => s.clearResolutions);
   const resolveDuplicates = useResolveDuplicates();
+  const backendReady = useBackendReady();
 
   const [activeBulkAction, setActiveBulkAction] =
     useState<DuplicateAction | null>(null);
@@ -663,10 +668,17 @@ export default function DuplicateModal() {
                   </button>
                   <button
                     onClick={handleConfirm}
-                    disabled={!allResolved || resolveDuplicates.isPending}
+                    disabled={
+                      !allResolved ||
+                      resolveDuplicates.isPending ||
+                      !backendReady
+                    }
+                    title={!backendReady ? ENGINE_WAITING_LABEL : undefined}
                     className={cn(
                       "no-drag inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-normal transition-colors",
-                      allResolved && !resolveDuplicates.isPending
+                      allResolved &&
+                        !resolveDuplicates.isPending &&
+                        backendReady
                         ? "bg-primary text-primary-foreground hover:bg-primary/90"
                         : "bg-muted text-muted-foreground cursor-not-allowed",
                     )}

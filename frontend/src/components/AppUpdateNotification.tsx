@@ -17,6 +17,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { useUpdaterStore } from "@/store/updater";
+import ReleaseNotesView from "@/components/ReleaseNotesView";
 
 export default function AppUpdateNotification() {
   const status = useUpdaterStore((s) => s.status);
@@ -109,34 +110,38 @@ export default function AppUpdateNotification() {
           </div>
         )}
 
-        {/* Expandable Release Notes (hidden for empty/placeholder bodies) */}
-        {updateInfo?.body?.trim() &&
-          !/see the github release/i.test(updateInfo.body) && (
-            <div className="border-t border-border/50 pt-1.5">
-              <button
-                type="button"
-                onClick={() => setNotesExpanded(!notesExpanded)}
-                className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-              >
-                <span>What's new in v{updateInfo.version}</span>
-                {notesExpanded ? (
-                  <ChevronUp className="w-3 h-3" />
-                ) : (
-                  <ChevronDown className="w-3 h-3" />
-                )}
-              </button>
-              {notesExpanded && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-1.5 p-2 bg-muted/40 rounded-lg text-[10px] text-muted-foreground max-h-32 overflow-y-auto whitespace-pre-line select-text font-mono"
-                >
-                  {updateInfo.body}
-                </motion.div>
+        {/* Expandable Release Notes */}
+        {updateInfo?.version && (
+          <div className="border-t border-border/50 pt-1.5">
+            <button
+              type="button"
+              onClick={() => setNotesExpanded(!notesExpanded)}
+              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span>What's new in v{updateInfo.version}</span>
+              {notesExpanded ? (
+                <ChevronUp className="w-3 h-3" />
+              ) : (
+                <ChevronDown className="w-3 h-3" />
               )}
-            </div>
-          )}
+            </button>
+            {notesExpanded && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="mt-1.5 p-2.5 bg-muted/30 rounded-xl border border-border/40"
+              >
+                <ReleaseNotesView
+                  version={updateInfo.version}
+                  body={updateInfo.body}
+                  maxHeightClass="max-h-36"
+                  compact
+                />
+              </motion.div>
+            )}
+          </div>
+        )}
 
         {/* Action buttons */}
         {status === "available" && (

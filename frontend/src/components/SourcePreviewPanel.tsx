@@ -30,6 +30,8 @@ export interface MediaPreviewItem {
   duration_s?: number | null;
   modified_at?: string | null;
   mtime?: number | null;
+  /** Tiny inline placeholder (data URL) from the listing for blur-up. */
+  lqip?: string | null;
 }
 
 export interface SourcePreviewPanelProps {
@@ -68,12 +70,21 @@ const THUMBNAIL_SIZE = 200;
 const GRID_COLUMNS = 4;
 const _PREVIEW_MAX_FILES = 5000;
 
-// Viewport prefetch window — kept tight so a 25/page device grid only
-// warms the next row instead of firing the whole page at once.
-const THUMB_ROOT_MARGIN = "200px";
+// Viewport prefetch window — wide enough that a full page of tiles starts
+// its gated fetch promptly even if the scroll container's scrollTop is
+// stale after a page turn (cells below the fold still prefetch).
+const THUMB_ROOT_MARGIN = "600px";
 // Auto-retry backoff between gated thumbnail fetches (USB relief).
 const THUMB_RETRY_DELAYS = [1000, 2000, 4000];
 const THUMB_MAX_AUTO_RETRIES = 3;
+
+// Two-lane thumbnails (Windows WTS_CACHEONLY / iOS PHCachingImageManager
+// preheat analogy): the fast lane serves cache-only probes that hit RAM /
+// disk L2 instantly; the slow lane gates real USB extracts. Device
+// extracts stay narrow; local disk is cheap.
+const FAST_LANE_MAX = 6;
+const SLOW_LANE_DEVICE_MAX = 3;
+const SLOW_LANE_LOCAL_MAX = 6;
 
 // Negative cache: abs_path -> timestamp of last terminal failure.
 // Prevents the same grey/failed tile from re-hammering USB on every
@@ -123,6 +134,24 @@ function isGreyFallbackResponse(res: Response): boolean {
   // fallback-partial-truncated) — prefix-match so reasoned fallbacks are
   // treated as failures (retry affordance) instead of "loaded" images.
   return v.startsWith("fallback") || GREY_FALLBACK_STATUSES.has(v);
+}
+
+// Fast-lane probe param: backends that honor `cache=only` answer L2 hits
+// instantly (X-Thumb-Status: hit) and misses without touching USB;
+// backends that ignore it return the full image, which the fast path
+// renders directly instead of fetching twice.
+function appendCacheOnlyParam(url: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}cache=only`;
+}
+
+// Explicit L2-miss signal on an otherwise-OK response (e.g. placeholder
+// bytes with X-Thumb-Status: miss): fall through to the slow extract lane
+// instead of painting the placeholder as "loaded".
+function isThumbCacheMiss(res: Response): boolean {
+  const h =
+    res.headers.get("X-Thumb-Status") || res.headers.get("X-Thumbnail-Status");
+  if (!h) return false;
+  return h.trim().toLowerCase().includes("miss");
 }
 
 function formatBytes(bytes: number): string {
@@ -189,7 +218,10 @@ interface MediaThumbCellProps {
   isFocused: boolean;
   cellIndex: number;
   makeThumbnailUrl: (item: MediaPreviewItem) => string;
-  thumbQueue: ThumbQueue;
+  /** Fast lane: cache-only probes (high concurrency, no USB I/O). */
+  fastQueue: ThumbQueue;
+  /** Slow lane: gated USB extracts (adaptive concurrency). */
+  slowQueue: ThumbQueue;
 }
 
 function MediaThumbCell({
@@ -200,7 +232,8 @@ function MediaThumbCell({
   isFocused,
   cellIndex,
   makeThumbnailUrl,
-  thumbQueue,
+  fastQueue,
+  slowQueue,
 }: MediaThumbCellProps) {
   const cellRef = useRef<HTMLDivElement>(null);
   const [loadState, setLoadState] = useState<
@@ -214,6 +247,13 @@ function MediaThumbCell({
   const fetchAbortRef = useRef<AbortController | null>(null);
   const blobUrlRef = useRef<string | null>(null);
   const slotHeldRef = useRef(false);
+  // Which lane holds the slot ("fast" cache probe vs "slow" USB extract)
+  // so releaseSlot() retires the grant against the correct queue.
+  const heldLaneRef = useRef<"fast" | "slow" | null>(null);
+  // Queue generation held at acquire time. After a page turn bumps the
+  // queue epoch, a stale cell must drop ownership WITHOUT releasing, or
+  // the new generation's lane accounting goes negative and stalls.
+  const slotEpochRef = useRef<number | null>(null);
   const observedRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -227,9 +267,18 @@ function MediaThumbCell({
   const releaseSlot = useCallback(() => {
     if (slotHeldRef.current) {
       slotHeldRef.current = false;
-      thumbQueue.release();
+      const lane = heldLaneRef.current;
+      heldLaneRef.current = null;
+      const acquiredEpoch = slotEpochRef.current;
+      slotEpochRef.current = null;
+      const queue = lane === "slow" ? slowQueue : fastQueue;
+      // Stale generation (page turned since acquire): drop ownership
+      // without touching the new page's accounting.
+      if (acquiredEpoch == null || acquiredEpoch === queue.getEpoch()) {
+        queue.release();
+      }
     }
-  }, [thumbQueue]);
+  }, [fastQueue, slowQueue]);
 
   const revokeBlob = useCallback(() => {
     if (blobUrlRef.current) {
@@ -267,17 +316,26 @@ function MediaThumbCell({
     prevItemIdRef.current = item.abs_path;
     retryCountRef.current = 0;
     observedRef.current = false;
+    slotEpochRef.current = null;
     if (retryCount !== 0) setRetryCount(0);
     if (imgSrc !== null) setImgSrc(null);
     if (loadState !== "none") setLoadState("none");
   }
 
-  const startFetch = useCallback(() => {
+  // Forward ref so the slow lane's retry timers can re-enter through the
+  // fast lane without a const-ordering cycle (invoked only from timers,
+  // which always fire after the render that assigns it below).
+  const beginGatedFetchRef = useRef<() => void>(() => {});
+
+  // Slow lane: gated USB extract. Reports 503/Retry-After pressure into
+  // the queue's adaptive limiter (back off) and clean hits (recover).
+  const startSlowFetch = useCallback(() => {
     const absPath = item.abs_path;
     // Generation guard: retries scheduled here must not fire after a page
-    // turn bumps the queue epoch (reset() clears queued but not in-flight
+    // turn bumps the queue epochs (reset() clears queued but not in-flight
     // work; the catch + timer below re-check this before re-queueing).
-    const epochAtStart = thumbQueue.getEpoch();
+    // Both lanes reset() together, so the fast epoch guards both.
+    const epochAtStart = fastQueue.getEpoch();
     const controller = new AbortController();
     fetchAbortRef.current = controller;
     const url = makeThumbnailUrl(item);
@@ -297,6 +355,9 @@ function MediaThumbCell({
               retryAfterMs = Math.min(Math.max(secs * 1000, 500), 15000);
             }
           }
+          if (res.status === 503 || retryAfterMs != null) {
+            slowQueue.reportThrottled(retryAfterMs);
+          }
           throw new Error(`thumb http ${res.status}`);
         }
         if (isGreyFallbackResponse(res)) {
@@ -309,6 +370,7 @@ function MediaThumbCell({
         // Empty bodies are the grey-fallback shape on some backends —
         // surface retry instead of a "loaded" grey tile.
         if (blob.size === 0) throw new Error("thumb empty body");
+        slowQueue.reportSuccess();
         revokeBlob();
         const objectUrl = URL.createObjectURL(blob);
         blobUrlRef.current = objectUrl;
@@ -329,8 +391,10 @@ function MediaThumbCell({
         // Off-page cell (page turned while in flight): drop the slot
         // ownership without touching the new page's accounting and never
         // schedule a retry for a cell that is no longer visible.
-        if (thumbQueue.getEpoch() !== epochAtStart) {
+        if (fastQueue.getEpoch() !== epochAtStart) {
           slotHeldRef.current = false;
+          heldLaneRef.current = null;
+          slotEpochRef.current = null;
           fetchAbortRef.current = null;
           return;
         }
@@ -344,30 +408,150 @@ function MediaThumbCell({
           retryAfterMs = null;
           retryTimerRef.current = setTimeout(() => {
             if (!mountedRef.current) return;
-            if (thumbQueue.getEpoch() !== epochAtStart) return;
+            if (fastQueue.getEpoch() !== epochAtStart) return;
             retryCountRef.current += 1;
             setRetryCount(retryCountRef.current);
-            if (isThumbBlocked(absPath)) {
-              setLoadState("error");
-              return;
-            }
-            slotHeldRef.current = true;
-            setLoadState("loading");
-            cancelQueuedRef.current = thumbQueue.request(() => {
-              cancelQueuedRef.current = null;
-              if (!mountedRef.current) {
-                releaseSlot();
-                return;
-              }
-              startFetch();
-            });
+            // Re-enter through the fast lane: a cache-only probe is cheap
+            // and a previously extracted thumb may have landed in L2 since.
+            beginGatedFetchRef.current();
           }, delay);
         } else {
           markThumbFailed(absPath);
           setLoadState("error");
         }
       });
-  }, [item, makeThumbnailUrl, thumbQueue, releaseSlot, revokeBlob]);
+  }, [item, makeThumbnailUrl, fastQueue, slowQueue, releaseSlot, revokeBlob]);
+
+  // Join the slow extract lane (acquires a slow slot, fetches on grant).
+  const enqueueSlowFetch = useCallback(() => {
+    if (!mountedRef.current) return;
+    slotHeldRef.current = true;
+    heldLaneRef.current = "slow";
+    slotEpochRef.current = slowQueue.getEpoch();
+    setLoadState("loading");
+    cancelQueuedRef.current = slowQueue.request(() => {
+      cancelQueuedRef.current = null;
+      if (!mountedRef.current) {
+        releaseSlot();
+        return;
+      }
+      startSlowFetch();
+    });
+  }, [slowQueue, startSlowFetch, releaseSlot]);
+
+  // Fast lane: cache-only probe (Windows WTS_CACHEONLY analogy). An L2 hit
+  // (X-Thumb-Status: hit) renders instantly without spending slow-lane USB
+  // budget; a miss falls through to the gated extract lane. Misses never
+  // consume a retry attempt.
+  const startFastFetch = useCallback(() => {
+    const absPath = item.abs_path;
+    const epochAtStart = fastQueue.getEpoch();
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+    const url = appendCacheOnlyParam(makeThumbnailUrl(item));
+
+    fetch(url, { signal: controller.signal })
+      .then((res) => {
+        if (!mountedRef.current) return null;
+        if (!res.ok) {
+          if (res.status === 503) {
+            const ra = res.headers.get("Retry-After");
+            let raMs: number | null = null;
+            if (ra != null) {
+              const secs = Number(ra);
+              if (Number.isFinite(secs) && secs >= 0) {
+                raMs = Math.min(Math.max(secs * 1000, 500), 15000);
+              }
+            }
+            slowQueue.reportThrottled(raMs);
+          }
+          // Miss (404/202/204/...) or throttled — slow lane extracts.
+          throw new Error("thumb fast-path miss");
+        }
+        if (isGreyFallbackResponse(res)) {
+          throw new Error("thumb fast-path miss");
+        }
+        // Explicit L2 miss with a body: extract for real.
+        if (isThumbCacheMiss(res)) {
+          throw new Error("thumb fast-path miss");
+        }
+        return res.blob();
+      })
+      .then((blob) => {
+        if (!mountedRef.current || blob === null) return;
+        if (blob.size === 0) throw new Error("thumb fast-path miss");
+        // Hit — render immediately. (A backend that ignores ?cache=only
+        // returns the full image here; paint it either way and skip the
+        // slow lane entirely instead of fetching twice.)
+        fastQueue.reportSuccess();
+        revokeBlob();
+        const objectUrl = URL.createObjectURL(blob);
+        blobUrlRef.current = objectUrl;
+        if (!mountedRef.current) {
+          try {
+            URL.revokeObjectURL(objectUrl);
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        setImgSrc(objectUrl);
+        // <img onLoad> below confirms decode and releases the slot.
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        if (err instanceof Error && err.name === "AbortError") return;
+        if (fastQueue.getEpoch() !== epochAtStart) {
+          slotHeldRef.current = false;
+          heldLaneRef.current = null;
+          slotEpochRef.current = null;
+          fetchAbortRef.current = null;
+          return;
+        }
+        // Drop the fast slot, then join the slow extract lane.
+        releaseSlot();
+        fetchAbortRef.current = null;
+        if (isThumbBlocked(absPath)) {
+          setLoadState("error");
+          return;
+        }
+        enqueueSlowFetch();
+      });
+  }, [
+    item,
+    makeThumbnailUrl,
+    fastQueue,
+    slowQueue,
+    enqueueSlowFetch,
+    releaseSlot,
+    revokeBlob,
+  ]);
+
+  // Shared gated-fetch entry: negative-cached failures render the retry
+  // affordance without spending a slot; otherwise take the fast lane
+  // (cache-only probe → slow-lane extract on miss).
+  const beginGatedFetch = useCallback(() => {
+    if (isThumbBlocked(item.abs_path)) {
+      setLoadState("error");
+      return;
+    }
+    slotHeldRef.current = true;
+    heldLaneRef.current = "fast";
+    slotEpochRef.current = fastQueue.getEpoch();
+    setLoadState("loading");
+    cancelQueuedRef.current = fastQueue.request(() => {
+      cancelQueuedRef.current = null;
+      if (!mountedRef.current) {
+        releaseSlot();
+        return;
+      }
+      startFastFetch();
+    });
+  }, [item.abs_path, fastQueue, startFastFetch, releaseSlot]);
+
+  useEffect(() => {
+    beginGatedFetchRef.current = beginGatedFetch;
+  });
 
   useEffect(() => {
     const el = cellRef.current;
@@ -381,30 +565,27 @@ function MediaThumbCell({
       ([entry]) => {
         if (entry?.isIntersecting && !observedRef.current) {
           observedRef.current = true;
-          // Negative-cached failures render the retry affordance
-          // without spending a gated slot or USB round trip.
-          if (isThumbBlocked(item.abs_path)) {
-            setLoadState("error");
-          } else {
-            slotHeldRef.current = true;
-            setLoadState("loading");
-            cancelQueuedRef.current = thumbQueue.request(() => {
-              cancelQueuedRef.current = null;
-              if (!mountedRef.current) {
-                releaseSlot();
-                return;
-              }
-              startFetch();
-            });
-          }
+          beginGatedFetch();
           observer.unobserve(el);
         }
       },
       { root: scrollContainer, rootMargin: THUMB_ROOT_MARGIN },
     );
     observer.observe(el);
-    return () => observer.disconnect();
-  }, [item.abs_path, item, thumbQueue, startFetch, releaseSlot]);
+    // Fallback: if the observer never fires (e.g. root mis-resolution
+    // leaves the entry non-intersecting after a page turn), force the
+    // gated fetch so the tile can't sit in "none" (plain grey) forever.
+    const fallbackTimer = setTimeout(() => {
+      if (observedRef.current || !mountedRef.current) return;
+      observedRef.current = true;
+      observer.unobserve(el);
+      beginGatedFetch();
+    }, 1500);
+    return () => {
+      clearTimeout(fallbackTimer);
+      observer.disconnect();
+    };
+  }, [item.abs_path, beginGatedFetch]);
 
   useEffect(() => {
     return () => {
@@ -412,7 +593,7 @@ function MediaThumbCell({
       revokeBlob();
       releaseSlot();
     };
-  }, [thumbQueue, cleanupPending, revokeBlob, releaseSlot]);
+  }, [cleanupPending, revokeBlob, releaseSlot]);
 
   const handleLoad = () => {
     releaseSlot();
@@ -432,16 +613,9 @@ function MediaThumbCell({
           setLoadState("error");
           return;
         }
-        slotHeldRef.current = true;
-        setLoadState("loading");
-        cancelQueuedRef.current = thumbQueue.request(() => {
-          cancelQueuedRef.current = null;
-          if (!mountedRef.current) {
-            releaseSlot();
-            return;
-          }
-          startFetch();
-        });
+        // Decode-failure retry re-enters through the fast lane (cheap
+        // cache-only probe first, slow extract on miss).
+        beginGatedFetch();
       }, delay);
     } else {
       markThumbFailed(item.abs_path);
@@ -458,16 +632,9 @@ function MediaThumbCell({
     retryCountRef.current = 0;
     setRetryCount(0);
     setImgSrc(null);
-    slotHeldRef.current = true;
-    setLoadState("loading");
-    cancelQueuedRef.current = thumbQueue.request(() => {
-      cancelQueuedRef.current = null;
-      if (!mountedRef.current) {
-        releaseSlot();
-        return;
-      }
-      startFetch();
-    });
+    // Manual retry re-enters through the fast lane (cheap cache-only probe
+    // first, slow extract on miss).
+    beginGatedFetch();
   };
 
   return (
@@ -491,10 +658,22 @@ function MediaThumbCell({
           "outline-2 outline-primary outline-offset-[-2px] shadow-[0_0_0_3px_rgba(0,102,204,0.25)]",
       )}
     >
-      {loadState === "loading" && (
+      {loadState === "loading" && !item.lqip && (
         <div className="absolute inset-0 bg-muted">
           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent shimmer-animate" />
         </div>
+      )}
+
+      {/* LQIP blur-up placeholder from the listing JSON — paints instantly
+          while the fast/slow thumb fetch resolves. */}
+      {!imgSrc && item.lqip && loadState !== "error" && (
+        <img
+          src={item.lqip}
+          alt=""
+          aria-hidden
+          decoding="async"
+          className="absolute inset-0 w-full h-full object-cover blur-[2px] scale-105"
+        />
       )}
 
       {imgSrc && (
@@ -981,14 +1160,23 @@ function SourcePreviewPanelInner({
   onDeviceUnlockedRef.current = onDeviceUnlocked;
   const onScanIdRef = useRef(onScanId);
   onScanIdRef.current = onScanId;
-  // Device thumbnails decode over USB — cap at 4 concurrent gated fetches.
-  // Local disk is cheap — allow 6.
+  // Two-lane thumbnails (Windows WTS_CACHEONLY / iOS PHCachingImageManager
+  // preheat analogy): a fast lane for cache-only probes that hit RAM/disk
+  // L2 instantly, and a gated slow lane for real USB extracts. Device
+  // extracts stay at 3 concurrent; local disk is cheap — allow 6. Both
+  // lanes reset() together on page turns so their epochs stay paired.
   const isDeviceSource = Boolean(deviceSource);
-  const thumbQueueRef = useRef<ThumbQueue>(
-    createThumbQueue(isDeviceSource ? 4 : 6),
+  const fastThumbQueueRef = useRef<ThumbQueue>(createThumbQueue(FAST_LANE_MAX));
+  const slowThumbQueueRef = useRef<ThumbQueue>(
+    createThumbQueue(
+      isDeviceSource ? SLOW_LANE_DEVICE_MAX : SLOW_LANE_LOCAL_MAX,
+    ),
   );
   useEffect(() => {
-    thumbQueueRef.current.setMaxConcurrent(isDeviceSource ? 4 : 6);
+    fastThumbQueueRef.current.setMaxConcurrent(FAST_LANE_MAX);
+    slowThumbQueueRef.current.setMaxConcurrent(
+      isDeviceSource ? SLOW_LANE_DEVICE_MAX : SLOW_LANE_LOCAL_MAX,
+    );
   }, [isDeviceSource]);
 
   // Adopt the per-source default page size until the user overrides it.
@@ -1322,6 +1510,49 @@ function SourcePreviewPanelInner({
     };
   }, [items]);
 
+  // Next-page prefetch (iOS PHCachingImageManager preheat analogy): once
+  // page N has rendered and the grid is idle, warm the browser HTTP cache
+  // with the adjacent listing JSON (N+1, plus N-1 when N > 1) so a page
+  // turn rarely waits on a USB scan. Fire-and-forget with its own
+  // AbortController — responses are dropped; the point is priming cache.
+  useEffect(() => {
+    if (loading || items.length === 0 || previewError) return;
+    if (totalPages <= 1) return;
+    const targets: number[] = [];
+    if (page + 1 <= totalPages) targets.push(page + 1);
+    if (page > 1) targets.push(page - 1);
+    if (targets.length === 0) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      for (const t of targets) {
+        fetch(getPreviewUrl(t, pageSize, sortBy), {
+          signal: controller.signal,
+          headers: authHeaders(),
+        }).catch(() => {
+          /* prefetch is best-effort */
+        });
+      }
+    }, 1200);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+    // getPreviewUrl closes over the source key parts listed below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    loading,
+    items.length,
+    previewError,
+    page,
+    totalPages,
+    pageSize,
+    sortBy,
+    isRecursive,
+    sourcePath,
+    deviceSource?.device_id,
+    deviceSource?.device_path,
+  ]);
+
   const toggleItem = useCallback(
     (absPath: string) => {
       const next = new Set(selectedRef.current);
@@ -1364,7 +1595,8 @@ function SourcePreviewPanelInner({
   }, [visibleItems, allVisibleSelected, onSelectionConfirm]);
 
   const handleRetry = useCallback(() => {
-    setPage(1);
+    // Preserve page position: only bump the nonce so the same page
+    // refetches — never reset to page 1 (items stay as the stale grid).
     setLocked(false);
     setDeviceDisconnected(false);
     lockNotifiedRef.current = false;
@@ -1551,10 +1783,12 @@ function SourcePreviewPanelInner({
     (n: number) => {
       const clamped = Math.max(1, Math.min(totalPages, n));
       if (clamped === page) return;
-      // Drop queued (not-yet-granted) thumb fetches; granted fetches abort
-      // via cell unmount (AbortController + blob revoke). Also abort any
-      // in-flight preview page fetch so offscreen work stops immediately.
-      thumbQueueRef.current.reset();
+      // Drop queued (not-yet-granted) thumb fetches on both lanes; granted
+      // fetches abort via cell unmount (AbortController + blob revoke).
+      // Also abort any in-flight preview page fetch so offscreen work stops
+      // immediately.
+      fastThumbQueueRef.current.reset();
+      slowThumbQueueRef.current.reset();
       if (abortRef.current) {
         try {
           abortRef.current.abort();
@@ -1564,10 +1798,17 @@ function SourcePreviewPanelInner({
       }
       setFocusedIndex(null);
       setPage(clamped);
-      gridRef.current?.scrollIntoView({ block: "nearest" });
     },
     [page, totalPages],
   );
+
+  // Page/sort/page-size turns swap the grid contents in place — reset the
+  // inner scroll container (the grid div itself is the .overflow-y-auto
+  // scroller; scrollIntoView on it is a no-op) so the new page's top
+  // cells intersect the thumbnail observer.
+  useEffect(() => {
+    if (gridRef.current) gridRef.current.scrollTop = 0;
+  }, [page, sortBy, pageSize]);
 
   const pageList = useMemo(() => {
     // Windowed page numbers: 1 … p-1 p p+1 … N
@@ -1593,7 +1834,7 @@ function SourcePreviewPanelInner({
                 &middot; Device not connected
               </span>
             )}
-            {!loading && !isDeviceDisconnected && metadata.total > 0 && !locked && (
+            {!isDeviceDisconnected && metadata.total > 0 && !locked && (
               <span className="text-xs text-muted-foreground">
                 {metadata.total} file{metadata.total !== 1 ? "s" : ""} &middot;{" "}
                 {formatBytes(metadata.total_size_bytes)}
@@ -1601,7 +1842,7 @@ function SourcePreviewPanelInner({
               </span>
             )}
           </div>
-          {!loading && !isDeviceDisconnected && items.length > 0 && !locked && (
+          {!isDeviceDisconnected && items.length > 0 && !locked && (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1646,7 +1887,7 @@ function SourcePreviewPanelInner({
         </div>
 
         {/* Filter pills + sort row */}
-        {!loading && items.length > 0 && (
+        {items.length > 0 && (
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1" role="tablist">
               {(["all", "photo", "video"] as const).map((f) => (
@@ -1686,7 +1927,8 @@ function SourcePreviewPanelInner({
                 onChange={(val) => {
                   setPageSize(Number(val) || 100);
                   setPageSizeTouched(true);
-                  thumbQueueRef.current.reset();
+                  fastThumbQueueRef.current.reset();
+                  slowThumbQueueRef.current.reset();
                   setPage(1);
                 }}
                 options={[
@@ -1701,7 +1943,6 @@ function SourcePreviewPanelInner({
                 onChange={(val) => {
                   setSortBy(val);
                   setPage(1);
-                  setItems([]);
                 }}
                 options={[
                   { value: "newest", label: "Newest first" },
@@ -1718,7 +1959,7 @@ function SourcePreviewPanelInner({
         )}
 
         {/* Pre-scan banner */}
-        {!loading && likelyDupPaths.size > 0 && (
+        {likelyDupPaths.size > 0 && (
           <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-lg text-xs text-blue-700 dark:text-blue-300">
             <span className="flex-1">
               {likelyDupPaths.size} file{likelyDupPaths.size !== 1 ? "s" : ""}{" "}
@@ -1746,9 +1987,25 @@ function SourcePreviewPanelInner({
           </div>
         )}
 
-        {/* Thumbnail grid area */}
-        <AnimatePresence mode="wait">
-          {loading && <SkeletonGrid key="skeleton" count={20} />}
+        {/* Thumbnail grid area — stale-while-revalidate: the previous
+            page stays mounted while the next page loads (thin top bar
+            signals the load). The full skeleton shows only on first load
+            or a source change (both start with items empty). A fetch
+            error never wipes items, so the stale grid + page position
+            survive and Retry refetches in place. */}
+        {loading && items.length > 0 && (
+          <div
+            className="h-1 rounded-full bg-muted overflow-hidden"
+            role="progressbar"
+            aria-label="Loading preview page"
+          >
+            <div className="h-full w-1/3 rounded-full bg-action/60 animate-pulse" />
+          </div>
+        )}
+        <AnimatePresence>
+          {loading && items.length === 0 && (
+            <SkeletonGrid key="skeleton" count={20} />
+          )}
 
           {!loading && isDeviceDisconnected && (
             <motion.div
@@ -1766,7 +2023,9 @@ function SourcePreviewPanelInner({
                     Device not connected
                   </p>
                   <p className="text-xs text-muted-foreground max-w-sm">
-                    Connect your iPhone, iPad, Android phone, or digital camera via USB cable and ensure the device is unlocked to preview media.
+                    Connect your iPhone, iPad, Android phone, or digital camera
+                    via USB cable and ensure the device is unlocked to preview
+                    media.
                   </p>
                 </div>
                 <div className="flex items-center gap-2 pt-1">
@@ -1803,14 +2062,29 @@ function SourcePreviewPanelInner({
                   </p>
                   {locked && (
                     <div className="mt-3 flex flex-col items-center gap-2 text-xs text-muted-foreground max-w-xs">
-                      <p className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+                      <p className="flex items-center gap-1.5 font-semibold text-amber-700 dark:text-amber-300">
                         <Lock className="w-3.5 h-3.5 shrink-0" />
-                        Device is locked — unlock your iPhone and tap Trust to
-                        continue
+                        iPhone locked — preview paused, not failed
                       </p>
-                      <p className="text-[11px] text-muted-foreground/80">
-                        Transfers pause automatically when the phone locks.
-                        Auto-lock cannot be disabled from this PC.
+                      <p className="text-[11px] leading-snug">
+                        Unlock your iPhone and tap Trust once, then hit Retry
+                        below. Pauses, not failed — Resume reuses the session
+                        and skips completed files (current file restarts;
+                        preview re-scans).
+                      </p>
+                      <ul className="text-left text-[11px] leading-snug space-y-0.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 w-full">
+                        <li>• Tap the screen now and then to keep it awake</li>
+                        <li>
+                          • iPhone Settings &gt; Display &gt; Auto-Lock &gt;
+                          Never (while transferring)
+                        </li>
+                        <li>• Use a good cable + rear USB port</li>
+                        <li>• Tap Trust once when asked</li>
+                      </ul>
+                      <p className="text-[11px] text-muted-foreground/80 leading-snug">
+                        Slow previews retry on their own — after 15 seconds we
+                        keep this page so you can retry without losing your
+                        place.
                       </p>
                     </div>
                   )}
@@ -1844,26 +2118,29 @@ function SourcePreviewPanelInner({
             </motion.div>
           )}
 
-          {!loading && !isDeviceDisconnected && !previewError && items.length === 0 && (
-            <motion.div
-              key="empty"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
-              <EmptyState
-                devicePath={deviceSource?.device_path ?? null}
-                sourcePath={sourcePath ?? null}
-                onImportAll={handleImportAll}
-                isImporting={loading}
-                onTryAnotherDriver={onTryAnotherDriver}
-                onRetryDriver={onRetryDriver}
-                isRetryingDriver={isRetryingDriver}
-              />
-            </motion.div>
-          )}
+          {!loading &&
+            !isDeviceDisconnected &&
+            !previewError &&
+            items.length === 0 && (
+              <motion.div
+                key="empty"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
+                <EmptyState
+                  devicePath={deviceSource?.device_path ?? null}
+                  sourcePath={sourcePath ?? null}
+                  onImportAll={handleImportAll}
+                  isImporting={loading}
+                  onTryAnotherDriver={onTryAnotherDriver}
+                  onRetryDriver={onRetryDriver}
+                  isRetryingDriver={isRetryingDriver}
+                />
+              </motion.div>
+            )}
 
-          {!loading && items.length > 0 && (
+          {items.length > 0 && (
             <motion.div
               key="grid"
               initial={{ opacity: 0 }}
@@ -1881,7 +2158,7 @@ function SourcePreviewPanelInner({
               >
                 {visibleItems.map((item, index) => (
                   <MediaThumbCell
-                    key={`${sortBy}-${page}-${item.abs_path}`}
+                    key={item.abs_path}
                     item={item}
                     isSelected={selected.has(item.abs_path)}
                     onToggle={() => {
@@ -1893,7 +2170,8 @@ function SourcePreviewPanelInner({
                     isFocused={index === focusedIndex}
                     cellIndex={index}
                     makeThumbnailUrl={makeThumbnailUrl}
-                    thumbQueue={thumbQueueRef.current}
+                    fastQueue={fastThumbQueueRef.current}
+                    slowQueue={slowThumbQueueRef.current}
                   />
                 ))}
               </div>
@@ -1904,7 +2182,7 @@ function SourcePreviewPanelInner({
         {/* Pagination — pages are navigated, not grown, so the DOM and
             the concurrent thumbnail work stay bounded per page while the
             selection (and its byte total) spans pages */}
-        {!loading && !isDeviceDisconnected && !previewError && totalPages > 1 && (
+        {!isDeviceDisconnected && !previewError && totalPages > 1 && (
           <div className="flex items-center justify-center gap-1.5 pt-1">
             <button
               type="button"
@@ -2021,11 +2299,16 @@ function SourcePreviewPanelInner({
           </div>
         )}
         {locked && (
-          <div className="flex items-center justify-between pt-1">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Lock className="w-3.5 h-3.5 shrink-0" />
+          <div className="flex items-center justify-between pt-1 gap-3">
+            <div className="flex items-start gap-2 text-xs text-muted-foreground">
+              <Lock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
               <span>
-                Device locked — unlock iPhone and tap Trust to continue
+                <span className="font-semibold text-amber-700 dark:text-amber-300">
+                  Device locked — paused, not failed.
+                </span>{" "}
+                Unlock iPhone, tap Trust once, then retry — pauses, not failed.
+                Resume reuses the session and skips completed files (current
+                file restarts; preview re-scans).
               </span>
             </div>
             <div className="flex items-center gap-2">

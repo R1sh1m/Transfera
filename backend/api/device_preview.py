@@ -7,11 +7,14 @@ and lazy thumbnail generation with in-memory LRU cache.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io as _io
+import json
 import logging
 import math
 import os
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -20,7 +23,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from backend.api.auth import require_local_token, require_local_token_or_query
@@ -469,6 +472,10 @@ def _listing_store(
             _listing_cache.popitem(last=False)
         _listing_cache[key] = _ListingCacheEntry(items, photos, videos, total_size, snapshot, now, scan_id)
         _listing_cache.move_to_end(key)
+    try:
+        _listing_l2_store(key, items, photos, videos, total_size, snapshot, scan_id)
+    except Exception:
+        pass
     return scan_id
 
 
@@ -506,6 +513,10 @@ def _listing_purge_disconnected(current_serials: set) -> None:
             _listing_cache.pop(k, None)
     if stale_keys:
         logger.debug("ios-preview listing cache purged %d entries for disconnected devices", len(stale_keys))
+    try:
+        _listing_l2_purge_devices({k[0] for k in stale_keys if isinstance(k, tuple) and k and isinstance(k[0], str)})
+    except Exception:
+        pass
 
 
 def purge_listing_cache_for_serial(serial: str) -> int:
@@ -541,6 +552,10 @@ def purge_listing_cache_for_serial(serial: str) -> int:
                 purged += 1
     if purged:
         logger.info("ios-preview listing cache purged %d key(s) for serial %s", purged, serial)
+    try:
+        _listing_l2_purge_matching(candidates, lowered)
+    except Exception:
+        pass
     return purged
 
 
@@ -574,7 +589,513 @@ def find_listing_by_scan_id(scan_id: str) -> dict | None:
                 "total_size_bytes": ent.total_size,
                 "age_s": age_s,
             }
+    try:
+        return _listing_l2_find_by_scan_id(scan_id)
+    except Exception:
+        pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# SQLite L2 listing store (survives restarts; L1 _listing_cache stays L1)
+# ---------------------------------------------------------------------------
+# Same key shape as L1 (device_id, path, recursive, sort_by) plus snapshot
+# digest + scan_id columns. Reuse is ALWAYS snapshot-gated: a stored row is
+# only served when its snapshot digest equals a fresh single-browse
+# snapshot, so a restart costs one cheap browse instead of a full AFC
+# rewalk. Partial walks are never stored (callers only store successful
+# walks — PartialWalkError paths return before _listing_store).
+_LISTING_L2_DB_NAME = "device_listings.db"
+_LISTING_L2_MAX_JSON_BYTES = 8 * 1024 * 1024
+_LISTING_L2_PRUNE_AFTER_S = 30 * 24 * 3600
+
+# Persistent negative cache for truly-undecodable thumbnails: fallback
+# reasons keyed by device + path + file size/mtime, TTL 24 h. Transient
+# USB failures are NEVER stored here (they return 503 before reaching the
+# grey-fallback tail that writes this cache).
+_THUMB_FAIL_TTL_S = 24 * 3600
+_PERSISTENT_FAIL_REASONS = frozenset({"undecodable", "no-pillow-heif"})
+
+
+def _listing_l2_db_path() -> Path | None:
+    try:
+        from backend.config import CACHE_DIR
+
+        d = Path(CACHE_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        return d / _LISTING_L2_DB_NAME
+    except Exception:
+        return None
+
+
+def _listing_l2_connect() -> Any:
+    db_path = _listing_l2_db_path()
+    if db_path is None:
+        raise OSError("no cache dir")
+    conn = sqlite3.connect(str(db_path), timeout=5.0, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS device_listings ("
+        " device_id TEXT NOT NULL, path TEXT NOT NULL, recursive INTEGER NOT NULL,"
+        " sort_by TEXT NOT NULL, snapshot_count INTEGER NOT NULL DEFAULT 0,"
+        " snapshot_digest TEXT NOT NULL DEFAULT '', scan_id TEXT NOT NULL DEFAULT '',"
+        " photos INTEGER NOT NULL DEFAULT 0, videos INTEGER NOT NULL DEFAULT 0,"
+        " total_size INTEGER NOT NULL DEFAULT 0, items_json TEXT NOT NULL DEFAULT '[]',"
+        " cached_at REAL NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (device_id, path, recursive, sort_by))"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thumb_fail_cache ("
+        " fail_key TEXT PRIMARY KEY, reason TEXT NOT NULL DEFAULT 'undecodable',"
+        " cached_at REAL NOT NULL DEFAULT 0)"
+    )
+    conn.commit()
+    return conn
+
+
+def _listing_l2_store(
+    key: tuple,
+    items: list,
+    photos: int,
+    videos: int,
+    total_size: int,
+    snapshot: tuple[int, str] | None,
+    scan_id: str | None,
+) -> None:
+    """Best-effort L2 write. Never raises; never stores partial walks."""
+    try:
+        if not isinstance(key, tuple) or len(key) < 4:
+            return
+        device_id, path, recursive, sort_by = key[0], key[1], int(bool(key[2])), str(key[3])
+        count = snapshot[0] if snapshot else 0
+        digest = snapshot[1] if snapshot else ""
+        payload = json.dumps(items)
+        if len(payload) > _LISTING_L2_MAX_JSON_BYTES:
+            return
+        conn = _listing_l2_connect()
+        try:
+            now = time.time()
+            conn.execute(
+                "INSERT OR REPLACE INTO device_listings"
+                " (device_id, path, recursive, sort_by, snapshot_count, snapshot_digest,"
+                " scan_id, photos, videos, total_size, items_json, cached_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    device_id,
+                    path,
+                    recursive,
+                    sort_by,
+                    int(count),
+                    str(digest),
+                    str(scan_id or ""),
+                    int(photos),
+                    int(videos),
+                    int(total_size),
+                    payload,
+                    float(now),
+                ),
+            )
+            try:
+                conn.execute(
+                    "DELETE FROM device_listings WHERE cached_at < ?",
+                    (now - _LISTING_L2_PRUNE_AFTER_S,),
+                )
+            except Exception:
+                pass
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("ios-preview L2 store skipped: %s", exc)
+
+
+def _listing_l2_row_to_dict(row: tuple) -> dict | None:
+    try:
+        (device_id, path, recursive, sort_by, count, digest, scan_id, photos, videos, total, payload, cached_at) = row
+        items = json.loads(payload) if payload else []
+        if not isinstance(items, list):
+            return None
+        return {
+            "device_id": device_id,
+            "path": path,
+            "recursive": bool(recursive),
+            "sort_by": sort_by,
+            "snapshot": (int(count), str(digest)),
+            "scan_id": str(scan_id),
+            "photos": int(photos),
+            "videos": int(videos),
+            "total_size": int(total),
+            "items": items,
+            "cached_at": float(cached_at),
+        }
+    except Exception:
+        return None
+
+
+def _listing_l2_find_reusable(
+    device_id: str, path: str, recursive: bool, snapshot: tuple[int, str] | None
+) -> dict | None:
+    """Any L2 row for the same walk whose snapshot digest matches exactly."""
+    if snapshot is None:
+        return None
+    try:
+        conn = _listing_l2_connect()
+        try:
+            cur = conn.execute(
+                "SELECT device_id, path, recursive, sort_by, snapshot_count, snapshot_digest,"
+                " scan_id, photos, videos, total_size, items_json, cached_at"
+                " FROM device_listings WHERE device_id=? AND path=? AND recursive=?",
+                (device_id, path, int(bool(recursive))),
+            )
+            for row in cur.fetchall():
+                d = _listing_l2_row_to_dict(row)
+                if d is not None and d["snapshot"] == (snapshot[0], snapshot[1]):
+                    return d
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("ios-preview L2 lookup skipped: %s", exc)
+    return None
+
+
+def _listing_l2_reused_entry(
+    device_id: str, path: str, recursive: bool, snapshot: tuple[int, str] | None
+) -> tuple[tuple, _ListingCacheEntry] | None:
+    """Wrap an L2 reusable row as an L1-style (key, entry) pair.
+
+    Lets the endpoint reuse the exact L1 code path (re-sort + _listing_store
+    promotion back to L1) with a minimal diff. Returns None on any miss.
+    """
+    try:
+        d = _listing_l2_find_reusable(device_id, path, recursive, snapshot)
+        if d is None:
+            return None
+        key = _listing_cache_key(device_id, path, recursive, d["sort_by"])
+        ent = _ListingCacheEntry(
+            d["items"],
+            d["photos"],
+            d["videos"],
+            d["total_size"],
+            d["snapshot"],
+            time.monotonic(),
+            d["scan_id"],
+        )
+        return key, ent
+    except Exception:
+        return None
+
+
+def _listing_l2_find_by_scan_id(scan_id: str) -> dict | None:
+    if not scan_id:
+        return None
+    try:
+        conn = _listing_l2_connect()
+        try:
+            cur = conn.execute(
+                "SELECT device_id, path, recursive, sort_by, snapshot_count, snapshot_digest,"
+                " scan_id, photos, videos, total_size, items_json, cached_at"
+                " FROM device_listings WHERE scan_id=? LIMIT 1",
+                (str(scan_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            d = _listing_l2_row_to_dict(row)
+            if d is None:
+                return None
+            try:
+                age_s = time.time() - d["cached_at"]
+            except Exception:
+                age_s = -1.0
+            return {
+                "device_id": d["device_id"],
+                "path": d["path"],
+                "recursive": d["recursive"],
+                "total": len(d["items"]),
+                "photos": d["photos"],
+                "videos": d["videos"],
+                "total_size_bytes": d["total_size"],
+                "age_s": age_s,
+            }
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
+
+
+def _listing_l2_purge_devices(device_ids: set) -> None:
+    if not device_ids:
+        return
+    try:
+        conn = _listing_l2_connect()
+        try:
+            conn.executemany("DELETE FROM device_listings WHERE device_id=?", [(d,) for d in device_ids])
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("ios-preview L2 purge skipped: %s", exc)
+
+
+def _listing_l2_purge_matching(candidates: set, lowered: set) -> None:
+    """Mirror purge_listing_cache_for_serial substring semantics in SQLite."""
+    if not candidates and not lowered:
+        return
+    try:
+        conn = _listing_l2_connect()
+        try:
+            cur = conn.execute("SELECT DISTINCT device_id FROM device_listings")
+            ids = [r[0] for r in cur.fetchall() if r and isinstance(r[0], str)]
+            drop = [i for i in ids if i in candidates or any(c in i.lower() for c in lowered if c)]
+            for i in drop:
+                conn.execute("DELETE FROM device_listings WHERE device_id=?", (i,))
+            if drop:
+                conn.commit()
+                logger.info("ios-preview L2 purged %d device(s)", len(drop))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("ios-preview L2 purge skipped: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Inline LQIP (low-quality image placeholders) — zero USB round trips
+# ---------------------------------------------------------------------------
+# Listing path must never touch AFC: _build_ios_preview_items only consults
+# the in-memory LQIP dict (populated opportunistically when thumbnails are
+# generated + loaded from the tiny on-disk LQIP store at page-slice time).
+# Field name is additive-only: every preview item carries ``lqip`` (a
+# data: URL or "").
+_LQIP_MEM_MAX = 2000
+_lqip_mem: OrderedDict[str, str] = OrderedDict()
+_lqip_mem_lock = threading.Lock()
+
+
+def _lqip_key(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> str:
+    return f"{device_id}\x00{dev_path}\x00{fsize}\x00{mtime}"
+
+
+def _lqip_mem_get(key: str) -> str:
+    with _lqip_mem_lock:
+        v = _lqip_mem.get(key)
+        if v is not None:
+            _lqip_mem.move_to_end(key)
+            return v
+    return ""
+
+
+def _lqip_mem_put(key: str, url: str) -> None:
+    if not url:
+        return
+    with _lqip_mem_lock:
+        if key in _lqip_mem:
+            _lqip_mem.move_to_end(key)
+            return
+        while len(_lqip_mem) >= _LQIP_MEM_MAX:
+            _lqip_mem.popitem(last=False)
+        _lqip_mem[key] = url
+
+
+def _lqip_disk_path(key: str) -> Path | None:
+    try:
+        from backend.config import CACHE_DIR
+
+        d = Path(CACHE_DIR) / "device_lqip"
+        d.mkdir(parents=True, exist_ok=True)
+        name = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest() + ".txt"
+        return d / name
+    except Exception:
+        return None
+
+
+def _make_lqip_data_url(jpeg_bytes: bytes) -> str:
+    """Shrink already-fetched thumbnail bytes to a ~32px data URL."""
+    try:
+        if not jpeg_bytes or len(jpeg_bytes) <= 10:
+            return ""
+        from PIL import Image
+
+        img = None
+        try:
+            img = Image.open(_io.BytesIO(jpeg_bytes))
+            img.thumbnail((32, 32))
+            if img.mode not in ("RGB",):
+                img = img.convert("RGB")
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=50)
+            tiny = buf.getvalue()
+        finally:
+            if img is not None:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+        if not tiny:
+            return ""
+        return "data:image/jpeg;base64," + base64.b64encode(tiny).decode("ascii")
+    except Exception:
+        return ""
+
+
+def _store_lqip_for_thumb(device_id: str, dev_path: str, fsize: Any, mtime: Any, jpeg_bytes: bytes) -> None:
+    """Opportunistic LQIP capture on the thumbnail success path (no USB)."""
+    try:
+        url = _make_lqip_data_url(jpeg_bytes)
+        if not url:
+            return
+        key = _lqip_key(device_id, dev_path, fsize, mtime)
+        _lqip_mem_put(key, url)
+        try:
+            p = _lqip_disk_path(key)
+            if p is not None:
+                p.write_text(url, encoding="ascii")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _lqip_lookup_for_page(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> str:
+    """RAM first, then one tiny local text-file read. Never touches AFC."""
+    key = _lqip_key(device_id, dev_path, fsize, mtime)
+    hit = _lqip_mem_get(key)
+    if hit:
+        return hit
+    try:
+        p = _lqip_disk_path(key)
+        if p is not None and p.is_file():
+            url = p.read_text(encoding="ascii").strip()
+            if url.startswith("data:image/"):
+                _lqip_mem_put(key, url)
+                return url
+    except Exception:
+        pass
+    return ""
+
+
+def _attach_lqip_to_page_items(device_id: str, page_items: list) -> None:
+    """Fill empty ``lqip`` fields on the sliced page only (bounded IO)."""
+    try:
+        for it in page_items:
+            try:
+                if not isinstance(it, dict) or it.get("lqip"):
+                    continue
+                abs_path = str(it.get("abs_path", ""))
+                prefix = f"ios://{device_id}"
+                if not abs_path.startswith(prefix):
+                    continue
+                dev_path = abs_path[len(prefix) :] or "/"
+                url = _lqip_lookup_for_page(device_id, dev_path, it.get("size_bytes"), it.get("mtime"))
+                if url:
+                    it["lqip"] = url
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Persistent thumbnail fail cache (24 h TTL, size+mtime keyed)
+# ---------------------------------------------------------------------------
+def _thumb_fail_key(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> str:
+    raw = f"{device_id}\x00{dev_path}\x00{fsize}\x00{mtime}".encode("utf-8", errors="replace")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _thumb_fail_get(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> str | None:
+    """Stored fallback reason, or None on miss/expiry. Never raises."""
+    try:
+        conn = _listing_l2_connect()
+        try:
+            cur = conn.execute(
+                "SELECT reason, cached_at FROM thumb_fail_cache WHERE fail_key=?",
+                (_thumb_fail_key(device_id, dev_path, fsize, mtime),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            reason, cached_at = str(row[0]), float(row[1])
+            if (time.time() - cached_at) > _THUMB_FAIL_TTL_S:
+                try:
+                    conn.execute(
+                        "DELETE FROM thumb_fail_cache WHERE fail_key=?",
+                        (_thumb_fail_key(device_id, dev_path, fsize, mtime),),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+                return None
+            if reason not in _PERSISTENT_FAIL_REASONS:
+                return None
+            return reason
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
+
+
+def _thumb_fail_put(device_id: str, dev_path: str, fsize: Any, mtime: Any, reason: str) -> None:
+    """Persist a truly-undecodable reason. Never raises. Never caches transient."""
+    try:
+        if reason not in _PERSISTENT_FAIL_REASONS:
+            return
+        conn = _listing_l2_connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO thumb_fail_cache (fail_key, reason, cached_at) VALUES (?, ?, ?)",
+                (_thumb_fail_key(device_id, dev_path, fsize, mtime), reason, time.time()),
+            )
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("thumb fail-cache store skipped: %s", exc)
+
+
+def _thumb_fail_clear(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> None:
+    """Drop a fail entry after a later success (e.g. codec installed)."""
+    try:
+        conn = _listing_l2_connect()
+        try:
+            conn.execute(
+                "DELETE FROM thumb_fail_cache WHERE fail_key=?",
+                (_thumb_fail_key(device_id, dev_path, fsize, mtime),),
+            )
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _sort_ios_preview_items(items: list, sort_by: str) -> list:
@@ -622,6 +1143,12 @@ def _build_ios_preview_items(
         item_type = "photo" if ext in PREVIEW_IMAGE_EXTENSIONS else "video"
         size_bytes = entry.size
         mtime = entry.mtime
+        # LQIP is RAM-cache-only here (zero IO, zero USB): page-slice time
+        # backfills from the on-disk LQIP store for items still empty.
+        try:
+            _lqip_inline = _lqip_mem_get(_lqip_key(device_id, device_abs, size_bytes, mtime))
+        except Exception:
+            _lqip_inline = ""
         items.append(
             {
                 "id": _file_id(f"{device_id}:{device_abs}"),
@@ -632,6 +1159,7 @@ def _build_ios_preview_items(
                 "mtime": mtime,
                 "duration_s": None,
                 "thumbnail_ready": False,
+                "lqip": _lqip_inline or "",
             }
         )
         total_size += size_bytes
@@ -685,17 +1213,23 @@ def _purge_device_preview_state(device_id: str) -> None:
 
 
 async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive: bool) -> list:
-    """Full device fetch (recursive walk or single browse) with HTTP error mapping.
+    """Full device fetch (recursive strict walk or single browse) with HTTP error mapping.
 
-    Only successful walks are ever cached by callers — lock/trust failures
-    purge the listing cache and drop pooled AFC slots (transient treatment)
-    before raising, so no Ready state survives a preview-time lock.
+    The recursive walk runs in strict mode: any per-subdirectory failure
+    raises ``PartialWalkError`` (re-raised raw, never converted) so callers
+    never cache a partial walk as complete. Only successful walks are ever
+    cached — lock/trust failures purge the listing cache and drop pooled
+    AFC slots (transient treatment) before raising, so no Ready state
+    survives a preview-time lock. Transient USB failures (timeout, busy,
+    stalled, slot dropped, econnreset, broken pipe — same markers as
+    :func:`_is_transient_thumb_error`) map to 503 + Retry-After:2 with a
+    ``transient`` status so the frontend retries, never 400.
     """
     try:
         if recursive:
             from backend.engines.scanner import _walk_ios_directory
 
-            return await _walk_ios_directory(device_id, path)
+            return await _walk_ios_directory(device_id, path, strict=True)
         return await manager.browse_device(device_id, path)
     except DeviceLockedError as exc:
         _purge_device_preview_state(device_id)
@@ -726,6 +1260,20 @@ async def _fetch_ios_entries(manager: Any, device_id: str, path: str, recursive:
             },
         )
     except Exception as exc:
+        # Partial walks propagate raw: the caller serves stale or
+        # partial-not-cached without ever storing them as complete.
+        if type(exc).__name__ == "PartialWalkError":
+            raise
+        if _is_transient_thumb_error(exc):
+            raise HTTPException(
+                status_code=503,
+                headers={"Retry-After": "2"},
+                detail={
+                    "status": "transient",
+                    "message": f"Device temporarily unavailable while listing {path}: {exc}. "
+                    "Reconnect the device and retry.",
+                },
+            )
         error_text = str(exc)
         exc_lower = error_text.lower()
         if "locked" in exc_lower or "lock" in exc_lower:
@@ -771,7 +1319,7 @@ def _maybe_refresh_ios_listing(key: tuple, device_id: str, path: str, recursive:
 
 
 async def _refresh_ios_listing(key: tuple, device_id: str, path: str, recursive: bool, sort_by: str) -> None:
-    """Background re-walk for a stale entry; never raises."""
+    """Background re-walk for a stale entry; never raises, never caches partial walks."""
     try:
         mgr = get_device_manager()
         try:
@@ -782,9 +1330,21 @@ async def _refresh_ios_listing(key: tuple, device_id: str, path: str, recursive:
         except Exception:
             pass
         if recursive:
+            from backend.engines.scanner import PartialWalkError as _PartialWalkError
             from backend.engines.scanner import _walk_ios_directory
 
-            entries = await _walk_ios_directory(device_id, path)
+            try:
+                entries = await _walk_ios_directory(device_id, path, strict=True)
+            except _PartialWalkError as pw:
+                logger.warning(
+                    "ios-preview background refresh skipped store (partial walk): device=%s path=%s failures=%s/%s: %s",
+                    device_id,
+                    path,
+                    getattr(pw, "failures", "?"),
+                    getattr(pw, "total", "?"),
+                    pw,
+                )
+                return
         else:
             try:
                 entries = await mgr.browse_device(device_id, path)
@@ -1101,6 +1661,78 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
 
 
 # ---------------------------------------------------------------------------
+# Out-of-process thumbnail decode (backend/engines/thumb_worker.py)
+# ---------------------------------------------------------------------------
+# Pillow native codecs (bad HEIC) and ffmpeg (hung spawn) run in a fresh
+# child process per job — the macOS Quick Look XPC / Windows dllhost
+# provider pattern. The event loop only blocks a threadpool thread on a
+# bounded wait; a segfault or hang dies with the child. Mapping preserves
+# the existing endpoint semantics with no API shape change:
+#   * photo bytes/path crash/timeout -> None (partial stage falls back to
+#     the full read; full/local stage falls into the grey-fallback tail).
+#   * video frame crash -> None (existing prefix-no-frame 503 path);
+#     worker timeout -> re-raised as subprocess.TimeoutExpired so the
+#     existing `except subprocess.TimeoutExpired` 503 ffmpeg-timeout branch
+#     fires unchanged.
+# LRU + L2 disk cache, the persistent fail-cache and LQIP capture stay here
+# in the parent untouched.
+
+
+async def _thumb_photo_path_worker(path: str, size: int) -> bytes | None:
+    """Local photo decode out-of-process; crash/timeout -> None (grey tail)."""
+    try:
+        from backend.engines import thumb_worker as _tw
+
+        return await asyncio.to_thread(_tw.generate_photo_from_path, path, size)
+    except Exception as exc:
+        logger.debug("thumb worker photo-path failed for %s: %s", path, exc)
+        return None
+
+
+async def _thumb_video_path_worker(path: str, size: int) -> bytes | None:
+    """Local video frame extraction out-of-process; crash/timeout -> None."""
+    try:
+        from backend.engines import thumb_worker as _tw
+
+        return await asyncio.to_thread(_tw.generate_video_from_path, path, size)
+    except Exception as exc:
+        logger.debug("thumb worker video-path failed for %s: %s", path, exc)
+        return None
+
+
+async def _thumb_photo_bytes_worker(data: bytes, size: int) -> bytes | None:
+    """iOS photo decode out-of-process; crash/timeout -> None (fall through)."""
+    try:
+        from backend.engines import thumb_worker as _tw
+
+        return await asyncio.to_thread(_tw.generate_photo_from_bytes, data, size)
+    except Exception as exc:
+        logger.debug("thumb worker photo-bytes failed (%d bytes): %s", len(data) if data else 0, exc)
+        return None
+
+
+async def _thumb_frame_bytes_worker(data: bytes, size: int, suffix: str) -> bytes | None:
+    """iOS video prefix frame extraction out-of-process.
+
+    Worker timeouts re-raise as subprocess.TimeoutExpired to preserve the
+    existing 503 ffmpeg-timeout branch; crashes -> None (prefix-no-frame).
+    """
+    try:
+        from backend.engines import thumb_worker as _tw
+
+        return await asyncio.to_thread(_tw.extract_frame_from_bytes, data, size, suffix)
+    except subprocess.TimeoutExpired:
+        raise
+    except TimeoutError as exc:
+        # ThumbWorkerTimeout is a TimeoutError: convert so the caller's
+        # `except subprocess.TimeoutExpired` 503 branch fires unchanged.
+        raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=25) from exc
+    except Exception as exc:
+        logger.debug("thumb worker frame-bytes failed (%d bytes): %s", len(data) if data else 0, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Endpoint A: GET /api/device/preview
 # ---------------------------------------------------------------------------
 
@@ -1325,12 +1957,25 @@ async def device_thumbnail(
             headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
 
-    # Offload CPU-bound decode + encode to the thread pool so the
-    # event loop stays free for other requests during thumbnail generation.
+    # Persistent negative cache (24 h TTL): skip re-decoding files already
+    # proven undecodable this session or a previous one. Header unchanged.
+    try:
+        _local_fail = _thumb_fail_get("local", abs_path, file_size, file_mtime)
+    except Exception:
+        _local_fail = None
+    if _local_fail is not None:
+        return Response(
+            content=_generate_gray_fallback(),
+            media_type="image/jpeg",
+            headers={"X-Thumb-Status": "fallback-undecodable"},
+        )
+
+    # Out-of-process decode (thumb_worker): a bad image/ffmpeg hang dies
+    # with the child; crash/timeout folds into the grey-fallback tail below.
     if ext in PREVIEW_IMAGE_EXTENSIONS:
-        jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail, abs_path, size)
+        jpeg_bytes = await _thumb_photo_path_worker(abs_path, size)
     else:
-        jpeg_bytes = await asyncio.to_thread(_generate_video_thumbnail, abs_path, size)
+        jpeg_bytes = await _thumb_video_path_worker(abs_path, size)
 
     is_real = bool(jpeg_bytes and len(jpeg_bytes) > 10)
     if not is_real:
@@ -1345,6 +1990,19 @@ async def device_thumbnail(
     _put_thumb_cache(cache_key, result)
     if is_real:
         await asyncio.to_thread(_write_disk_thumb, disk_key, result)
+        try:
+            _thumb_fail_clear("local", abs_path, file_size, file_mtime)
+        except Exception:
+            pass
+        try:
+            _store_lqip_for_thumb("local", abs_path, file_size, file_mtime, result)
+        except Exception:
+            pass
+    else:
+        try:
+            _thumb_fail_put("local", abs_path, file_size, file_mtime, "undecodable")
+        except Exception:
+            pass
 
     return Response(
         content=result,
@@ -1363,6 +2021,7 @@ async def device_thumbnail(
 
 @router.get("/ios-preview")
 async def ios_preview_directory(
+    request: Request,
     device_id: str = Query(..., description="iOS device serial"),
     path: str = Query(..., description="Virtual path on device, e.g. /DCIM/100APPLE"),
     page: int = Query(1, ge=1),
@@ -1439,17 +2098,19 @@ async def ios_preview_directory(
     snap_ms = 0.0
 
     if recursive:
-        # Fast path: a fresh cache entry (age <= TTL) serves immediately
-        # WITHOUT awaiting the snapshot browse — that one AFC round trip
-        # would otherwise queue behind in-flight thumbnail reads and stall
-        # every page turn. A background refresh keeps it warm.
-        # Only aged/missing entries pay for a synchronous snapshot check,
-        # and a snapshot match under ANY sort_by re-sorts the cached walk
-        # instead of re-walking the device. Pagination/sort/filter always
-        # slice the cached list; totals stay frozen per scan ID.
+        # Stale-while-revalidate: ANY cached entry (fresh or aged) serves
+        # its page immediately with zero synchronous AFC round trips, and a
+        # deduped background refresh revalidates it. Only a total cache
+        # miss pays for a synchronous snapshot check + full walk, and a
+        # snapshot failure with no cache to serve falls through to the
+        # walk (whose own transient mapping yields 503 + Retry-After).
+        # Pagination/sort/filter always slice the cached list; totals stay
+        # frozen per scan ID. Partial walks are never stored.
+        from backend.engines.scanner import PartialWalkError
+
         cached = _listing_cache_get(cache_key)
         now = time.monotonic()
-        if cached is not None and (now - cached.cached_at) <= _LISTING_TTL_S:
+        if cached is not None:
             items, total_photos, total_videos, total_size = (
                 cached.items,
                 cached.photos,
@@ -1457,14 +2118,33 @@ async def ios_preview_directory(
                 cached.total_size,
             )
             scan_id = cached.scan_id
-            cache_status = "hit"
+            if (now - cached.cached_at) <= _LISTING_TTL_S:
+                cache_status = "hit"
+            else:
+                cache_status = "stale"
             _listing_touch(cache_key, now)
             _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
         else:
+            # Total miss — abort promptly when the frontend already went
+            # away (15 s abort) so rapid page turns don't pile up walks.
+            try:
+                if await request.is_disconnected():
+                    raise HTTPException(
+                        status_code=499,
+                        detail={"status": "client-closed", "message": "Client disconnected."},
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass
             _s0 = time.perf_counter()
             snap = await _listing_quick_snapshot(manager, device_id, path)
             snap_ms = (time.perf_counter() - _s0) * 1000.0
             reused = _listing_find_reusable(device_id, path, True, snap)
+            if reused is None:
+                # L2 (SQLite): same snapshot digest survives restarts, so a
+                # restart costs one browse instead of a full AFC rewalk.
+                reused = _listing_l2_reused_entry(device_id, path, True, snap)
             if reused is not None:
                 reuse_key, reuse_ent = reused
                 items = _sort_ios_preview_items(list(reuse_ent.items), sort_by)
@@ -1477,30 +2157,61 @@ async def ios_preview_directory(
                 scan_id = _listing_store(
                     cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic()
                 )
-            elif cached is not None and snap is None:
-                # Snapshot browse itself failed (transient USB): serve the
-                # aged page now and refresh in the background rather than
-                # blocking on a full walk that will likely fail too.
-                items, total_photos, total_videos, total_size = (
-                    cached.items,
-                    cached.photos,
-                    cached.videos,
-                    cached.total_size,
-                )
-                scan_id = cached.scan_id
-                cache_status = "hit-unvalidated"
-                _maybe_refresh_ios_listing(cache_key, device_id, path, True, sort_by)
-        if items is None:
-            _w0 = time.perf_counter()
-            entries = await _fetch_ios_entries(manager, device_id, path, True)
-            walk_ms = (time.perf_counter() - _w0) * 1000.0
-            items, total_photos, total_videos, total_size = _build_ios_preview_items(
-                entries, device_id=device_id, path=path, recursive=True, sort_by=sort_by
-            )
-            _s0 = time.perf_counter()
-            snap = await _listing_quick_snapshot(manager, device_id, path)
-            snap_ms += (time.perf_counter() - _s0) * 1000.0
-            scan_id = _listing_store(cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic())
+            else:
+                try:
+                    if await request.is_disconnected():
+                        raise HTTPException(
+                            status_code=499,
+                            detail={"status": "client-closed", "message": "Client disconnected."},
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+                _w0 = time.perf_counter()
+                try:
+                    entries = await _fetch_ios_entries(manager, device_id, path, True)
+                except PartialWalkError as pw:
+                    walk_ms = (time.perf_counter() - _w0) * 1000.0
+                    logger.warning(
+                        "ios-preview partial walk NOT cached device=%s path=%s failures=%s/%s walk_ms=%.1f: %s",
+                        device_id,
+                        path,
+                        getattr(pw, "failures", "?"),
+                        getattr(pw, "total", "?"),
+                        walk_ms,
+                        pw,
+                    )
+                    if _is_transient_thumb_error(pw) or _is_transient_thumb_error(getattr(pw, "__cause__", None)):
+                        raise HTTPException(
+                            status_code=503,
+                            headers={"Retry-After": "2"},
+                            detail={
+                                "status": "transient",
+                                "message": f"Device temporarily unavailable while listing {path}: {pw}. "
+                                "Reconnect the device and retry.",
+                            },
+                        )
+                    # Non-transient partial with nothing cached: serve what
+                    # we got but NEVER store it (totals may drift on retry,
+                    # the next miss re-walks fresh).
+                    partial_entries = getattr(pw, "partial", []) or []
+                    items, total_photos, total_videos, total_size = _build_ios_preview_items(
+                        partial_entries, device_id=device_id, path=path, recursive=True, sort_by=sort_by
+                    )
+                    cache_status = "partial-not-cached"
+                    scan_id = _scan_id_for(device_id, path, True, None)
+                else:
+                    walk_ms = (time.perf_counter() - _w0) * 1000.0
+                    items, total_photos, total_videos, total_size = _build_ios_preview_items(
+                        entries, device_id=device_id, path=path, recursive=True, sort_by=sort_by
+                    )
+                    _s0 = time.perf_counter()
+                    snap = await _listing_quick_snapshot(manager, device_id, path)
+                    snap_ms += (time.perf_counter() - _s0) * 1000.0
+                    scan_id = _listing_store(
+                        cache_key, items, total_photos, total_videos, total_size, snap, time.monotonic()
+                    )
     else:
         # Flat fast path: a fresh cache entry (age <= TTL) serves the page
         # with zero AFC round trips — pagination/sort/filter slice the
@@ -1537,6 +2248,8 @@ async def ios_preview_directory(
             else:
                 # Same-walk, different-sort entry: re-sort instead of rebuilding.
                 reused = _listing_find_reusable(device_id, path, False, snap)
+                if reused is None:
+                    reused = _listing_l2_reused_entry(device_id, path, False, snap)
                 if reused is not None:
                     _reuse_key, reuse_ent = reused
                     items = _sort_ios_preview_items(list(reuse_ent.items), sort_by)
@@ -1584,6 +2297,8 @@ async def ios_preview_directory(
     pages = max(1, math.ceil(total / page_size))
     start_idx = (page - 1) * page_size
     page_items = items[start_idx : start_idx + page_size]
+    # Inline LQIP backfill for the sliced page only (local cache IO, no USB).
+    _attach_lqip_to_page_items(device_id, page_items)
 
     return {
         "total": total,
@@ -1619,6 +2334,14 @@ async def ios_thumbnail(
     _ = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
     if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
         raise HTTPException(status_code=400, detail="Invalid device path")
+    # Stat-failure rows (browse_device fallback) report size=0/mtime=0 —
+    # using those as disk-cache key components would bust L2 (a later
+    # listing with real stat values would miss, and vice versa). Treat
+    # zero/negative values as unknown so the key stays stable.
+    if not file_size:
+        file_size = None
+    if not file_mtime:
+        file_mtime = None
     cache_key = (f"ios:{device_id}:{path}", size)
     cached = _get_thumb_cache(cache_key)
     if cached is not None:
@@ -1641,6 +2364,20 @@ async def ios_thumbnail(
     jpeg_bytes: bytes | None = None
     transient_exc: BaseException | None = None
     fail_reason = "unknown"
+
+    # Persistent negative cache: truly-undecodable files (24 h TTL,
+    # size+mtime keyed) skip Pillow/ffmpeg AND USB entirely.
+    if ext in PREVIEW_IMAGE_EXTENSIONS:
+        try:
+            _fail_hit = _thumb_fail_get(device_id, path, file_size, file_mtime)
+        except Exception:
+            _fail_hit = None
+        if _fail_hit is not None:
+            return Response(
+                content=_generate_gray_fallback(),
+                media_type="image/jpeg",
+                headers={"X-Thumb-Status": f"fallback-{_fail_hit}"},
+            )
 
     try:
         if ext in PREVIEW_IMAGE_EXTENSIONS:
@@ -1667,8 +2404,9 @@ async def ios_thumbnail(
                 logger.debug("iOS partial read raised for %s: %s", path, exc)
 
             if partial_bytes and len(partial_bytes) >= 4096:
-                # Threadpool: EXIF-extract + Pillow decode/encode are blocking.
-                jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail_from_bytes, partial_bytes, size)
+                # Out-of-process: EXIF-extract + Pillow decode run in the
+                # worker child, never on the event loop or its threads.
+                jpeg_bytes = await _thumb_photo_bytes_worker(partial_bytes, size)
                 if jpeg_bytes and len(jpeg_bytes) > 10:
                     logger.debug("iOS partial-read thumbnail hit for %s (%d bytes)", path, len(partial_bytes))
                 else:
@@ -1704,7 +2442,7 @@ async def ios_thumbnail(
                     async with _IOS_THUMB_SEMAPHORE:
                         file_bytes = await read_device_file(device_id, path)
                     if file_bytes and len(file_bytes) > 100:
-                        jpeg_bytes = await asyncio.to_thread(_generate_photo_thumbnail_from_bytes, file_bytes, size)
+                        jpeg_bytes = await _thumb_photo_bytes_worker(file_bytes, size)
                         if jpeg_bytes and len(jpeg_bytes) > 10:
                             logger.debug("iOS full-read thumbnail hit for %s (%d bytes)", path, len(file_bytes))
                         else:
@@ -1773,7 +2511,7 @@ async def ios_thumbnail(
                     )
             if prefix_bytes and len(prefix_bytes) > 4096:
                 try:
-                    jpeg_bytes = await asyncio.to_thread(_extract_frame_from_bytes, prefix_bytes, size, ext or ".mp4")
+                    jpeg_bytes = await _thumb_frame_bytes_worker(prefix_bytes, size, ext or ".mp4")
                 except subprocess.TimeoutExpired as exc:
                     logger.debug("iOS ffmpeg timeout for %s: %s", path, exc)
                     return Response(
@@ -1816,6 +2554,14 @@ async def ios_thumbnail(
     if jpeg_bytes and len(jpeg_bytes) > 10:
         _put_thumb_cache(cache_key, jpeg_bytes)
         await asyncio.to_thread(_write_disk_thumb, disk_key, jpeg_bytes)
+        try:
+            _thumb_fail_clear(device_id, path, file_size, file_mtime)
+        except Exception:
+            pass
+        try:
+            _store_lqip_for_thumb(device_id, path, file_size, file_mtime, jpeg_bytes)
+        except Exception:
+            pass
         return Response(
             content=jpeg_bytes,
             media_type="image/jpeg",
@@ -1842,6 +2588,11 @@ async def ios_thumbnail(
     # unsupported type, or no-heif-codec): grey 200 with a reason header so
     # the frontend can distinguish fallback from a real thumbnail.
     logger.debug("iOS thumbnail grey fallback for %s: reason=%s", path, fail_reason)
+    if ext in PREVIEW_IMAGE_EXTENSIONS and fail_reason in _PERSISTENT_FAIL_REASONS:
+        try:
+            _thumb_fail_put(device_id, path, file_size, file_mtime, fail_reason)
+        except Exception:
+            pass
     grey = _generate_gray_fallback()
     return Response(
         content=grey,

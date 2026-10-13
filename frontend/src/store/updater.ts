@@ -41,6 +41,7 @@ export interface UpdaterState {
   downloadUpdate: () => Promise<void>;
   installAndRestart: () => Promise<void>;
   dismiss: () => void;
+  resolveReleaseNotes: () => Promise<string | null>;
   setAutoCheckEnabled: (enabled: boolean) => void;
   setAutoDownloadEnabled: (enabled: boolean) => void;
   setIsSettingsOpen: (open: boolean) => void;
@@ -93,6 +94,109 @@ function updaterErrorMessage(err: unknown, fallback: string): string {
     return raw;
   }
   return fallback;
+}
+
+/** Returns true if notes are empty, just the app name/version, or a generic placeholder. */
+export function isPlaceholderNotes(
+  body?: string | null,
+  version?: string,
+): boolean {
+  if (!body) return true;
+  const trimmed = body.trim();
+  if (!trimmed) return true;
+  if (/^Transfera\s*(v?\d+(\.\d+)*)?\s*$/i.test(trimmed)) return true;
+  if (/^Release\s*(v?\d+(\.\d+)*)?\s*$/i.test(trimmed)) return true;
+  if (/^v?\d+(\.\d+)*\s*$/i.test(trimmed)) return true;
+  if (
+    /^Transfera\s*(v?\d+(\.\d+)*)?\s*-\s*see the github release/i.test(trimmed)
+  ) {
+    return true;
+  }
+  if (
+    /^\*\*Full Changelog\*\*:\s*https:\/\/github\.com\/[^\s]+$/i.test(trimmed)
+  ) {
+    return true;
+  }
+  if (
+    version &&
+    (trimmed.toLowerCase() === `transfera ${version.toLowerCase()}` ||
+      trimmed.toLowerCase() === `transfera v${version.toLowerCase()}` ||
+      trimmed.toLowerCase() === `v${version.toLowerCase()}` ||
+      trimmed.toLowerCase() === version.toLowerCase())
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Fetches real release notes from GitHub commit / release when latest.json has a placeholder. */
+export async function fetchReleaseNotes(
+  version: string,
+): Promise<string | null> {
+  const cleanVer = version.replace(/^v/, "");
+  const tag = `v${cleanVer}`;
+
+  // 1. Try GitHub Releases API for tag
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/R1sh1m/Transfera/releases/tags/${tag}`,
+      {
+        headers: { Accept: "application/vnd.github.v3+json" },
+      },
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const rawBody = typeof data.body === "string" ? data.body.trim() : "";
+      if (rawBody && !isPlaceholderNotes(rawBody, cleanVer)) {
+        const cleaned = rawBody
+          .replace(
+            /\n*\*\*Full Changelog\*\*:\s*https:\/\/github\.com\/[^\s]+/gi,
+            "",
+          )
+          .trim();
+        if (cleaned && !isPlaceholderNotes(cleaned, cleanVer)) {
+          return cleaned;
+        }
+      }
+    }
+  } catch (err) {
+    console.debug("[updater] GitHub release tag fetch skipped:", err);
+  }
+
+  // 2. Try commit message of the release tag
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/R1sh1m/Transfera/commits/${tag}`,
+      {
+        headers: { Accept: "application/vnd.github.v3+json" },
+      },
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const message =
+        typeof data.commit?.message === "string"
+          ? data.commit.message.trim()
+          : "";
+      if (message) {
+        // Strip release commit header (e.g. "chore: release version 1.1.1")
+        const parts = message.split(/\r?\n\r?\n/);
+        let candidate =
+          parts.length > 1
+            ? parts.slice(1).join("\n\n").trim()
+            : parts[0].trim();
+        candidate = candidate
+          .replace(/^chore(\([^)]+\))?:\s*release[^\n]*\n*/i, "")
+          .trim();
+        if (candidate && !isPlaceholderNotes(candidate, cleanVer)) {
+          return candidate;
+        }
+      }
+    }
+  } catch (err) {
+    console.debug("[updater] GitHub commit message fetch skipped:", err);
+  }
+
+  return null;
 }
 
 // Module-level reference to the active Tauri Update resource.
@@ -190,10 +294,23 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         }
         activeUpdateResource = update;
         downloadedFlag = false;
+
+        let body = update.body;
+        if (isPlaceholderNotes(body, update.version)) {
+          try {
+            const fetched = await fetchReleaseNotes(update.version);
+            if (fetched) {
+              body = fetched;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+
         const info: UpdateInfo = {
           version: update.version,
           currentVersion,
-          body: update.body,
+          body,
           date: update.date,
         };
         set({ updateInfo: info });
@@ -424,6 +541,20 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       /* ignore */
     }
     set({ autoDownloadEnabled: enabled });
+  },
+
+  resolveReleaseNotes: async () => {
+    const info = get().updateInfo;
+    if (!info || !info.version) return null;
+    if (info.body && !isPlaceholderNotes(info.body, info.version)) {
+      return info.body;
+    }
+    const fetched = await fetchReleaseNotes(info.version);
+    if (fetched) {
+      set({ updateInfo: { ...info, body: fetched } });
+      return fetched;
+    }
+    return info.body || null;
   },
 
   setIsSettingsOpen: (open: boolean) => {

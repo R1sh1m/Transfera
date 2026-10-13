@@ -433,10 +433,13 @@ function useBackgroundPollingThrottle() {
 }
 
 // ---------------------------------------------------------------------------
-// Backend Down Screen
+// Backend Down Screen + non-blocking startup pill
 // The Tauri shell ships the frozen sidecar — there is no first-run Python
 // install. backend:down therefore always means "engine failed", answered
 // with Retry (health probe) rather than a setup wizard.
+// The transient backend:starting state is deliberately NON-blocking: the
+// app shell stays visible with page-level skeletons and a small
+// bottom-left status pill. Only genuine failures take over the screen.
 // ---------------------------------------------------------------------------
 function BackendDownScreen() {
   const serverDown = useTransferStore((s) => s.ui.serverDown);
@@ -532,74 +535,23 @@ function BackendDownScreen() {
     }
   }, [health]);
 
-  if (!serverDown && !isStarting) return null;
-
-  // Staged splash copy by elapsed time (display only).
-  const stageHeading =
+  // Shortened staged copy for the non-blocking status pill (display only).
+  // The full app shell stays interactive underneath — the pill is the only
+  // startup chrome, and it dismisses the moment health reports "ok".
+  const stageShort =
     elapsed < 15
       ? "Starting engine…"
       : elapsed < 45
         ? "Warming metadata…"
         : "Almost ready…";
-  const stageCopy =
-    elapsed < 15
-      ? "The backend engine is starting up. This takes a few seconds."
-      : elapsed < 45
-        ? "Still starting — loading local metadata and checking device health."
-        : "Taking longer than usual — still working. You can leave this screen open.";
 
   // Background task progress from health endpoint (display-only).
-  // Fixed height reserves the space so the splash never shifts when the bar appears or updates.
   const bgTask = health?.background_task;
 
-  // Show a clean loading screen while the backend is in the process of starting up
-  if (isStarting && !serverDown) {
-    return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
-      >
-        <div className="absolute top-3 right-3">
-          <WindowControls />
-        </div>
-        <div className="text-center space-y-4 max-w-sm mx-auto px-6">
-          <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
-            <Loader2 className="w-8 h-8 text-primary animate-spin" />
-          </div>
-          <h1 className="text-xl font-bold text-foreground">{stageHeading}</h1>
-          <p className="text-sm text-muted-foreground">{stageCopy}</p>
-          <p className="text-xs text-muted-foreground tabular-nums">
-            {elapsed}s elapsed
-          </p>
-          {/* Background-task progress from the health endpoint (display-only).
-              Fixed height reserves the space so the splash never shifts when the bar appears or updates. */}
-          <div
-            className="h-10 flex flex-col items-center justify-center gap-1.5"
-            aria-live="polite"
-          >
-            {bgTask ? (
-              <>
-                <div className="w-56 h-1.5 rounded-full bg-muted overflow-hidden">
-                  <div
-                    className="h-full bg-primary rounded-full transition-all duration-300"
-                    style={{
-                      width: `${Math.min(100, Math.max(0, bgTask.progress_percent))}%`,
-                    }}
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground truncate max-w-xs">
-                  {bgTask.label}
-                </p>
-              </>
-            ) : (
-              <p className="text-xs text-transparent select-none">{"\u00A0"}</p>
-            )}
-          </div>
-        </div>
-      </motion.div>
-    );
-  }
+  // Non-blocking startup state: the real app (TitleBar + Sidebar + pages
+  // with their own skeleton/loading states) stays visible and navigable
+  // underneath. Only genuine failures (serverDown) take over the screen.
+  const showPill = isStarting && !serverDown;
 
   const handleRetry = async () => {
     setRetrying(true);
@@ -636,35 +588,89 @@ function BackendDownScreen() {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
-    >
-      <div className="absolute top-3 right-3">
-        <WindowControls />
-      </div>
-      <div className="text-center space-y-4 max-w-sm mx-auto px-6">
-        <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mx-auto">
-          <ServerCrash className="w-8 h-8 text-red-500" />
-        </div>
-        <h1 className="text-xl font-bold text-foreground">
-          Engine Unavailable
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          Transfera couldn&apos;t start its engine. Try clicking Retry, or close
-          and reopen the app.
-        </p>
-        <button
-          onClick={handleRetry}
-          disabled={retrying}
-          className="no-drag inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-pill text-sm font-normal hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
+    <>
+      {/* Non-blocking engine-startup pill (bottom-left liquid-glass floater,
+          opposite the bottom-right notification toast). The app shell renders
+          underneath with page-level skeletons; this pill is the only startup
+          chrome. AnimatePresence gives it a graceful exit the moment health
+          reports "ok". */}
+      <AnimatePresence>
+        {showPill && (
+          <motion.div
+            key="engine-starting-pill"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.2 }}
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-4 left-4 z-50 glass rounded-lg pl-3 pr-4 py-2.5 flex items-center gap-2.5 max-w-[320px]"
+          >
+            <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
+            <div className="min-w-0">
+              <div className="flex items-baseline gap-2">
+                <p className="text-xs font-semibold text-foreground whitespace-nowrap">
+                  {stageShort}
+                </p>
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {elapsed}s
+                </span>
+              </div>
+              {/* Background-task progress from the health endpoint (display-only). */}
+              {bgTask && (
+                <div className="mt-1.5">
+                  <div className="w-44 h-1 rounded-full bg-muted overflow-hidden">
+                    <div
+                      className="h-full bg-primary rounded-full transition-all duration-300"
+                      style={{
+                        width: `${Math.min(100, Math.max(0, bgTask.progress_percent))}%`,
+                      }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground truncate max-w-44 mt-1">
+                    {bgTask.label}
+                  </p>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {/* Genuine-failure screen — unchanged. Only serverDown takes over. */}
+      {serverDown && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 z-100 bg-background flex items-center justify-center drag-region"
         >
-          <RefreshCw className={cn("w-4 h-4", retrying && "animate-spin")} />
-          {retrying ? "Retrying..." : "Retry"}
-        </button>
-      </div>
-    </motion.div>
+          <div className="absolute top-3 right-3">
+            <WindowControls />
+          </div>
+          <div className="text-center space-y-4 max-w-sm mx-auto px-6">
+            <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mx-auto">
+              <ServerCrash className="w-8 h-8 text-red-500" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground">
+              Engine Unavailable
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Transfera couldn&apos;t start its engine. Try clicking Retry, or
+              close and reopen the app.
+            </p>
+            <button
+              onClick={handleRetry}
+              disabled={retrying}
+              className="no-drag inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-pill text-sm font-normal hover:bg-primary/90 active:scale-[0.95] transition-colors disabled:opacity-50"
+            >
+              <RefreshCw
+                className={cn("w-4 h-4", retrying && "animate-spin")}
+              />
+              {retrying ? "Retrying..." : "Retry"}
+            </button>
+          </div>
+        </motion.div>
+      )}
+    </>
   );
 }
 

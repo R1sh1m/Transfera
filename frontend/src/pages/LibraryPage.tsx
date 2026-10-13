@@ -51,6 +51,10 @@ import {
 } from "@/components/Intelligence";
 import apiClient from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
+import {
+  useBackendReady,
+  ENGINE_WAITING_LABEL,
+} from "@/hooks/use-backend-ready";
 import { cn } from "@/lib/utils";
 import { fetchThumbnail, clearThumbFailCache } from "@/lib/thumbnail-fetch";
 import { createThumbQueue } from "@/lib/thumb-queue";
@@ -611,6 +615,7 @@ export default function LibraryPage() {
   );
   const [showClearDialog, setShowClearDialog] = useState(false);
   const clearLibrary = useClearLibrary();
+  const backendReady = useBackendReady();
 
   const appendLibraryItems = useTransferStore((s) => s.appendLibraryItems);
   const resetLibrary = useTransferStore((s) => s.resetLibrary);
@@ -1204,9 +1209,11 @@ export default function LibraryPage() {
 
         <button
           onClick={() => setShowClearDialog(true)}
-          disabled={libraryTotal === 0}
+          disabled={libraryTotal === 0 || !backendReady}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border border-border text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.95]"
-          title="Clear all library entries"
+          title={
+            backendReady ? "Clear all library entries" : ENGINE_WAITING_LABEL
+          }
         >
           <Trash2 className="w-3.5 h-3.5" />
           Clear

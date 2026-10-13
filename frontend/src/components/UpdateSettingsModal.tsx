@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useUpdaterStore } from "@/store/updater";
 import { openExternal } from "@/lib/desktop";
+import ReleaseNotesView from "@/components/ReleaseNotesView";
 
 function formatTimestamp(ts: number | null): string {
   if (!ts) return "Never";
@@ -233,7 +234,7 @@ export default function UpdateSettingsModal() {
             </div>
 
             {/* Release Notes / What's New Accordion */}
-            {updateInfo?.body && (
+            {updateInfo?.version && (
               <div className="rounded-xl border border-border p-3.5 bg-card space-y-2">
                 <button
                   type="button"
@@ -256,9 +257,13 @@ export default function UpdateSettingsModal() {
                     initial={{ opacity: 0, height: 0 }}
                     animate={{ opacity: 1, height: "auto" }}
                     exit={{ opacity: 0, height: 0 }}
-                    className="pt-2 text-xs text-muted-foreground leading-relaxed whitespace-pre-line border-t border-border max-h-48 overflow-y-auto select-text font-mono text-[11px]"
+                    className="pt-2 border-t border-border"
                   >
-                    {updateInfo.body}
+                    <ReleaseNotesView
+                      version={updateInfo.version}
+                      body={updateInfo.body}
+                      maxHeightClass="max-h-52"
+                    />
                   </motion.div>
                 )}
               </div>

@@ -38,11 +38,14 @@ import {
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
 import { useTransferWs } from "@/hooks/use-transfer-ws";
+import {
+  useBackendReady,
+  ENGINE_WAITING_LABEL,
+} from "@/hooks/use-backend-ready";
 import { cn } from "@/lib/utils";
 import { isDesktop, openPath, setTrayProgress } from "@/lib/desktop";
 import { getLocalToken, API_BASE_URL } from "@/lib/api-client";
 import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
-import KeepAwakeBanner from "@/components/KeepAwakeBanner";
 import type { SessionProgress, RecentItemProgress } from "@/types/api";
 
 // Keep track of session IDs that have already been started to prevent double-triggering
@@ -1030,6 +1033,9 @@ export default function TransferPage() {
   const startSession = useStartSession();
   const pauseSession = usePauseSession();
   const cancelSession = useCancelSession();
+  // Centralized engine-readiness flag — mutation buttons grey out + tooltip
+  // while the engine starts; navigation and cached views stay interactive.
+  const backendReady = useBackendReady();
 
   const [confirmCancel, setConfirmCancel] = useState(false);
   const cancelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1249,9 +1255,24 @@ export default function TransferPage() {
     "cancelled",
   ].includes(transfer.status);
 
-  // Show keep-awake banner for iOS device transfers
+  // Show keep-awake reminder for iOS device transfers
   const isIOSDevice = transfer.sourceRoot?.startsWith("ios://") ?? false;
   const showKeepAwake = isIOSDevice && (isRunning || isPaused);
+
+  const keepAwakeNotifiedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (showKeepAwake && transfer.sessionId) {
+      if (keepAwakeNotifiedRef.current !== transfer.sessionId) {
+        keepAwakeNotifiedRef.current = transfer.sessionId;
+        useTransferStore
+          .getState()
+          .showNotification(
+            "warning",
+            "Keep your iPhone unlocked — preview and transfer pause if it locks. Your phone's auto-lock can't be turned off from this PC, so tap the screen now and then to keep it awake.",
+          );
+      }
+    }
+  }, [showKeepAwake, transfer.sessionId]);
 
   return (
     <div className="h-full flex flex-col space-y-4">
@@ -1295,8 +1316,9 @@ export default function TransferPage() {
           {isIdle && hasSession && (
             <button
               onClick={handleStart}
-              disabled={startSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
+              disabled={startSession.isPending || !backendReady}
+              title={backendReady ? undefined : ENGINE_WAITING_LABEL}
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {startSession.isPending ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -1311,8 +1333,9 @@ export default function TransferPage() {
           {isRunning && (
             <button
               onClick={handlePause}
-              disabled={pauseSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-amber-500 text-white rounded-md text-sm font-normal hover:bg-amber-600 transition-colors"
+              disabled={pauseSession.isPending || !backendReady}
+              title={backendReady ? undefined : ENGINE_WAITING_LABEL}
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-amber-500 text-white rounded-md text-sm font-normal hover:bg-amber-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Pause className="w-4 h-4" />
               Pause
@@ -1321,8 +1344,9 @@ export default function TransferPage() {
           {isPaused && (
             <button
               onClick={handleStart}
-              disabled={startSession.isPending}
-              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors"
+              disabled={startSession.isPending || !backendReady}
+              title={backendReady ? undefined : ENGINE_WAITING_LABEL}
+              className="no-drag inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-normal hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {startSession.isPending ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -1337,14 +1361,16 @@ export default function TransferPage() {
           {!isFinished && hasSession && (
             <button
               onClick={handleCancel}
-              disabled={cancelSession.isPending}
+              disabled={cancelSession.isPending || !backendReady}
               title={
-                confirmCancel
-                  ? "Click again to confirm stopping transfer"
-                  : "Stop transfer"
+                !backendReady
+                  ? ENGINE_WAITING_LABEL
+                  : confirmCancel
+                    ? "Click again to confirm stopping transfer"
+                    : "Stop transfer"
               }
               className={cn(
-                "no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-normal transition-colors",
+                "no-drag inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-normal transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                 confirmCancel
                   ? "bg-red-600 text-white hover:bg-red-700"
                   : "bg-destructive text-destructive-foreground hover:bg-destructive/90",
@@ -1377,9 +1403,6 @@ export default function TransferPage() {
         </div>
       </div>
 
-      {/* Keep-awake banner for iOS device transfers */}
-      {showKeepAwake && <KeepAwakeBanner />}
-
       {/* Duplicates Paused Banner */}
       <AnimatePresence>
         {isPaused && duplicates.report && (
@@ -1406,6 +1429,74 @@ export default function TransferPage() {
                   Review
                 </button>
               )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* iOS paused — locked means paused, not failed; resume reuses session */}
+      <AnimatePresence>
+        {isPaused && isIOSDevice && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="flex items-start gap-2.5 px-4 py-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-sm">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-amber-700 dark:text-amber-300 text-sm">
+                  Transfer paused — not failed
+                </p>
+                <p className="text-xs text-amber-700/80 dark:text-amber-300/80 mt-0.5 leading-relaxed">
+                  If your iPhone locked, unlock it and tap Trust once, then hit
+                  Resume. Pauses, not failed — Resume reuses the session and
+                  skips completed files (current file restarts; preview
+                  re-scans).
+                </p>
+                <ul className="text-[11px] text-amber-700/80 dark:text-amber-300/80 mt-1.5 space-y-0.5 leading-snug list-disc list-inside">
+                  <li>Tap the screen now and then to keep it awake</li>
+                  <li>
+                    iPhone Settings &gt; Display &gt; Auto-Lock &gt; Never
+                    (while transferring)
+                  </li>
+                  <li>Use a good cable + rear USB port</li>
+                  <li>Tap Trust once when asked</li>
+                </ul>
+                <p className="text-[11px] text-amber-700/70 dark:text-amber-300/70 mt-1.5">
+                  Brief hiccups retry on their own — only a lock or cable pull
+                  pauses the transfer.
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* iOS running — keep-awake checklist strip */}
+      <AnimatePresence>
+        {showKeepAwake && !isPaused && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="flex items-start gap-2.5 px-4 py-2.5 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg text-sm">
+              <Clock className="w-4 h-4 shrink-0 text-blue-500 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-blue-700 dark:text-blue-300">
+                  Keep your iPhone awake
+                </p>
+                <p className="text-[11px] text-blue-600 dark:text-blue-400 mt-0.5 leading-relaxed">
+                  Tap the screen now and then · Settings &gt; Display &gt;
+                  Auto-Lock &gt; Never · good cable + rear USB port · tap Trust
+                  once. If the phone locks, it pauses, not failed — Resume
+                  reuses the session and skips completed files (current file
+                  restarts; preview re-scans).
+                </p>
+              </div>
             </div>
           </motion.div>
         )}

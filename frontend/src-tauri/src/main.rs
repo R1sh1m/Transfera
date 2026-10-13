@@ -29,6 +29,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, RunEvent, WindowEvent,
 };
+use tauri_plugin_notification::NotificationExt;
 
 const BACKEND_PORT: u16 = 47821;
 // First launch unpacks/scans hundreds of megabytes (Defender real-time
@@ -67,6 +68,11 @@ struct DriveShutdown(Arc<AtomicBool>);
 /// Guard flag: when false, window close requests are intercepted so the
 /// frontend can prompt if a transfer is actively in progress (ROUGH-3).
 struct CloseGuardState(Arc<AtomicBool>);
+
+/// One-shot flag for the hide-to-tray notice: the first window-close hide
+/// shows a tray notification explaining the engine keeps running; later
+/// hides are silent.
+static HIDE_TO_TRAY_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Health probing (plain TCP + minimal HTTP so no extra HTTP crate is needed)
@@ -716,6 +722,31 @@ fn start_drive_watcher(app: AppHandle, shutdown: Arc<AtomicBool>) {
 // Tray
 // ---------------------------------------------------------------------------
 
+/// Bring the main window back (used by tray Open, tray click, updater
+/// menu, and the single-instance second-launch handler). The backend is
+/// never respawned here: a hidden-to-tray engine stays warm, so a relaunch
+/// simply adopts it via the ensure_backend healthy-port path.
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// One-time notice on the first hide-to-tray; re-hiding stays silent.
+fn show_hide_to_tray_notice(app: &AppHandle) {
+    if HIDE_TO_TRAY_NOTIFIED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title("Transfera")
+        .body("Transfera keeps running in the tray \u{2014} Quit from the tray menu to fully exit")
+        .show();
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let icon = app
         .default_window_icon()
@@ -729,7 +760,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Transfera", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &check_updates, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(icon)
@@ -737,17 +768,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
+                show_main_window(app);
             }
             "check_updates" => {
+                show_main_window(app);
                 if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
                     let _ = w.emit("app:check-updates", ());
                 }
             }
@@ -775,12 +800,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
+                show_main_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -798,11 +818,9 @@ fn main() {
             local_token: Mutex::new(None),
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            // Second launch never spawns another backend: it just brings
+            // the existing (possibly tray-hidden, warm-engine) window back.
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -844,6 +862,21 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                // Warm-backend fast path: hide to tray so the sidecar keeps
+                // running and the next launch adopts it with no splash.
+                // Only when the backend is currently healthy; a down/dead
+                // backend falls through to the normal exit path unchanged
+                // (so the NSIS uninstaller / dead-engine close still tears
+                // down via ExitRequested -> shutdown_backend below).
+                // Hiding is safe mid-transfer (the engine keeps draining),
+                // so it intentionally bypasses the CloseGuard prompt — the
+                // guard still applies to real exits (tray Quit / forceExit).
+                if backend_healthy() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    show_hide_to_tray_notice(window.app_handle());
+                    return;
+                }
                 let allow = window
                     .app_handle()
                     .try_state::<CloseGuardState>()

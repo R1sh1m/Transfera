@@ -5,6 +5,28 @@
 // ---------------------------------------------------------------------------
 
 import axios from "axios";
+import { queryClient } from "./query-client";
+
+// Read-only POST tunnels (queries, not mutations) — these must keep working
+// while the engine is still starting so pages can show skeletons / cached
+// views instead of failing. Everything else non-GET is a backend-mutating
+// action and is gated below.
+const READ_ONLY_POST_PREFIXES = [
+  "/utils/",
+  "/ios-devices/browse",
+  "/intelligence/search/",
+  "/duplicates/prescan",
+];
+
+function isReadOnlyRequest(url: string | undefined, method: string): boolean {
+  if (method === "get" || method === "head" || method === "options")
+    return true;
+  if (method !== "post") return false;
+  const path = (url ?? "").split("?")[0] ?? "";
+  return READ_ONLY_POST_PREFIXES.some(
+    (p) => path.endsWith(p) || path.includes(p),
+  );
+}
 
 // In packaged shells the page is not served over http(s) from the backend:
 // - Electron: file:// protocol → window.location.origin is 'file://'.
@@ -93,9 +115,25 @@ const apiClient = axios.create({
 // at startup; if the fetch hasn't completed yet the first few requests
 // may go without it, but /api/config itself is unprotected and any actual
 // destructive call will happen after startup is complete.
+//
+// Centralized engine-readiness gate (app-wide, no per-button prop drilling):
+// while the health cache doesn't report status "ok" (cold start / outage),
+// backend-mutating requests are rejected immediately with a friendly
+// "Waiting for engine…" error instead of hitting a dead backend. Read-only
+// requests (GET + the POST tunnels above) always pass through so pages can
+// render skeletons and cached views during startup. Primary buttons are
+// additionally greyed + tooltip'd via useBackendReady — this interceptor is
+// the enforcement backstop for every other call site.
 apiClient.interceptors.request.use((config) => {
   if (_localToken) {
     config.headers.set("X-Local-Token", _localToken);
+  }
+  const method = (config.method ?? "get").toLowerCase();
+  if (!isReadOnlyRequest(config.url, method)) {
+    const health = queryClient.getQueryData<{ status?: string }>(["health"]);
+    if (health?.status !== "ok") {
+      return Promise.reject(new Error("Waiting for engine…"));
+    }
   }
   return config;
 });

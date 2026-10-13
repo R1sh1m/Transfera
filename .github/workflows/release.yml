@@ -308,9 +308,36 @@ jobs:
           $url = "https://github.com/R1sh1m/Transfera/releases/download/$tag/$($exe.Name)"
           $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           $platform = [ordered]@{ signature = $sigText; url = $url }
+
+          # Extract actual release notes from git commit body, tag annotation, or commit range
+          $commitBody = (git log -1 --format=%b HEAD).Trim()
+          $commitSubject = (git log -1 --format=%s HEAD).Trim()
+          $tagMsg = (git tag -l --format='%(contents)' $tag).Trim()
+          $notes = ""
+          if ($commitBody -and $commitBody.Length -gt 5) {
+            $notes = $commitBody
+          } elseif ($tagMsg -and $tagMsg -ne "Transfera $tag" -and $tagMsg -ne "Transfera $version" -and $tagMsg -ne "Release $tag") {
+            $notes = $tagMsg
+          } else {
+            $prevTag = (git describe --tags --abbrev=0 HEAD~1 2>$null)
+            if ($prevTag) {
+              $notes = (git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges).Trim()
+            }
+          }
+          if (-not $notes) {
+            $notes = $commitSubject
+          }
+          if (-not $notes) {
+            $notes = "Transfera $version release"
+          }
+          Write-Host "Resolved release notes: $notes"
+
+          $notesPath = Join-Path $releaseDir "RELEASE_NOTES.md"
+          $notes | Out-File -FilePath $notesPath -Encoding utf8NoBOM
+
           $manifest = [ordered]@{
             version = $version
-            notes = "Transfera $version"
+            notes = $notes
             pub_date = $pubDate
             platforms = [ordered]@{
               "windows-x86_64" = $platform
@@ -325,6 +352,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: frontend/release/RELEASE_NOTES.md
           files: |
             frontend/release/Transfera_*-setup.exe
             frontend/release/Transfera_*.zip
