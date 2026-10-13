@@ -308,6 +308,8 @@ class PersonSchema(BaseModel):
     name: str | None = None
     face_count: int = 0
     cover_face_id: int | None = None
+    cover_media_id: int | None = None
+    cover_thumbnail_url: str | None = None
     hidden: bool = False
 
 

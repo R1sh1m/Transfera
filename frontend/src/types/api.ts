@@ -322,7 +322,22 @@ export interface Person {
   name?: string | null;
   face_count: number;
   cover_face_id?: number | null;
+  cover_media_id?: number | null;
+  cover_thumbnail_url?: string | null;
   hidden: boolean;
+}
+
+export interface PersonFace {
+  face_id: number;
+  media_id: number;
+  thumbnail_url?: string | null;
+  bbox?: number[] | null;
+  confidence?: number | null;
+}
+
+export interface PersonFacesResponse {
+  person_id: number;
+  faces: PersonFace[];
 }
 
 export interface PeopleListResponse {

@@ -352,12 +352,14 @@ export default function MediaDetailModal({
                 <p
                   className="text-sm font-semibold text-foreground mt-1 truncate"
                   title={
-                    activeItem.camera_model || activeItem.camera_make || "—"
+                    [activeItem.camera_make, activeItem.camera_model]
+                      .filter(Boolean)
+                      .join(" ") || "—"
                   }
                 >
-                  {activeItem.camera_model ||
-                    activeItem.camera_make ||
-                    "Unknown"}
+                  {[activeItem.camera_make, activeItem.camera_model]
+                    .filter(Boolean)
+                    .join(" ") || "Unknown"}
                 </p>
               </div>
 

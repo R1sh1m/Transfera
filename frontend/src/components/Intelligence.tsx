@@ -33,6 +33,7 @@ import {
   useTimeline,
 } from "@/lib/queries";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
+import apiClient from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
 import {
   useBackendReady,
@@ -122,12 +123,16 @@ export function CapabilitiesBadge() {
         )}
         title={
           clipReady
-            ? "On-device AI semantic search active"
-            : "Standard search active"
+            ? `On-device smart search active (search by scene, object, or description locally) • ${
+                facesAvailable
+                  ? "Face recognition enabled"
+                  : "Face recognition disabled"
+              }`
+            : "Standard keyword search active (searches by filename and date)"
         }
       >
-        {clipReady ? "CLIP on-device" : "Keyword search"} ·{" "}
-        {facesAvailable ? "Faces on" : "Faces off"}
+        {clipReady ? "Smart search (on-device)" : "Keyword search"} ·{" "}
+        {facesAvailable ? "Face recognition" : "Face recognition off"}
       </span>
       {justFinished && !clipReady && (
         <span
@@ -256,10 +261,21 @@ export function CapabilitiesBadge() {
 
 export function SemanticSearchBar({
   onResults,
+  value,
+  onChange,
 }: {
-  onResults: (q: string) => void;
+  onResults?: (q: string) => void;
+  /** Controlled mode: LibraryPage owns the single unified query state. */
+  value?: string;
+  onChange?: (q: string) => void;
 }) {
-  const [q, setQ] = useState("");
+  const [inner, setInner] = useState("");
+  const q = value ?? inner;
+  const setQ = (v: string) => {
+    if (onChange) onChange(v);
+    else setInner(v);
+    onResults?.(v);
+  };
   const { data, isFetching } = useSemanticSearch(q);
   return (
     <div className="flex items-center gap-2">
@@ -267,10 +283,7 @@ export function SemanticSearchBar({
         <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <input
           value={q}
-          onChange={(e) => {
-            setQ(e.target.value);
-            onResults(e.target.value);
-          }}
+          onChange={(e) => setQ(e.target.value)}
           placeholder='Try "screenshot", "canon", "sunset"…'
           className="w-full h-11 rounded-pill border border-border bg-card pl-9 pr-4 text-[17px] placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-action"
         />
@@ -469,7 +482,22 @@ export function DuplicatesPanel() {
   );
 }
 
-export function PeoplePanel() {
+/** Window event fired when a person is selected without an onSelect handler,
+ *  so the library view can filter to that person's photos without prop
+ *  drilling. Mirrors MOMENT_SELECT_EVENT.
+ *  Subscribe: window.addEventListener(PERSON_SELECT_EVENT, (e) => ...). */
+export const PERSON_SELECT_EVENT = "transfera:person-select";
+
+export interface PersonSelectDetail {
+  person_id: number;
+  media_ids: number[];
+}
+
+export function PeoplePanel({
+  onSelect,
+}: {
+  onSelect?: (detail: PersonSelectDetail) => void;
+}) {
   const { data, isLoading } = usePeople();
   const rename = useRenamePerson();
   const backfill = useBackfill();
@@ -479,7 +507,50 @@ export function PeoplePanel() {
   const { data: capabilities } = useCapabilities();
   const [editing, setEditing] = useState<number | null>(null);
   const [name, setName] = useState("");
+  const [navigating, setNavigating] = useState<number | null>(null);
   const facesAvailable = capabilities?.faces_available ?? false;
+
+  const handlePersonClick = async (personId: number) => {
+    if (onSelect) {
+      // Controlled mode: let the owner resolve faces if it wants.
+      // Fetch here so the detail always carries media_ids.
+      try {
+        const { data } = await apiClient.get(
+          `/intelligence/people/${personId}`,
+        );
+        const faces = (data?.faces ?? []) as { media_id: number }[];
+        onSelect({
+          person_id: personId,
+          media_ids: faces.map((f) => f.media_id),
+        });
+      } catch {
+        onSelect({ person_id: personId, media_ids: [] });
+      }
+      return;
+    }
+    // Default: broadcast so the library view can filter to this person.
+    setNavigating(personId);
+    try {
+      const { data } = await apiClient.get(`/intelligence/people/${personId}`);
+      const faces = (data?.faces ?? []) as { media_id: number }[];
+      window.dispatchEvent(
+        new CustomEvent<PersonSelectDetail>(PERSON_SELECT_EVENT, {
+          detail: {
+            person_id: personId,
+            media_ids: faces.map((f) => f.media_id),
+          },
+        }),
+      );
+    } catch {
+      window.dispatchEvent(
+        new CustomEvent<PersonSelectDetail>(PERSON_SELECT_EVENT, {
+          detail: { person_id: personId, media_ids: [] },
+        }),
+      );
+    } finally {
+      setNavigating(null);
+    }
+  };
   if (isLoading)
     return <div className="text-sm text-muted-foreground">Loading people…</div>;
   if (!data || data.people.length === 0) {
@@ -545,45 +616,74 @@ export function PeoplePanel() {
         <Users className="w-4 h-4 text-action" /> People · {data.total}
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {data.people.map((p) => (
-          <div
-            key={p.id}
-            className="rounded-lg border border-border bg-card p-3"
-          >
-            {editing === p.id ? (
-              <div className="flex items-center gap-1">
-                <input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Name this person"
-                  className="flex-1 h-8 rounded-md border border-border px-2 text-sm"
-                />
+        {data.people.map((p) => {
+          const displayName = p.name ?? `Person ${p.id}`;
+          const initials = displayName
+            .split(/\s+/)
+            .map((w) => w[0])
+            .join("")
+            .slice(0, 2)
+            .toUpperCase();
+          return (
+            <div
+              key={p.id}
+              className="rounded-lg border border-border bg-card p-3"
+            >
+              <button
+                type="button"
+                onClick={() => handlePersonClick(p.id)}
+                disabled={navigating === p.id}
+                aria-label={`Show ${p.face_count === 1 ? "1 face" : `${p.face_count} faces`} of ${displayName} in library`}
+                title={`Filter library to ${displayName}`}
+                className="block w-full text-left active:scale-[0.98] transition-transform cursor-pointer disabled:opacity-60"
+              >
+                {p.cover_media_id != null ? (
+                  <Thumb
+                    id={p.cover_media_id}
+                    url={p.cover_thumbnail_url}
+                    label={initials}
+                  />
+                ) : (
+                  <div className="aspect-square rounded-lg bg-muted flex items-center justify-center text-lg font-semibold text-muted-foreground">
+                    {initials}
+                  </div>
+                )}
+              </button>
+              {editing === p.id ? (
+                <div className="mt-2 flex items-center gap-1">
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Name this person"
+                    className="flex-1 h-8 rounded-md border border-border px-2 text-sm"
+                  />
+                  <button
+                    onClick={() => {
+                      rename.mutate({ id: p.id, name: name || null });
+                      setEditing(null);
+                    }}
+                    className="p-1.5 rounded-md bg-action text-white active:scale-[0.95]"
+                  >
+                    <Check className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
                 <button
                   onClick={() => {
-                    rename.mutate({ id: p.id, name: name || null });
-                    setEditing(null);
+                    setEditing(p.id);
+                    setName(p.name ?? "");
                   }}
-                  className="p-1.5 rounded-md bg-action text-white active:scale-[0.95]"
+                  className="mt-2 text-sm font-semibold hover:text-action"
                 >
-                  <Check className="w-3 h-3" />
+                  {displayName}
                 </button>
+              )}
+              <div className="text-xs text-muted-foreground">
+                {p.face_count === 1 ? "1 face" : `${p.face_count} faces`}
               </div>
-            ) : (
-              <button
-                onClick={() => {
-                  setEditing(p.id);
-                  setName(p.name ?? "");
-                }}
-                className="text-sm font-semibold hover:text-action"
-              >
-                {p.name ?? `Person ${p.id}`}
-              </button>
-            )}
-            <div className="text-xs text-muted-foreground">
-              {p.face_count} faces
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -593,8 +693,8 @@ export function EmptySemanticHint() {
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <ScanSearch className="w-3 h-3" />
-      Semantic search runs fully offline — keyword mode today, CLIP embeddings
-      when models are installed.
+      Smart search runs fully offline — searches filenames today, visual AI
+      search by photo content when models are installed.
     </div>
   );
 }

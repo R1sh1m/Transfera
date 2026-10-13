@@ -1254,9 +1254,17 @@ export function useResolveDuplicateGroup() {
       );
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["duplicate-groups"] });
       qc.invalidateQueries({ queryKey: ["media"] });
+      qc.invalidateQueries({ queryKey: ["trash"] });
+      const moved = vars.trash_ids.length;
+      useTransferStore
+        .getState()
+        .showNotification(
+          "success",
+          moved === 1 ? "Moved 1 to Trash" : `Moved ${moved} to Trash`,
+        );
     },
     onError: (error) => {
       useTransferStore
@@ -1305,6 +1313,21 @@ export function usePeople() {
       >("/intelligence/people");
       return data;
     },
+    staleTime: 30000,
+    retry: 1,
+  });
+}
+
+export function usePersonFaces(personId: number | null) {
+  return useQuery({
+    queryKey: ["person-faces", personId],
+    queryFn: async () => {
+      const { data } = await apiClient.get<
+        import("@/types/api").PersonFacesResponse
+      >(`/intelligence/people/${personId}`);
+      return data;
+    },
+    enabled: personId !== null,
     staleTime: 30000,
     retry: 1,
   });
@@ -1425,9 +1448,13 @@ export function useBackfill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async () => {
+      // Backfill walks every media row and runs phash/dims/tags/face
+      // clustering server-side — large libraries routinely exceed the 30 s
+      // default client timeout. Match the tier2 300 s ceiling so big
+      // libraries don't abort client-side with ECONNABORTED.
       const { data } = await apiClient.post<
         import("@/types/api").BackfillResponse
-      >("/intelligence/backfill");
+      >("/intelligence/backfill", {}, { timeout: 300000 });
       return data;
     },
     onSuccess: (data) => {

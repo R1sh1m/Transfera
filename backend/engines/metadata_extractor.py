@@ -638,6 +638,13 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
 
         stat = file_path.stat()
         fs_mtime = _ts_to_datetime(stat.st_mtime)
+        exif_tags = {k: str(v) for k, v in tags.items() if v}
+        try:
+            from backend.engines.intelligence import structured_from_tags as _structured
+
+            _s = _structured(tags)
+        except Exception:
+            _s = {}
         return FileMetadata(
             file_path=str(file_path.resolve()),
             file_name=file_path.name,
@@ -647,7 +654,14 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
             date_taken=date_taken,
             date_created=date_created or fs_mtime,
             date_modified=date_modified or fs_mtime,
-            exif_tags={k: str(v) for k, v in tags.items() if v},
+            exif_tags=exif_tags,
+            width=(_s.get("width") if isinstance(_s, dict) else None),
+            height=(_s.get("height") if isinstance(_s, dict) else None),
+            duration_s=(_s.get("duration_s") if isinstance(_s, dict) else None),
+            camera_make=(_s.get("camera_make") if isinstance(_s, dict) else None),
+            camera_model=(_s.get("camera_model") if isinstance(_s, dict) else None),
+            gps_lat=(_s.get("gps_lat") if isinstance(_s, dict) else None),
+            gps_lon=(_s.get("gps_lon") if isinstance(_s, dict) else None),
         )
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
         logger.warning(
@@ -851,6 +865,13 @@ class _ExifToolSession:
                 date_created = _parse_exif_datetime(tags.get("CreateDate"))
                 date_modified_tag = _parse_exif_datetime(tags.get("ModifyDate"))
                 fs_mtime = _ts_to_datetime(stat.st_mtime)
+                exif_tags = {k: str(v) for k, v in tags.items() if v}
+                try:
+                    from backend.engines.intelligence import structured_from_tags as _structured_batch
+
+                    _sb = _structured_batch(tags)
+                except Exception:
+                    _sb = {}
                 results[resolved] = FileMetadata(
                     file_path=resolved,
                     file_name=path.name,
@@ -860,7 +881,14 @@ class _ExifToolSession:
                     date_taken=date_taken,
                     date_created=date_created or fs_mtime,
                     date_modified=date_modified_tag or fs_mtime,
-                    exif_tags={k: str(v) for k, v in tags.items() if v},
+                    exif_tags=exif_tags,
+                    width=(_sb.get("width") if isinstance(_sb, dict) else None),
+                    height=(_sb.get("height") if isinstance(_sb, dict) else None),
+                    duration_s=(_sb.get("duration_s") if isinstance(_sb, dict) else None),
+                    camera_make=(_sb.get("camera_make") if isinstance(_sb, dict) else None),
+                    camera_model=(_sb.get("camera_model") if isinstance(_sb, dict) else None),
+                    gps_lat=(_sb.get("gps_lat") if isinstance(_sb, dict) else None),
+                    gps_lon=(_sb.get("gps_lon") if isinstance(_sb, dict) else None),
                 )
             except Exception as exc:
                 logger.debug("Batch metadata parse error for %s: %s", path.name, exc)

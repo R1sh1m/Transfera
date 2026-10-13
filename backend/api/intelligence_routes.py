@@ -334,13 +334,74 @@ async def list_people(_: None = Depends(require_local_token)) -> PeopleListRespo
     async with session_scope() as session:
         result = await session.execute(select(Person).order_by(Person.face_count.desc()))
         people = list(result.scalars().all())
-    return PeopleListResponse(
-        people=[
-            PersonSchema(id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden)
-            for p in people
-        ],
-        total=len(people),
-    )
+        out: list[PersonSchema] = []
+        for p in people:
+            cover_media_id: int | None = None
+            if p.cover_face_id is not None:
+                cf = await session.get(Face, p.cover_face_id)
+                if cf is not None:
+                    cover_media_id = cf.media_id
+            if cover_media_id is None:
+                # Fallback: highest-confidence face's media
+                fres = await session.execute(
+                    select(Face.media_id)
+                    .where(Face.person_id == p.id)
+                    .order_by(Face.confidence.desc().nullslast())
+                    .limit(1)
+                )
+                row = fres.first()
+                if row is not None:
+                    cover_media_id = row[0]
+            out.append(
+                PersonSchema(
+                    id=p.id,
+                    name=p.name,
+                    face_count=p.face_count,
+                    cover_face_id=p.cover_face_id,
+                    cover_media_id=cover_media_id,
+                    cover_thumbnail_url=(
+                        f"/api/media/{cover_media_id}/thumbnail" if cover_media_id is not None else None
+                    ),
+                    hidden=p.hidden,
+                )
+            )
+    return PeopleListResponse(people=out, total=len(out))
+
+
+@router.get("/people/{person_id}")
+async def get_person_detail(
+    person_id: int,
+    _: None = Depends(require_local_token),
+) -> dict:
+    """Person detail: faces ordered by confidence desc.
+
+    Returns ``{person_id, faces: [{face_id, media_id, thumbnail_url,
+    bbox, confidence}]}``. 404 when the person does not exist.
+    """
+    async with session_scope() as session:
+        p = await session.get(Person, person_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="Person not found")
+        fres = await session.execute(
+            select(Face).where(Face.person_id == person_id).order_by(Face.confidence.desc().nullslast())
+        )
+        faces = list(fres.scalars().all())
+        items: list[dict] = []
+        for f in faces:
+            try:
+                bbox = json.loads(f.bbox_json) if f.bbox_json else None
+            except (json.JSONDecodeError, TypeError):
+                bbox = None
+            items.append(
+                {
+                    "face_id": f.id,
+                    "media_id": f.media_id,
+                    "thumbnail_url": f"/api/media/{f.media_id}/thumbnail",
+                    "bbox": bbox,
+                    "confidence": f.confidence,
+                }
+            )
+    return {"person_id": person_id, "faces": items}
 
 
 @router.patch("/people/{person_id}", response_model=PersonSchema)
@@ -356,7 +417,31 @@ async def rename_person(
         p.name = (req.name or "").strip() or None
         # Person has no touch(); bump manually
         p.updated_at = datetime.now(UTC)
-    return PersonSchema(id=p.id, name=p.name, face_count=p.face_count, cover_face_id=p.cover_face_id, hidden=p.hidden)
+        cover_media_id: int | None = None
+        if p.cover_face_id is not None:
+            cf = await session.get(Face, p.cover_face_id)
+            if cf is not None:
+                cover_media_id = cf.media_id
+        if cover_media_id is None:
+            fres = await session.execute(
+                select(Face.media_id)
+                .where(Face.person_id == p.id)
+                .order_by(Face.confidence.desc().nullslast())
+                .limit(1)
+            )
+            row = fres.first()
+            if row is not None:
+                cover_media_id = row[0]
+        pid, pname, pcount, pcover, phidden = p.id, p.name, p.face_count, p.cover_face_id, p.hidden
+    return PersonSchema(
+        id=pid,
+        name=pname,
+        face_count=pcount,
+        cover_face_id=pcover,
+        cover_media_id=cover_media_id,
+        cover_thumbnail_url=(f"/api/media/{cover_media_id}/thumbnail" if cover_media_id is not None else None),
+        hidden=phidden,
+    )
 
 
 @router.post("/people/merge")
@@ -618,10 +703,11 @@ async def backfill_intelligence(
                     pass
 
             needs_visual = mi.phash is None or mi.width is None or mi.blur_score is None
+            needs_camera = mi.camera_make is None or mi.camera_model is None or mi.width is None or mi.height is None
             p: Path | None = None
             thumb: bytes | None = None
 
-            if needs_visual or clip_ready or faces_ready:
+            if needs_visual or needs_camera or clip_ready or faces_ready:
                 try:
                     p = await _resolve_path(mi)
                 except Exception:
@@ -652,6 +738,38 @@ async def backfill_intelligence(
                             touched = True
                 except Exception as exc:
                     logger.debug("backfill visual skipped %s: %s", mi.id, exc)
+
+            # Camera + dimensions re-extract via ExifTool (fixes legacy rows
+            # scanned before structured_from_tags wiring, e.g. HEIC batches).
+            if needs_camera and p is not None and p.is_file():
+                try:
+                    from backend.engines.metadata_extractor import extract_metadata as _extract_meta
+
+                    meta = await asyncio.to_thread(_extract_meta, p)
+                    if meta is not None:
+                        if mi.camera_make is None and meta.camera_make:
+                            mi.camera_make = meta.camera_make
+                            touched = True
+                        if mi.camera_model is None and meta.camera_model:
+                            mi.camera_model = meta.camera_model
+                            touched = True
+                        if mi.width is None and meta.width is not None:
+                            mi.width = meta.width
+                            mi.height = meta.height
+                            dims_filled += 1
+                            touched = True
+                        elif mi.height is None and meta.height is not None:
+                            mi.height = meta.height
+                            touched = True
+                        if getattr(mi, "gps_lat", None) is None and meta.gps_lat is not None:
+                            mi.gps_lat = meta.gps_lat
+                            mi.gps_lon = meta.gps_lon
+                            touched = True
+                        if getattr(mi, "duration_s", None) is None and meta.duration_s is not None:
+                            mi.duration_s = meta.duration_s
+                            touched = True
+                except Exception as exc:
+                    logger.debug("backfill exif skipped %s: %s", mi.id, exc)
 
             # CLIP embedding (vector-DB row)
             if clip_ready and (mi.extension or "").lower() in IMAGE_EXTENSIONS:
@@ -1057,3 +1175,113 @@ async def empty_trash(_: None = Depends(require_local_token)) -> dict:
             await session.delete(mi)
             n += 1
     return {"emptied": n, "files_removed": files_removed}
+
+
+# --- Face crops (server-side Pillow crop of source/vault image) ---
+faces_router = APIRouter(prefix="/api/faces", tags=["faces"])
+
+
+@faces_router.get("/{face_id}/crop")
+async def face_crop(
+    face_id: int,
+    _: None = Depends(require_local_token),
+):
+    """Server-side face crop: Pillow crop of the source/vault image.
+
+    Uses ``Face.bbox_json`` [x1, y1, x2, y2] with ~20% padding, squared,
+    returned as JPEG. 404 on missing face or missing file. Source files
+    are never deleted or modified (read-only).
+    """
+    import asyncio as _asyncio
+    import io as _io
+    from pathlib import Path as _Path
+
+    from fastapi.responses import Response as _Response
+
+    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path as _resolve_src
+
+    async with session_scope() as session:
+        face = await session.get(Face, face_id)
+        if face is None:
+            raise HTTPException(status_code=404, detail="Face not found")
+        try:
+            bbox = json.loads(face.bbox_json) if face.bbox_json else None
+        except (json.JSONDecodeError, TypeError):
+            bbox = None
+        media_id = face.media_id
+        mi = await session.get(MediaItem, media_id)
+        if mi is None:
+            raise HTTPException(status_code=404, detail="Media item not found")
+        sess = await session.get(TransferSession, mi.session_id) if mi.session_id is not None else None
+        entry = {
+            "source_path": mi.source_path,
+            "file_name": mi.file_name,
+            "date_taken": mi.date_taken,
+            "original_capture_time": mi.original_capture_time,
+            "created_at": mi.created_at,
+            "file_size": mi.file_size,
+            "folder_layout": getattr(sess, "folder_layout", "year/month") if sess is not None else "year/month",
+        }
+        dest_root = _Path(sess.dest_root) if sess is not None and getattr(sess, "dest_root", None) else None
+        src_path = _resolve_src(entry, dest_root)
+        if src_path is None and mi.source_path:
+            sp = _Path(mi.source_path)
+            if sp.is_file():
+                src_path = sp
+        if src_path is None or not src_path.is_file():
+            raise HTTPException(status_code=404, detail="Source file not found")
+        src_str = str(src_path)
+        bbox_vals = list(bbox) if isinstance(bbox, (list, tuple)) and len(bbox) == 4 else None
+
+    def _render() -> bytes:
+        from PIL import Image, ImageOps
+
+        with Image.open(src_str) as raw:
+            img = ImageOps.exif_transpose(raw) or raw
+            img = img.convert("RGB")
+            w, h = img.size
+            if bbox_vals is not None:
+                try:
+                    x1, y1, x2, y2 = (float(v) for v in bbox_vals)
+                except (ValueError, TypeError):
+                    x1, y1, x2, y2 = 0.0, 0.0, float(w), float(h)
+                x1 = max(0.0, min(x1, float(w)))
+                y1 = max(0.0, min(y1, float(h)))
+                x2 = max(0.0, min(x2, float(w)))
+                y2 = max(0.0, min(y2, float(h)))
+                if x2 <= x1 or y2 <= y1:
+                    x1, y1, x2, y2 = 0.0, 0.0, float(w), float(h)
+                bw, bh = x2 - x1, y2 - y1
+                pad = 0.20 * max(bw, bh)
+                x1 = max(0.0, x1 - pad)
+                y1 = max(0.0, y1 - pad)
+                x2 = min(float(w), x2 + pad)
+                y2 = min(float(h), y2 + pad)
+                # Square the box around its center
+                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                side = max(x2 - x1, y2 - y1)
+                x1, y1 = cx - side / 2.0, cy - side / 2.0
+                x2, y2 = cx + side / 2.0, cy + side / 2.0
+                # Clamp square inside the image, shrinking if larger than frame
+                side = min(side, float(min(w, h)))
+                cx = min(max(cx, side / 2.0), float(w) - side / 2.0)
+                cy = min(max(cy, side / 2.0), float(h) - side / 2.0)
+                x1, y1 = int(round(cx - side / 2.0)), int(round(cy - side / 2.0))
+                x2, y2 = int(round(x1 + side)), int(round(y1 + side))
+                x1 = max(0, min(x1, w - 1))
+                y1 = max(0, min(y1, h - 1))
+                x2 = max(x1 + 1, min(x2, w))
+                y2 = max(y1 + 1, min(y2, h))
+                img = img.crop((x1, y1, x2, y2))
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            return buf.getvalue()
+
+    try:
+        data = await _asyncio.to_thread(_render)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.debug("face crop failed for face %s: %s", face_id, exc)
+        raise HTTPException(status_code=404, detail="Could not render face crop")
+    return _Response(content=data, media_type="image/jpeg")

@@ -14,11 +14,13 @@ import {
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
+  Archive,
+  CalendarDays,
+  Copy,
   Image,
   Film,
   Music,
   FileText,
-  Search,
   History,
   Grid3X3,
   LayoutList,
@@ -29,6 +31,9 @@ import {
   RefreshCw,
   Trash2,
   AlertTriangle,
+  Sparkles,
+  Users,
+  type LucideIcon,
 } from "lucide-react";
 import {
   useMediaList,
@@ -46,6 +51,7 @@ import {
   MOMENT_SELECT_EVENT,
   MomentsGrid,
   PeoplePanel,
+  PERSON_SELECT_EVENT,
   SemanticSearchBar,
   TimelineStrip,
 } from "@/components/Intelligence";
@@ -64,6 +70,7 @@ import type {
   DocumentMigratePreview,
   Moment,
 } from "@/types/api";
+import type { PersonSelectDetail } from "@/components/Intelligence";
 
 // Documents kind buckets — mirrors DOCUMENT_KINDS in backend/config.py.
 const DOCUMENT_KINDS = [
@@ -583,7 +590,10 @@ class MediaGridBoundary extends Component<
 // LibraryPage
 // ---------------------------------------------------------------------------
 export default function LibraryPage() {
-  const [search, setSearch] = useState("");
+  // Unified vault query: drives both filename search (useMediaList) and
+  // semantic search, merged deduped below. Debounced ~300ms before fetch.
+  const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [extension, setExtension] = useState("");
   const [docKind, setDocKind] = useState("");
   const [finalStatus, setFinalStatus] = useState("completed");
@@ -598,7 +608,6 @@ export default function LibraryPage() {
   type LibrarySection =
     "vault" | "timeline" | "moments" | "duplicates" | "people" | "trash";
   const [section, setSection] = useState<LibrarySection>("vault");
-  const [semanticQuery, setSemanticQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MediaItemInfo | null>(null);
   // Active moment date-range filter (set via MOMENT_SELECT_EVENT from
@@ -608,6 +617,12 @@ export default function LibraryPage() {
   const [momentRange, setMomentRange] = useState<{
     start: string;
     end: string;
+  } | null>(null);
+  // Active person filter (set via PERSON_SELECT_EVENT from PeoplePanel).
+  // Mirrors momentRange: applied client-side over the server-filtered list.
+  const [personFilter, setPersonFilter] = useState<{
+    person_id: number;
+    media_ids: number[];
   } | null>(null);
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const [regenStatus, setRegenStatus] = useState<"idle" | "loading" | "done">(
@@ -659,6 +674,20 @@ export default function LibraryPage() {
     return () => window.removeEventListener(MOMENT_SELECT_EVENT, handler);
   }, []);
 
+  // Person cards (PeoplePanel buttons) broadcast PERSON_SELECT_EVENT with
+  // {person_id, media_ids}. Listen here: jump to the Vault tab and pin a
+  // client-side filter to that person's photos.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const d = (e as CustomEvent<PersonSelectDetail>).detail;
+      if (!d || d.person_id == null) return;
+      setPersonFilter({ person_id: d.person_id, media_ids: d.media_ids ?? [] });
+      setSection("vault");
+    };
+    window.addEventListener(PERSON_SELECT_EVENT, handler);
+    return () => window.removeEventListener(PERSON_SELECT_EVENT, handler);
+  }, []);
+
   // Auto-trigger thumbnail regeneration when a transfer completes
   useEffect(() => {
     if (lastSessionId != null && lastSessionId !== lastRegeneratedSessionId) {
@@ -671,6 +700,12 @@ export default function LibraryPage() {
     showingRecent && lastSessionId ? lastSessionId : undefined;
   const [fetchPage, setFetchPage] = useState(1);
 
+  // Debounce the unified query ~300ms so each keystroke doesn't refetch.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q.trim()), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
   const { data, isLoading, isFetching } = useMediaList({
     page: fetchPage,
     pageSize: 50,
@@ -678,7 +713,7 @@ export default function LibraryPage() {
     extension: extension || undefined,
     docKind: docKind || undefined,
     finalStatus: finalStatus || undefined,
-    search: search || undefined,
+    search: debouncedQ || undefined,
     favorite: favoritesOnly ? true : undefined,
   });
 
@@ -729,9 +764,9 @@ export default function LibraryPage() {
   }, [queryClient]);
 
   const trashQuery = useTrash(1);
-  const semanticActive = semanticQuery.trim().length > 1;
+  const semanticActive = debouncedQ.length > 1;
   const semanticResults = useSemanticSearch(
-    semanticQuery,
+    debouncedQ,
     section === "vault" && semanticActive,
   );
 
@@ -751,7 +786,7 @@ export default function LibraryPage() {
     setFetchPage(1);
     setFilterKey(myKey);
   }, [
-    search,
+    debouncedQ,
     extension,
     docKind,
     finalStatus,
@@ -847,20 +882,57 @@ export default function LibraryPage() {
   // Client-side moment date-range filter (useMediaList has no date params).
   // Takes precedence by narrowing the server-filtered list to items whose
   // date_taken (fallback created_at) falls within momentRange.
+  // Unified search merge: when the debounced query is active, semantic hits
+  // (ranked first) merge with the filename-filtered server list, deduped by
+  // id. Pills already narrow the server list; semantic hits get the same
+  // extension/status/favorites narrowing client-side so both halves agree.
   const visibleLibraryItems = useMemo(() => {
-    if (!momentRange) return libraryItems;
+    let base = libraryItems;
+    if (semanticActive && semanticResults.data) {
+      const seen = new Set<number>();
+      const merged: MediaItemInfo[] = [];
+      for (const m of semanticResults.data.results) {
+        if (extension && m.extension?.toLowerCase() !== extension.toLowerCase())
+          continue;
+        if (finalStatus && m.final_status !== finalStatus) continue;
+        if (favoritesOnly && !m.favorite) continue;
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        merged.push(m);
+      }
+      for (const it of libraryItems) {
+        if (seen.has(it.id)) continue;
+        seen.add(it.id);
+        merged.push(it);
+      }
+      base = merged;
+    }
+    if (personFilter) {
+      const ids = new Set(personFilter.media_ids);
+      base = base.filter((it) => ids.has(it.id));
+    }
+    if (!momentRange) return base;
     const s = new Date(momentRange.start).getTime();
     const e = new Date(momentRange.end).getTime();
-    if (Number.isNaN(s) || Number.isNaN(e)) return libraryItems;
+    if (Number.isNaN(s) || Number.isNaN(e)) return base;
     const lo = Math.min(s, e);
     const hi = Math.max(s, e);
-    return libraryItems.filter((it) => {
+    return base.filter((it) => {
       const raw = it.date_taken ?? it.created_at;
       if (!raw) return false;
       const t = new Date(raw).getTime();
       return !Number.isNaN(t) && t >= lo && t <= hi;
     });
-  }, [libraryItems, momentRange]);
+  }, [
+    libraryItems,
+    momentRange,
+    personFilter,
+    semanticActive,
+    semanticResults.data,
+    extension,
+    finalStatus,
+    favoritesOnly,
+  ]);
 
   const momentLabel = useMemo(() => {
     if (!momentRange) return "";
@@ -1011,27 +1083,40 @@ export default function LibraryPage() {
       <div className="flex items-center gap-1.5 flex-wrap">
         {(
           [
-            ["vault", "Vault"],
-            ["timeline", "Timeline"],
-            ["moments", "Moments"],
-            ["duplicates", "Duplicates"],
-            ["people", "People"],
-            ["trash", "Trash"],
-          ] as [LibrarySection, string][]
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => setSection(id)}
-            className={cn(
-              "px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]",
-              section === id
-                ? "bg-action text-white"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-          >
-            {label}
-          </button>
-        ))}
+            ["vault", "Vault", Archive],
+            ["timeline", "Timeline", CalendarDays],
+            ["moments", "Moments", Sparkles],
+            ["duplicates", "Duplicates", Copy],
+            ["people", "People", Users],
+            ["trash", "Trash", Trash2],
+          ] as [LibrarySection, string, LucideIcon][]
+        ).map(([id, label, Icon]) => {
+          const isActive = section === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setSection(id)}
+              title={label}
+              aria-label={label}
+              aria-pressed={isActive}
+              className={cn(
+                "relative inline-flex items-center justify-center px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]",
+                isActive
+                  ? "bg-action text-white"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {isActive ? (
+                <>
+                  <span className="invisible">{label}</span>
+                  <Icon className="absolute w-4 h-4" aria-hidden="true" />
+                </>
+              ) : (
+                label
+              )}
+            </button>
+          );
+        })}
         <div className="flex-1" />
         <button
           onClick={() => setFavoritesOnly((v) => !v)}
@@ -1047,181 +1132,171 @@ export default function LibraryPage() {
         </button>
       </div>
 
-      {/* Semantic search (offline keyword today, CLIP when models installed) */}
+      {/* Unified search (offline keyword today, CLIP when models installed).
+          Single input driving both filename + semantic results, merged below. */}
+      {section === "vault" && <SemanticSearchBar value={q} onChange={setQ} />}
+
+      {/* Toolbar — vault only. Other sections render their own headers. */}
       {section === "vault" && (
-        <SemanticSearchBar onResults={(q) => setSemanticQuery(q)} />
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Custom pill-shaped type filter */}
+          <PillSelect
+            value={extension}
+            onChange={setExtension}
+            placeholder="All types"
+            options={[
+              { value: "", label: "All types" },
+              ...allExtensions.map((ext) => ({ value: ext, label: ext })),
+            ]}
+          />
+
+          {/* Custom pill-shaped doc-kind filter */}
+          <PillSelect
+            value={docKind}
+            onChange={setDocKind}
+            placeholder="All doc kinds"
+            options={[
+              { value: "", label: "All doc kinds" },
+              ...DOCUMENT_KINDS.map((kind) => ({ value: kind, label: kind })),
+            ]}
+            title="Filter documents by kind folder (Documents/<Kind>/)"
+          />
+
+          {/* Custom pill-shaped status filter */}
+          <PillSelect
+            value={finalStatus}
+            onChange={setFinalStatus}
+            placeholder="All statuses"
+            options={[
+              { value: "", label: "All statuses" },
+              { value: "completed", label: "Completed (default)" },
+              { value: "failed", label: "Failed" },
+              { value: "pending", label: "Pending" },
+            ]}
+          />
+
+          {/* Pill-shaped View mode segmented control */}
+          <div className="flex items-center p-0.5 bg-muted/50 border border-border rounded-full">
+            <button
+              onClick={() => setViewMode("masonry")}
+              className={cn(
+                "p-1.5 rounded-full transition-colors",
+                viewMode === "masonry"
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+              title="Grid view"
+            >
+              <Grid3X3 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setViewMode("list")}
+              className={cn(
+                "p-1.5 rounded-full transition-colors",
+                viewMode === "list"
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+              title="List view"
+            >
+              <LayoutList className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setViewMode("history")}
+              className={cn(
+                "p-1.5 rounded-full transition-colors",
+                viewMode === "history"
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+              title="Transfer history"
+            >
+              <History className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Document filing icon button with pill hover tooltip */}
+          <div className="relative flex items-center">
+            <button
+              type="button"
+              onClick={handleMigrateDocuments}
+              disabled={migrateRunning}
+              onMouseEnter={() => setDocsIconHovered(true)}
+              onMouseLeave={() => setDocsIconHovered(false)}
+              className={cn(
+                "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
+                migrateRunning && "opacity-60 cursor-not-allowed",
+              )}
+              aria-label="Document filing"
+            >
+              {migrateRunning ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+              ) : (
+                <FileText className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <AnimatePresence>
+              {docsIconHovered && (
+                <motion.div
+                  initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-10 z-30 pointer-events-none"
+                >
+                  <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
+                    <FileText className="w-3 h-3 text-action" />
+                    <span>
+                      {migrateResult
+                        ? migrateResult
+                        : migratePreview && migratePreview.total > 0
+                          ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
+                          : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
+                    </span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          <button
+            onClick={handleRegenThumbnails}
+            disabled={regenStatus === "loading"}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border transition-colors active:scale-[0.95]",
+              regenStatus === "done"
+                ? "border-green-500 text-green-600 bg-green-50 dark:bg-green-950"
+                : "border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground",
+              regenStatus === "loading" && "opacity-60 cursor-not-allowed",
+            )}
+            title="Re-generate and refresh preview thumbnails for your library"
+          >
+            {regenStatus === "loading" ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : regenStatus === "done" ? (
+              <CheckCircle2 className="w-3.5 h-3.5" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5" />
+            )}
+            {regenStatus === "done" ? "Updated" : "Refresh"}
+          </button>
+
+          <button
+            onClick={() => setShowClearDialog(true)}
+            disabled={libraryTotal === 0 || !backendReady}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border border-border text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.95]"
+            title={
+              backendReady ? "Clear all library entries" : ENGINE_WAITING_LABEL
+            }
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Clear
+          </button>
+        </div>
       )}
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-2.5 flex-wrap">
-        <div className="flex-1 min-w-[200px] relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search files..."
-            className="w-full pl-9 pr-3 py-1.5 bg-background border border-input rounded-full text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
-          />
-        </div>
-
-        {/* Custom pill-shaped type filter */}
-        <PillSelect
-          value={extension}
-          onChange={setExtension}
-          placeholder="All types"
-          options={[
-            { value: "", label: "All types" },
-            ...allExtensions.map((ext) => ({ value: ext, label: ext })),
-          ]}
-        />
-
-        {/* Custom pill-shaped doc-kind filter */}
-        <PillSelect
-          value={docKind}
-          onChange={setDocKind}
-          placeholder="All doc kinds"
-          options={[
-            { value: "", label: "All doc kinds" },
-            ...DOCUMENT_KINDS.map((kind) => ({ value: kind, label: kind })),
-          ]}
-          title="Filter documents by kind folder (Documents/<Kind>/)"
-        />
-
-        {/* Custom pill-shaped status filter */}
-        <PillSelect
-          value={finalStatus}
-          onChange={setFinalStatus}
-          placeholder="All statuses"
-          options={[
-            { value: "", label: "All statuses" },
-            { value: "completed", label: "Completed (default)" },
-            { value: "failed", label: "Failed" },
-            { value: "pending", label: "Pending" },
-          ]}
-        />
-
-        {/* Pill-shaped View mode segmented control */}
-        <div className="flex items-center p-0.5 bg-muted/50 border border-border rounded-full">
-          <button
-            onClick={() => setViewMode("masonry")}
-            className={cn(
-              "p-1.5 rounded-full transition-colors",
-              viewMode === "masonry"
-                ? "bg-primary text-primary-foreground shadow-xs"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-            title="Grid view"
-          >
-            <Grid3X3 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => setViewMode("list")}
-            className={cn(
-              "p-1.5 rounded-full transition-colors",
-              viewMode === "list"
-                ? "bg-primary text-primary-foreground shadow-xs"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-            title="List view"
-          >
-            <LayoutList className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => setViewMode("history")}
-            className={cn(
-              "p-1.5 rounded-full transition-colors",
-              viewMode === "history"
-                ? "bg-primary text-primary-foreground shadow-xs"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-            title="Transfer history"
-          >
-            <History className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {/* Document filing icon button with pill hover tooltip */}
-        <div className="relative flex items-center">
-          <button
-            type="button"
-            onClick={handleMigrateDocuments}
-            disabled={migrateRunning}
-            onMouseEnter={() => setDocsIconHovered(true)}
-            onMouseLeave={() => setDocsIconHovered(false)}
-            className={cn(
-              "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
-              migrateRunning && "opacity-60 cursor-not-allowed",
-            )}
-            aria-label="Document filing"
-          >
-            {migrateRunning ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-            ) : (
-              <FileText className="w-3.5 h-3.5" />
-            )}
-          </button>
-          <AnimatePresence>
-            {docsIconHovered && (
-              <motion.div
-                initial={{ opacity: 0, y: 4, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 4, scale: 0.96 }}
-                transition={{ duration: 0.15 }}
-                className="absolute right-0 top-10 z-30 pointer-events-none"
-              >
-                <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
-                  <FileText className="w-3 h-3 text-action" />
-                  <span>
-                    {migrateResult
-                      ? migrateResult
-                      : migratePreview && migratePreview.total > 0
-                        ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
-                        : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
-                  </span>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        <button
-          onClick={handleRegenThumbnails}
-          disabled={regenStatus === "loading"}
-          className={cn(
-            "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border transition-colors active:scale-[0.95]",
-            regenStatus === "done"
-              ? "border-green-500 text-green-600 bg-green-50 dark:bg-green-950"
-              : "border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground",
-            regenStatus === "loading" && "opacity-60 cursor-not-allowed",
-          )}
-          title="Re-generate and refresh preview thumbnails for your library"
-        >
-          {regenStatus === "loading" ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          ) : regenStatus === "done" ? (
-            <CheckCircle2 className="w-3.5 h-3.5" />
-          ) : (
-            <RefreshCw className="w-3.5 h-3.5" />
-          )}
-          {regenStatus === "done" ? "Updated" : "Refresh"}
-        </button>
-
-        <button
-          onClick={() => setShowClearDialog(true)}
-          disabled={libraryTotal === 0 || !backendReady}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border border-border text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.95]"
-          title={
-            backendReady ? "Clear all library entries" : ENGINE_WAITING_LABEL
-          }
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-          Clear
-        </button>
-      </div>
-
       {/* Moment filter banner */}
-      {momentRange && (
+      {section === "vault" && momentRange && (
         <div className="flex items-center gap-2 px-3 py-2 bg-action/5 border border-action/30 rounded-lg text-xs">
           <span className="flex-1 text-muted-foreground">
             Showing moment {momentLabel} · {visibleLibraryItems.length} of{" "}
@@ -1237,8 +1312,26 @@ export default function LibraryPage() {
         </div>
       )}
 
+      {/* Person filter banner */}
+      {section === "vault" && personFilter && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-action/5 border border-action/30 rounded-lg text-xs">
+          <span className="flex-1 text-muted-foreground">
+            Showing Person {personFilter.person_id} ·{" "}
+            {visibleLibraryItems.length}{" "}
+            {visibleLibraryItems.length === 1 ? "photo" : "photos"}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPersonFilter(null)}
+            className="px-2.5 py-1 bg-action text-white rounded-pill font-normal hover:bg-action/90 active:scale-[0.95] transition-colors shrink-0"
+          >
+            × Clear
+          </button>
+        </div>
+      )}
+
       {/* Session filter banner */}
-      {lastSessionId && (
+      {section === "vault" && lastSessionId && (
         <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg text-xs">
           <span className="flex-1 text-blue-700 dark:text-blue-300">
             {showingRecent
@@ -1296,51 +1389,22 @@ export default function LibraryPage() {
         </div>
       )}
       {section === "trash" && (
-        <div className="space-y-2">
+        <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
             {trashQuery.data
-              ? `${trashQuery.data.total} items in Trash — restore from here, or empty to delete records.`
+              ? `${trashQuery.data.total} ${trashQuery.data.total === 1 ? "item" : "items"} in Trash — restore from here, or empty to delete records.`
               : "Loading trash…"}
           </p>
-          {(trashQuery.data?.items ?? []).map((item) => (
-            <div
-              key={item.id}
-              className="flex items-center gap-3 px-3 py-2 bg-card border border-border rounded-md"
-            >
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-foreground truncate">
-                  {item.file_name}
-                </p>
-                <p className="text-xs text-muted-foreground truncate">
-                  {item.source_path}
-                </p>
-              </div>
-              <RestoreTrashButton id={item.id} />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Semantic hits strip */}
-      {section === "vault" && semanticActive && (
-        <div className="rounded-lg border border-action/30 bg-action/5 p-3">
-          <p className="text-xs text-muted-foreground mb-2">
-            {semanticResults.data
-              ? `${semanticResults.data.total} semantic hits (${semanticResults.data.mode}) for “${semanticQuery}”`
-              : `Searching for “${semanticQuery}”…`}
-          </p>
-          <div className="flex gap-2 overflow-x-auto">
-            {(semanticResults.data?.results ?? []).slice(0, 12).map((m) => (
-              <div key={m.id} className="w-20 shrink-0 text-center">
-                <div className="aspect-square rounded-md bg-muted flex items-center justify-center text-[10px] text-muted-foreground px-1">
-                  {m.file_name.slice(0, 18)}
+          {(trashQuery.data?.items ?? []).length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+              {(trashQuery.data?.items ?? []).map((item) => (
+                <div key={item.id} className="space-y-1.5">
+                  <LibraryCard item={item} onSelect={handleSelectItem} />
+                  <RestoreTrashButton id={item.id} />
                 </div>
-                <p className="text-[10px] text-muted-foreground truncate mt-1">
-                  {m.file_name}
-                </p>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1367,16 +1431,38 @@ export default function LibraryPage() {
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
             <HardDrive className="w-12 h-12 mb-3 opacity-30" />
             <p className="text-sm font-semibold text-foreground">
-              {momentRange
-                ? "No items in this moment"
-                : "No items in library yet"}
+              {semanticActive || debouncedQ
+                ? `No matches for “${debouncedQ}”`
+                : personFilter
+                  ? `No photos of Person ${personFilter.person_id} match the current filters`
+                  : momentRange
+                    ? "No items in this moment"
+                    : "No items in library yet"}
             </p>
             <p className="text-xs text-muted-foreground mt-1 max-w-xs text-center">
-              {momentRange
-                ? `Nothing taken between ${momentLabel} matches the current filters.`
-                : "Complete your first backup to safely store and view your photos and videos here."}
+              {semanticActive || debouncedQ
+                ? "Try a different word, or clear the search to browse everything."
+                : personFilter
+                  ? "Try clearing the person filter or adjusting the type filters."
+                  : momentRange
+                    ? `Nothing taken between ${momentLabel} matches the current filters.`
+                    : "Complete your first backup to safely store and view your photos and videos here."}
             </p>
-            {momentRange ? (
+            {semanticActive || debouncedQ ? (
+              <button
+                onClick={() => setQ("")}
+                className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"
+              >
+                Clear search
+              </button>
+            ) : personFilter ? (
+              <button
+                onClick={() => setPersonFilter(null)}
+                className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"
+              >
+                Clear person filter
+              </button>
+            ) : momentRange ? (
               <button
                 onClick={() => setMomentRange(null)}
                 className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-pill text-xs font-normal hover:bg-primary/90 active:scale-[0.95] transition-all inline-flex items-center gap-1.5"

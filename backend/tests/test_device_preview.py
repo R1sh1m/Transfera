@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from fastapi import HTTPException
+
 import backend.api.device_preview as device_preview
 from backend.api.auth import require_local_token_or_query
 from backend.config import LOCAL_SECRET_TOKEN
@@ -100,10 +102,10 @@ async def test_thumbnail_auth_accepts_header_or_query():
 
     assert await require_local_token_or_query(LOCAL_SECRET_TOKEN, None) is None
     assert await require_local_token_or_query(None, LOCAL_SECRET_TOKEN) is None
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(HTTPException) as exc_info:
         await require_local_token_or_query(None, None)
     assert exc_info.value.status_code == 403
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(HTTPException) as exc_info:
         await require_local_token_or_query("wrong", "also-wrong")
     assert exc_info.value.status_code == 403
 
@@ -177,3 +179,60 @@ def test_embedded_thumbnail_no_exiftool(monkeypatch):
     monkeypatch.setattr(_me, "_bootstrap_exiftool", lambda: None)
     # Binary session start fails without an exe -> None, no spawn attempted.
     assert _me.extract_embedded_thumbnail_bytes("whatever.jpg") is None
+
+
+def test_thumb_worker_heif_decode():
+    import io
+
+    import pillow_heif
+    from PIL import Image
+
+    from backend.engines import thumb_worker
+
+    pillow_heif.register_heif_opener()
+    img = Image.new("RGB", (80, 80), color="blue")
+    buf = io.BytesIO()
+    img.save(buf, format="HEIF")
+    heif_bytes = buf.getvalue()
+
+    thumb = thumb_worker.generate_photo_from_bytes(heif_bytes, 100)
+    assert thumb is not None
+    assert len(thumb) > 100
+    # Decode result is a valid JPEG
+    res_img = Image.open(io.BytesIO(thumb))
+    assert res_img.format == "JPEG"
+
+
+def test_thumbnail_cache_only_miss_and_hit(test_client, tmp_path):
+    from PIL import Image
+
+    from backend.config import LOCAL_SECRET_TOKEN
+
+    test_file = tmp_path / "sample.png"
+    img = Image.new("RGB", (50, 50), color="red")
+    img.save(str(test_file), format="PNG")
+
+    # cache=only on cold file returns 404 with X-Thumb-Status: miss
+    res_miss = test_client.get(
+        "/api/device/thumbnail",
+        params={"path": str(test_file), "token": LOCAL_SECRET_TOKEN, "cache": "only"},
+    )
+    assert res_miss.status_code == 404
+    assert res_miss.headers.get("X-Thumb-Status") == "miss"
+
+    # Full request generates and caches thumbnail
+    res_full = test_client.get(
+        "/api/device/thumbnail",
+        params={"path": str(test_file), "token": LOCAL_SECRET_TOKEN},
+    )
+    assert res_full.status_code == 200
+    assert res_full.headers.get("X-Thumb-Status") == "ok"
+
+    # cache=only now hits cache!
+    res_hit = test_client.get(
+        "/api/device/thumbnail",
+        params={"path": str(test_file), "token": LOCAL_SECRET_TOKEN, "cache": "only"},
+    )
+    assert res_hit.status_code == 200
+    assert res_hit.headers.get("X-Thumb-Status") == "hit"
+

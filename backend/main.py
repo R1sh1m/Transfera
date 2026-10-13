@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.api.device_preview import router as device_preview_router
-from backend.api.intelligence_routes import curation_router, trash_router
+from backend.api.intelligence_routes import curation_router, faces_router, trash_router
 from backend.api.intelligence_routes import router as intelligence_router
 from backend.api.routes import router, ws_transfer
 from backend.api.tier2_routes import router as tier2_router
@@ -400,7 +400,14 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["*", "X-Thumbnail-Status", "X-Local-Token"],
+        expose_headers=[
+            "*",
+            "X-Thumb-Status",
+            "X-Thumbnail-Status",
+            "X-Thumb-Fallback",
+            "X-Local-Token",
+            "Retry-After",
+        ],
     )
 
     # Consistent error envelope (validation errors + unhandled 500s without leaks)
@@ -427,6 +434,7 @@ def create_app() -> FastAPI:
     app.include_router(tier2_router)
     app.include_router(device_preview_router)
     app.include_router(intelligence_router)
+    app.include_router(faces_router)
     app.include_router(curation_router)
     app.include_router(trash_router)
 

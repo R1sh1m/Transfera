@@ -876,6 +876,13 @@ async def _upsert_media_item(
                 live_photo_group=live_photo_group,
                 date_taken=resolved_date,
                 date_source=date_source,
+                camera_make=meta.camera_make,
+                camera_model=meta.camera_model,
+                width=meta.width,
+                height=meta.height,
+                duration_s=meta.duration_s,
+                gps_lat=meta.gps_lat,
+                gps_lon=meta.gps_lon,
             )
         )
         await session.execute(stmt)
@@ -908,6 +915,13 @@ async def _upsert_media_item(
         live_photo_group=live_photo_group,
         date_taken=resolved_date,
         date_source=date_source,
+        camera_make=meta.camera_make,
+        camera_model=meta.camera_model,
+        width=meta.width,
+        height=meta.height,
+        duration_s=meta.duration_s,
+        gps_lat=meta.gps_lat,
+        gps_lon=meta.gps_lon,
     )
     session.add(item)
     await session.flush()

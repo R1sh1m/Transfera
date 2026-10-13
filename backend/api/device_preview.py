@@ -392,7 +392,7 @@ _listing_refresh_inflight: set[tuple] = set()
 
 
 def _listing_cache_key(device_id: str, path: str, recursive: bool, sort_by: str) -> tuple:
-    return (device_id, path, bool(recursive), sort_by)
+    return (device_id, path, recursive, sort_by)
 
 
 def _listing_snapshot_of(entries: list) -> tuple[int, str]:
@@ -490,7 +490,7 @@ def _scan_id_for(device_id: str, path: str, recursive: bool, snapshot: tuple[int
     try:
         count = snapshot[0] if snapshot else 0
         digest = snapshot[1] if snapshot else ""
-        raw = f"{device_id}\x00{path}\x00{int(bool(recursive))}\x00{count}\x00{digest}"
+        raw = f"{device_id}\x00{path}\x00{int(recursive)}\x00{count}\x00{digest}"
         return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12]
     except Exception:
         return ""
@@ -689,14 +689,14 @@ def _listing_l2_store(
                     path,
                     recursive,
                     sort_by,
-                    int(count),
-                    str(digest),
-                    str(scan_id or ""),
-                    int(photos),
-                    int(videos),
-                    int(total_size),
+                    count,
+                    digest,
+                    scan_id or "",
+                    photos,
+                    videos,
+                    total_size,
                     payload,
-                    float(now),
+                    now,
                 ),
             )
             try:
@@ -752,7 +752,7 @@ def _listing_l2_find_reusable(
                 "SELECT device_id, path, recursive, sort_by, snapshot_count, snapshot_digest,"
                 " scan_id, photos, videos, total_size, items_json, cached_at"
                 " FROM device_listings WHERE device_id=? AND path=? AND recursive=?",
-                (device_id, path, int(bool(recursive))),
+                (device_id, path, int(recursive)),
             )
             for row in cur.fetchall():
                 d = _listing_l2_row_to_dict(row)
@@ -805,7 +805,7 @@ def _listing_l2_find_by_scan_id(scan_id: str) -> dict | None:
                 "SELECT device_id, path, recursive, sort_by, snapshot_count, snapshot_digest,"
                 " scan_id, photos, videos, total_size, items_json, cached_at"
                 " FROM device_listings WHERE scan_id=? LIMIT 1",
-                (str(scan_id),),
+                (scan_id,),
             )
             row = cur.fetchone()
             if row is None:
@@ -834,7 +834,6 @@ def _listing_l2_find_by_scan_id(scan_id: str) -> dict | None:
                 pass
     except Exception:
         return None
-    return None
 
 
 def _listing_l2_purge_devices(device_ids: set) -> None:
@@ -1047,6 +1046,17 @@ def _thumb_fail_get(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> st
                 return None
             if reason not in _PERSISTENT_FAIL_REASONS:
                 return None
+            if reason in ("no-pillow-heif", "undecodable") and dev_path.lower().endswith((".heic", ".heif")):
+                if _ensure_heif_opener():
+                    try:
+                        conn.execute(
+                            "DELETE FROM thumb_fail_cache WHERE fail_key=?",
+                            (_thumb_fail_key(device_id, dev_path, fsize, mtime),),
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+                    return None
             return reason
         finally:
             try:
@@ -1055,7 +1065,6 @@ def _thumb_fail_get(device_id: str, dev_path: str, fsize: Any, mtime: Any) -> st
                 pass
     except Exception:
         return None
-    return None
 
 
 def _thumb_fail_put(device_id: str, dev_path: str, fsize: Any, mtime: Any, reason: str) -> None:
@@ -1189,7 +1198,7 @@ def _listing_find_reusable(
         for k, ent in list(_listing_cache.items()):
             if len(k) < 3:
                 continue
-            if k[0] == device_id and k[1] == path and bool(k[2]) == bool(recursive):
+            if k[0] == device_id and k[1] == path and bool(k[2]) == recursive:
                 if ent.snapshot is not None and ent.snapshot == snapshot:
                     return k, ent
     return None
@@ -1896,9 +1905,10 @@ async def device_thumbnail(
     retry: int | None = Query(
         None, description="Client retry counter — ignored for cache keys so retries hit disk/RAM cache"
     ),
-    _: None = Depends(require_local_token_or_query),
+    cache: str | None = Query(None, description="Cache policy: 'only' returns 404 on miss without decode IO"),
+    _token_auth: None = Depends(require_local_token_or_query),
 ):
-    _ = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
+    _ignored_retry = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
     abs_path = os.path.abspath(path)
 
     if not os.path.exists(abs_path):
@@ -1938,6 +1948,9 @@ async def device_thumbnail(
             headers={"X-Thumb-Status": "unsupported-type"},
         )
 
+    if ext in (".heic", ".heif"):
+        _ensure_heif_opener()
+
     cache_key = (abs_path, size)
     cached = _get_thumb_cache(cache_key)
     if cached is not None:
@@ -1955,6 +1968,12 @@ async def device_thumbnail(
             content=disk_cached,
             media_type="image/jpeg",
             headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
+        )
+
+    if cache == "only":
+        return Response(
+            status_code=404,
+            headers={"X-Thumb-Status": "miss"},
         )
 
     # Persistent negative cache (24 h TTL): skip re-decoding files already
@@ -1985,7 +2004,10 @@ async def device_thumbnail(
             ext,
             _HEIF_AVAILABLE,
         )
-    result = jpeg_bytes if is_real else _generate_gray_fallback()
+    if is_real and jpeg_bytes is not None:
+        result: bytes = jpeg_bytes
+    else:
+        result = _generate_gray_fallback()
 
     _put_thumb_cache(cache_key, result)
     if is_real:
@@ -2329,9 +2351,10 @@ async def ios_thumbnail(
     retry: int | None = Query(
         None, description="Client retry counter — ignored for cache keys so retries hit disk/RAM cache"
     ),
-    _: None = Depends(require_local_token_or_query),
+    cache: str | None = Query(None, description="Cache policy: 'only' returns 404 on miss without USB/decode IO"),
+    _token_auth: None = Depends(require_local_token_or_query),
 ):
-    _ = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
+    _ignored_retry = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
     if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
         raise HTTPException(status_code=400, detail="Invalid device path")
     # Stat-failure rows (browse_device fallback) report size=0/mtime=0 —
@@ -2360,7 +2383,15 @@ async def ios_thumbnail(
             headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
 
+    if cache == "only":
+        return Response(
+            status_code=404,
+            headers={"X-Thumb-Status": "miss"},
+        )
+
     ext = os.path.splitext(path)[1].lower()
+    if ext in (".heic", ".heif"):
+        _ensure_heif_opener()
     jpeg_bytes: bytes | None = None
     transient_exc: BaseException | None = None
     fail_reason = "unknown"
@@ -2415,12 +2446,12 @@ async def ios_thumbnail(
                         "heif_available=%s, partial_truncated=%s) — falling back to full read",
                         path,
                         len(partial_bytes),
-                        _HEIF_AVAILABLE,
+                        _ensure_heif_opener(),
                         len(partial_bytes) < PARTIAL_READ_BYTES,
                     )
                     fail_reason = (
                         "no-pillow-heif"
-                        if (ext in (".heic", ".heif") and not _HEIF_AVAILABLE)
+                        if (ext in (".heic", ".heif") and not _ensure_heif_opener())
                         else "partial-truncated-no-exif"
                     )
                     jpeg_bytes = None
@@ -2429,7 +2460,7 @@ async def ios_thumbnail(
                     "iOS partial read unusable for %s (bytes=%s, heif_available=%s) — falling back to full read",
                     path,
                     len(partial_bytes) if partial_bytes else 0,
-                    _HEIF_AVAILABLE,
+                    _ensure_heif_opener(),
                 )
                 fail_reason = "partial-truncated"
                 if partial_exc is not None and _is_transient_thumb_error(partial_exc):
@@ -2452,11 +2483,11 @@ async def ios_thumbnail(
                                 path,
                                 len(file_bytes),
                                 ext,
-                                _HEIF_AVAILABLE,
+                                _ensure_heif_opener(),
                             )
                             fail_reason = (
                                 "no-pillow-heif"
-                                if (ext in (".heic", ".heif") and not _HEIF_AVAILABLE)
+                                if (ext in (".heic", ".heif") and not _ensure_heif_opener())
                                 else "undecodable"
                             )
                     else:

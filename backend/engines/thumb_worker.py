@@ -97,6 +97,17 @@ def _worker_disabled() -> bool:
 # cycle in the parent).
 
 
+def _ensure_pillow_heif() -> bool:
+    """Register the pillow-heif opener in the worker child (idempotent, lazy)."""
+    try:
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+        return True
+    except Exception:
+        return False
+
+
 def _decode_photo_bytes(data: bytes, size: int) -> bytes | None:
     """Pillow decode of raw image bytes (embedded-EXIF attempt first)."""
     import io as _io
@@ -145,6 +156,7 @@ def _decode_photo_bytes(data: bytes, size: int) -> bytes | None:
         pass  # fall through to full Pillow decode
 
     try:
+        _ensure_pillow_heif()
         from PIL import Image as _Image
         from PIL import ImageOps as _ImageOps
         from PIL.Image import Resampling as _Resampling
@@ -202,7 +214,7 @@ def _decode_frame_bytes(data: bytes, size: int, suffix: str) -> bytes | None:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
-            return bytes(result.stdout)
+            return result.stdout
     except subprocess.TimeoutExpired:
         raise
     except (OSError, Exception) as exc:
@@ -254,6 +266,7 @@ def _decode_photo_path(path: str, size: int) -> bytes | None:
         except Exception:
             pass
     try:
+        _ensure_pillow_heif()
         from PIL import Image as _Image
         from PIL import ImageOps as _ImageOps
         from PIL.Image import Resampling as _Resampling
@@ -308,7 +321,7 @@ def _decode_video_path(path: str, size: int) -> bytes | None:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
-                return bytes(result.stdout)
+                return result.stdout
         except (subprocess.TimeoutExpired, OSError) as exc:
             logger.debug("thumb worker video decode failed for %s: %s", path, exc)
         except Exception as exc:
@@ -319,11 +332,11 @@ def _decode_video_path(path: str, size: int) -> bytes | None:
 def _decode_in_process(kind: str, payload: bytes | str, size: int, suffix: str) -> bytes | None:
     """Run the decode for *kind* in this process (child body / fallback)."""
     if kind == "photo_bytes":
-        assert isinstance(payload, (bytes, bytearray))
-        return _decode_photo_bytes(bytes(payload), size)
+        assert isinstance(payload, bytes)
+        return _decode_photo_bytes(payload, size)
     if kind == "frame_bytes":
-        assert isinstance(payload, (bytes, bytearray))
-        return _decode_frame_bytes(bytes(payload), size, suffix)
+        assert isinstance(payload, bytes)
+        return _decode_frame_bytes(payload, size, suffix)
     if kind == "photo_path":
         return _decode_photo_path(str(payload), size)
     if kind == "video_path":
@@ -372,7 +385,6 @@ def _run_in_worker(kind: str, payload: bytes | str, size: int, suffix: str, time
     Raises ThumbWorkerTimeout on timeout, ThumbWorkerCrash when the child
     dies/errors without a result.
     """
-    size = int(size)
     if size < 32:
         size = 32
     elif size > 512:
