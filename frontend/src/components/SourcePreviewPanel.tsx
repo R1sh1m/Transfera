@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Check,
@@ -13,6 +14,7 @@ import {
   X,
   Loader2,
   Lock,
+  Smartphone,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { API_BASE_URL, getLocalToken } from "@/lib/api-client";
@@ -33,6 +35,7 @@ export interface MediaPreviewItem {
 export interface SourcePreviewPanelProps {
   sourcePath?: string | null;
   deviceSource?: { device_id: string; device_path: string } | null;
+  isDeviceConnected?: boolean;
   onSelectionConfirm: (selectedPaths: string[], quiet?: boolean) => void;
   onTransferStart?: (paths?: string[]) => void;
   /** Device sources only: reveal the driver picker when preview is empty. */
@@ -115,7 +118,11 @@ function isGreyFallbackResponse(res: Response): boolean {
     res.headers.get("X-Thumbnail-Status") ||
     res.headers.get("X-Thumb-Fallback");
   if (!h) return false;
-  return GREY_FALLBACK_STATUSES.has(h.trim().toLowerCase());
+  const v = h.trim().toLowerCase();
+  // Backend sends `fallback-<reason>` (e.g. fallback-undecodable,
+  // fallback-partial-truncated) — prefix-match so reasoned fallbacks are
+  // treated as failures (retry affordance) instead of "loaded" images.
+  return v.startsWith("fallback") || GREY_FALLBACK_STATUSES.has(v);
 }
 
 function formatBytes(bytes: number): string {
@@ -897,6 +904,7 @@ function SourcePreviewFallback({ onRetry }: { onRetry: () => void }) {
 function SourcePreviewPanelInner({
   sourcePath,
   deviceSource,
+  isDeviceConnected,
   onSelectionConfirm,
   onTransferStart,
   onTryAnotherDriver,
@@ -907,6 +915,12 @@ function SourcePreviewPanelInner({
   onScanId,
   onDeviceUnlocked,
 }: SourcePreviewPanelProps) {
+  const queryClient = useQueryClient();
+  const [deviceDisconnected, setDeviceDisconnected] = useState(false);
+  const isDeviceDisconnected = Boolean(
+    (deviceSource && isDeviceConnected === false) || deviceDisconnected,
+  );
+
   const [items, setItems] = useState<MediaPreviewItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const selectedRef = useRef(selected);
@@ -1022,6 +1036,7 @@ function SourcePreviewPanelInner({
       setTotalPages(1);
       setPreviewError(null);
       setLocked(false);
+      setDeviceDisconnected(false);
       setFailStreak(0);
       lockNotifiedRef.current = false;
       frozenMetaRef.current = null;
@@ -1087,6 +1102,17 @@ function SourcePreviewPanelInner({
       return;
     }
 
+    if (deviceSource && isDeviceConnected === false) {
+      setItems([]);
+      setSelected(new Set());
+      setFocusedIndex(null);
+      setPage(1);
+      setTotalPages(1);
+      setLoading(false);
+      setPreviewError(null);
+      return;
+    }
+
     if (isImportingAllRef.current) {
       return;
     }
@@ -1131,13 +1157,26 @@ function SourcePreviewPanelInner({
       .then(async (res) => {
         if (!res.ok) {
           let message = "Preview fetch failed";
+          let isDisconnected = false;
           try {
             const errBody = await res.json();
             const detail = errBody?.detail;
-            message =
-              typeof detail === "string" ? detail : detail?.message || message;
+            const status = errBody?.status || detail?.status || "";
+            const msg =
+              typeof detail === "string" ? detail : detail?.message || "";
+            if (
+              res.status === 404 ||
+              status === "disconnected" ||
+              msg.toLowerCase().includes("not connected") ||
+              msg.toLowerCase().includes("not reachable")
+            ) {
+              isDisconnected = true;
+            }
+            message = msg || message;
           } catch {
-            /* keep default */
+            if (res.status === 404 && deviceSource) {
+              isDisconnected = true;
+            }
           }
           // 423 = device locked mid-preview. Flag it (lock panel, hide
           // Import-all, gate Start) and notify the page exactly once per
@@ -1152,6 +1191,13 @@ function SourcePreviewPanelInner({
             };
             lockedErr.locked = true;
             throw lockedErr;
+          }
+          if (isDisconnected) {
+            const discErr = new Error(message) as Error & {
+              disconnected?: boolean;
+            };
+            discErr.disconnected = true;
+            throw discErr;
           }
           throw new Error(message);
         }
@@ -1213,6 +1259,8 @@ function SourcePreviewPanelInner({
         clearTimeout(timeout);
         if ((err as { locked?: boolean }).locked) {
           setLocked(true);
+        } else if ((err as { disconnected?: boolean }).disconnected) {
+          setDeviceDisconnected(true);
         } else {
           setFailStreak((n) => n + 1);
         }
@@ -1229,6 +1277,7 @@ function SourcePreviewPanelInner({
     sourcePath,
     deviceSource?.device_id,
     deviceSource?.device_path,
+    isDeviceConnected,
     page,
     pageSize,
     sortBy,
@@ -1317,9 +1366,12 @@ function SourcePreviewPanelInner({
   const handleRetry = useCallback(() => {
     setPage(1);
     setLocked(false);
+    setDeviceDisconnected(false);
     lockNotifiedRef.current = false;
+    queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
+    queryClient.invalidateQueries({ queryKey: ["device-preview"] });
     setRetryNonce((n) => n + 1);
-  }, []);
+  }, [queryClient]);
 
   const handleImportAll = useCallback(async () => {
     if (!deviceSource && !sourcePath) return;
@@ -1536,7 +1588,12 @@ function SourcePreviewPanelInner({
             <span className="text-xs font-semibold text-foreground">
               Source preview
             </span>
-            {!loading && metadata.total > 0 && !locked && (
+            {isDeviceDisconnected && (
+              <span className="text-xs text-muted-foreground">
+                &middot; Device not connected
+              </span>
+            )}
+            {!loading && !isDeviceDisconnected && metadata.total > 0 && !locked && (
               <span className="text-xs text-muted-foreground">
                 {metadata.total} file{metadata.total !== 1 ? "s" : ""} &middot;{" "}
                 {formatBytes(metadata.total_size_bytes)}
@@ -1544,7 +1601,7 @@ function SourcePreviewPanelInner({
               </span>
             )}
           </div>
-          {!loading && items.length > 0 && !locked && (
+          {!loading && !isDeviceDisconnected && items.length > 0 && !locked && (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1693,7 +1750,40 @@ function SourcePreviewPanelInner({
         <AnimatePresence mode="wait">
           {loading && <SkeletonGrid key="skeleton" count={20} />}
 
-          {!loading && previewError && (
+          {!loading && isDeviceDisconnected && (
+            <motion.div
+              key="disconnected"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <div className="flex flex-col items-center justify-center py-10 text-center space-y-3">
+                <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
+                  <Smartphone className="w-6 h-6 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-foreground">
+                    Device not connected
+                  </p>
+                  <p className="text-xs text-muted-foreground max-w-sm">
+                    Connect your iPhone, iPad, Android phone, or digital camera via USB cable and ensure the device is unlocked to preview media.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-muted text-foreground rounded-pill text-xs font-normal hover:bg-muted/80 active:scale-[0.95] transition-all cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Scan again
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {!loading && !isDeviceDisconnected && previewError && (
             <motion.div
               key="error"
               initial={{ opacity: 0 }}
@@ -1754,7 +1844,7 @@ function SourcePreviewPanelInner({
             </motion.div>
           )}
 
-          {!loading && !previewError && items.length === 0 && (
+          {!loading && !isDeviceDisconnected && !previewError && items.length === 0 && (
             <motion.div
               key="empty"
               initial={{ opacity: 0 }}
@@ -1814,7 +1904,7 @@ function SourcePreviewPanelInner({
         {/* Pagination — pages are navigated, not grown, so the DOM and
             the concurrent thumbnail work stay bounded per page while the
             selection (and its byte total) spans pages */}
-        {!loading && !previewError && totalPages > 1 && (
+        {!loading && !isDeviceDisconnected && !previewError && totalPages > 1 && (
           <div className="flex items-center justify-center gap-1.5 pt-1">
             <button
               type="button"
@@ -1859,7 +1949,34 @@ function SourcePreviewPanelInner({
         )}
 
         {/* Bottom action bar */}
-        {!locked && (
+        {isDeviceDisconnected && !locked && (
+          <div className="flex items-center justify-between pt-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Smartphone className="w-3.5 h-3.5 shrink-0" />
+              <span>Connect a device to preview and transfer</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-pill text-xs font-normal border border-border text-muted-foreground cursor-not-allowed opacity-40"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Import all
+              </button>
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-pill text-xs font-normal bg-muted text-muted-foreground cursor-not-allowed opacity-40"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Start transfer
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!locked && !isDeviceDisconnected && (
           <div className="flex items-center justify-between pt-1">
             <div>
               <p className="text-xs font-normal text-foreground">

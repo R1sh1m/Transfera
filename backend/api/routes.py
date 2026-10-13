@@ -445,7 +445,7 @@ async def browse_ios_device(req: IOSBrowseRequest, _: None = Depends(require_loc
             status_code=404,
             detail={
                 "status": "disconnected",
-                "message": f"Device {req.serial} is not connected or not reachable. "
+                "message": "Device is not connected or not reachable. "
                 "Ensure the device is plugged in via USB and unlocked.",
             },
         )
@@ -756,12 +756,21 @@ async def recover_ios_device(_: None = Depends(require_local_token)) -> dict:
     except Exception as cache_exc:
         logger.warning("Recover: listing-cache purge failed: %s", cache_exc)
 
-    # Phase 1: ensure the Apple Windows service is running
+    # Phase 1: ensure the Apple Windows service is running.
+    # NOTE: ensure_apple_service_running() both probes AND starts the
+    # service, so there is no cheap read-only pre-state probe. Infer
+    # whether a start actually happened from the result message:
+    # "already running" = was running before (nothing changed),
+    # "started successfully" = was stopped, now running.
     service = await mgr.ensure_apple_service_running()
     result["service"] = service
 
     if service["state"] in ("running",):
-        result["overall"] = "service_restored"
+        _msg = str(service.get("message") or "").lower()
+        if "already running" in _msg:
+            result["overall"] = "service_already_running"
+        else:
+            result["overall"] = "service_restored"
 
     # Phase 2: if service is not_installed, try USB passthrough
     if service["state"] == "not_installed":
@@ -814,6 +823,16 @@ async def recover_ios_device(_: None = Depends(require_local_token)) -> dict:
         logger.warning("Recover: device re-enumeration failed: %s", enum_exc)
         result["devices"] = []
         result["active_tier"] = "none"
+
+    # Tier-1 visibility check: did Phase-3 re-enumeration actually surface
+    # a Tier-1 row? The frontend uses this to avoid false-success toasts
+    # when the service is running but the iPhone isn't visible to it.
+    try:
+        result["tier1_found"] = any(
+            isinstance(d, dict) and d.get("active_tier") == "tier1" for d in (result.get("devices") or [])
+        )
+    except Exception:
+        result["tier1_found"] = False
 
     return result
 
@@ -1617,6 +1636,8 @@ async def clear_sessions(
     user's actual transfer destination files.
     """
     older_than_days = req.older_than_days if req else None
+    requested_ids = req.session_ids if req and req.session_ids is not None else None
+    selective = requested_ids is not None
 
     async with session_scope() as session:
         # Build the session query
@@ -1624,19 +1645,53 @@ async def clear_sessions(
         if older_than_days is not None:
             cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
             q = q.where(TransferSession.created_at < cutoff)
+        if selective:
+            q = q.where(TransferSession.id.in_(requested_ids))
 
         result = await session.execute(q)
         sessions_to_delete = list(result.scalars().all())
 
         if not sessions_to_delete:
             return ClearResponse(
-                message="No sessions to clear",
+                message="No matching sessions found" if selective else "No sessions to clear",
                 sessions_cleared=0,
                 batches_cleared=0,
                 media_items_cleared=0,
                 thumbnails_removed=0,
                 cache_files_removed=0,
             )
+
+        # Active-transfer guard (selective path only — fail-closed, delete none).
+        # Leave the unfiltered clear-all path behavior exactly as-is.
+        if selective:
+            refused: list[int] = []
+            for s in sessions_to_delete:
+                if s.status == SessionStatus.RUNNING.value:
+                    refused.append(s.id)
+                    continue
+                if s.id in _active_tasks:
+                    refused.append(s.id)
+                    continue
+                lock = _session_locks.get(s.id)
+                if lock is not None and lock.locked():
+                    refused.append(s.id)
+            # Also refuse requested ids with in-flight work but no DB row match
+            # (defensive: task/lock present for an id not returned above).
+            matched_ids = {s.id for s in sessions_to_delete}
+            for rid in requested_ids or []:
+                if rid in matched_ids or rid in refused:
+                    continue
+                if rid in _active_tasks:
+                    refused.append(rid)
+                    continue
+                lock = _session_locks.get(rid)
+                if lock is not None and lock.locked():
+                    refused.append(rid)
+            if refused:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot delete session(s) with transfer in progress: {sorted(refused)}",
+                )
 
         session_ids = [s.id for s in sessions_to_delete]
 
@@ -1669,11 +1724,17 @@ async def clear_sessions(
     for sid in session_ids:
         _cleanup_session_state(sid)
 
-    # Clear Hop 1 cache directory contents
-    cache_files_removed = _clear_cache_dir()
+    # Only wipe the whole Hop 1 cache dir on the unfiltered path so other
+    # sessions' partials survive a selective delete.
+    cache_files_removed = 0 if selective else _clear_cache_dir()
+
+    if selective and len(sessions_to_delete) == 1:
+        message = f"Deleted session '{sessions_to_delete[0].session_name}'"
+    else:
+        message = f"Cleared {len(sessions_to_delete)} session(s)"
 
     return ClearResponse(
-        message=f"Cleared {len(sessions_to_delete)} session(s)",
+        message=message,
         sessions_cleared=len(sessions_to_delete),
         batches_cleared=batch_count,
         media_items_cleared=media_count,

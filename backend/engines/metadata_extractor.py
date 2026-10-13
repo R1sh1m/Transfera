@@ -28,16 +28,35 @@ from backend.config import EXIFTOOL_DIR, PACKAGED_EXIFTOOL_DIR, PACKAGED_EXIFTOO
 
 logger = logging.getLogger(__name__)
 
-# Register pillow-heif opener so Image.open() can decode HEIC/HEIF files
-try:
-    from pillow_heif import register_heif_opener
+# pillow-heif opener registration is LAZY (see note in device_preview):
+# importing it at module top pulled PIL (+ the native extension) into engine
+# cold start. It is registered on first use in the public extract_* entry
+# points below, before any Pillow HEIC decode elsewhere in the process.
+import threading as _heif_threading
 
-    register_heif_opener()
-    logger.debug("pillow-heif registered for HEIC/HEIF support")
-except ImportError:
-    logger.warning(
-        "pillow-heif not installed — HEIC files will fall back to mtime. Install with: pip install pillow-heif"
-    )
+_heif_attempted = False
+_heif_lock = _heif_threading.Lock()
+
+
+def _ensure_heif_opener() -> None:
+    """Register the pillow-heif opener on first use (idempotent, thread-safe)."""
+    global _heif_attempted
+    if _heif_attempted:
+        return
+    with _heif_lock:
+        if _heif_attempted:
+            return
+        _heif_attempted = True
+        try:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+            logger.debug("pillow-heif registered for HEIC/HEIF support")
+        except ImportError:
+            logger.warning(
+                "pillow-heif not installed — HEIC files will fall back to mtime. Install with: pip install pillow-heif"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1012,6 +1031,7 @@ def extract_metadata(file_path: str | Path) -> FileMetadata:
     For bulk directory scans, prefer ``extract_metadata_batch()`` which uses
     a persistent ExifTool session and is dramatically faster.
     """
+    _ensure_heif_opener()
     path = Path(file_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"No such file: {path}")
@@ -1041,6 +1061,7 @@ def extract_metadata_batch(file_paths: list[Path]) -> dict[str, FileMetadata]:
     Returns a dict mapping resolved path string -> FileMetadata.
     Falls back gracefully to filesystem extraction if ExifTool is unavailable.
     """
+    _ensure_heif_opener()
     if not file_paths:
         return {}
 

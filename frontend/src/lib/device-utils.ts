@@ -399,3 +399,15 @@ export function formatDevicePath(
     internalPath: subPath,
   };
 }
+
+/**
+ * Stable device identity across Tier 1 / WPD serial formats. Mirrors
+ * backend canonical_device_serial: extracts 40-hex UDID when embedded,
+ * or returns normalized lowercase serial.
+ */
+export function canonicalSerial(serial: string | null | undefined): string | null {
+  if (!serial) return null;
+  const m = serial.match(/[0-9a-fA-F]{40}/);
+  if (m?.[0]) return m[0].toLowerCase();
+  return serial.toLowerCase();
+}

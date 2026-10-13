@@ -184,18 +184,20 @@ async def _run_startup_background() -> None:
     except Exception:
         pass
 
-    # Pre-warm ExifTool so it's ready for the first transfer
+    # Resolve (+ cache) the ExifTool binary path only — the stay_open session
+    # spawn (~1s on cold boot) is deferred to the first metadata call, which
+    # lazily starts it via _ensure_running() with the existing one-shot
+    # subprocess / filesystem fallbacks covering the gap.
     try:
-        from backend.engines.metadata_extractor import _bootstrap_exiftool, _exiftool_session
+        from backend.engines.metadata_extractor import _bootstrap_exiftool
 
         exiftool_path = _bootstrap_exiftool()
         if exiftool_path:
-            _exiftool_session._ensure_running()
-            logger.info("ExifTool stay_open session pre-warmed at startup")
+            logger.info("ExifTool resolved at %s — stay_open session spawns on first use", exiftool_path)
         else:
             logger.warning("ExifTool not available — metadata extraction limited to filesystem timestamps")
     except Exception as exc:
-        logger.warning("Failed to pre-warm ExifTool: %s", exc)
+        logger.warning("Failed to resolve ExifTool: %s", exc)
 
     # Seed AI models from bundle if present (offline installer support),
     # or kick off background download if on-device AI is enabled but face models are missing.

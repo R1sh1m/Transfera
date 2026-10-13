@@ -16,6 +16,7 @@ import io
 import logging
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -29,27 +30,92 @@ THUMBNAIL_QUALITY = 82  # JPEG quality for generated thumbnails
 
 
 # ---------------------------------------------------------------------------
-# Pillow + pillow-heif initialisation
+# Pillow + pillow-heif initialisation (LAZY — see note in device_preview)
 # ---------------------------------------------------------------------------
-_PILLOW_READY = False
-_PILLOW_HEIF_READY = False
-try:
-    from PIL import Image, ImageOps
+# Importing PIL (+ the pillow-heif native extension) at module top added
+# ~50 ms to engine cold start. The names below are resolved on first use via
+# _ensure_pillow() / module __getattr__ (PEP 562) and then cached in module
+# globals, so steady-state overhead is a single flag check. All run-time uses
+# in this module are reads, never writes, so lazy resolution is transparent.
+_pillow_attempted = False
+_pillow_lock = threading.Lock()
 
-    _PILLOW_READY = True
 
-    # Pillow 10+ moved Resampling to Image.Resampling.LANCZOS
-    _LANCZOS: Any = getattr(Image, "Resampling", Image).LANCZOS  # type: ignore
+def _pillow_ready() -> bool:
+    """True when Pillow is importable (triggers the one-time lazy import)."""
+    _ensure_pillow()
+    return bool(globals().get("_PILLOW_READY", False))
 
-    try:
-        import pillow_heif
 
-        pillow_heif.register_heif_opener()
-        _PILLOW_HEIF_READY = True
-    except ImportError:
-        pass
-except ImportError:
-    _LANCZOS: Any = 1  # Fallback for typing
+def _pillow_heif_ready() -> bool:
+    """True when HEIC/HEIF decode is available (triggers the lazy import)."""
+    _ensure_pillow()
+    return bool(globals().get("_PILLOW_HEIF_READY", False))
+
+
+def _rawpy_ready() -> bool:
+    """True when rawpy is importable (triggers the one-time lazy import)."""
+    _ensure_pillow()
+    return bool(globals().get("_RAWPY_READY", False))
+
+
+def _lanczos_filter() -> Any:
+    """LANCZOS resampling constant (triggers the lazy import; 1 on fallback)."""
+    _ensure_pillow()
+    return globals().get("_LANCZOS", 1)
+
+
+def _ensure_pillow() -> None:
+    """One-time lazy import of PIL / pillow-heif / rawpy probes. Idempotent."""
+    global _pillow_attempted
+    if _pillow_attempted:
+        return
+    with _pillow_lock:
+        if _pillow_attempted:
+            return
+        _pillow_attempted = True
+        try:
+            from PIL import Image as _Image
+            from PIL import ImageOps as _ImageOps
+
+            globals()["Image"] = _Image
+            globals()["ImageOps"] = _ImageOps
+            globals()["_PILLOW_READY"] = True
+
+            # Pillow 10+ moved Resampling to Image.Resampling.LANCZOS
+            globals()["_LANCZOS"] = getattr(_Image, "Resampling", _Image).LANCZOS  # type: ignore[attr-defined]
+        except ImportError:
+            globals()["_PILLOW_READY"] = False
+            globals()["_LANCZOS"] = 1  # Fallback for typing
+        if globals().get("_PILLOW_READY"):
+            try:
+                import pillow_heif
+
+                pillow_heif.register_heif_opener()
+                globals()["_PILLOW_HEIF_READY"] = True
+            except ImportError:
+                globals()["_PILLOW_HEIF_READY"] = False
+        else:
+            globals()["_PILLOW_HEIF_READY"] = False
+        try:
+            import rawpy  # type: ignore # noqa: F401
+
+            globals()["_RAWPY_READY"] = True
+        except ImportError:
+            globals()["_RAWPY_READY"] = False
+
+
+def __getattr__(name: str) -> Any:
+    # Backwards-compat: external code may read the old module-level flags
+    # (e.g. ``thumbnailer._PILLOW_READY``) directly (PEP 562). Internal code
+    # uses the _pillow_ready() helpers above so ruff F821 stays satisfied.
+    if name in ("_PILLOW_READY", "_PILLOW_HEIF_READY", "_RAWPY_READY"):
+        _ensure_pillow()
+        try:
+            return globals()[name]
+        except KeyError:
+            pass
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -69,15 +135,10 @@ def _find_ffmpeg() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# RawPy detection
+# RawPy detection — folded into _ensure_pillow() above (lazy); the probe is
+# just an import test, and _generate_raw_thumbnail() re-imports rawpy at call
+# time anyway. Kept as a section so the layout stays familiar.
 # ---------------------------------------------------------------------------
-_RAWPY_READY = False
-try:
-    import rawpy  # type: ignore # noqa: F401
-
-    _RAWPY_READY = True
-except ImportError:
-    pass
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +260,10 @@ def _generate_image_thumbnail(file_path: Path) -> bytes | None:
     Generate JPEG thumbnail bytes from an image file using Pillow.
     Applies EXIF orientation before resizing. Returns JPEG bytes.
     """
-    if not _PILLOW_READY:
+    if not _pillow_ready():
         return None
+
+    from PIL import Image, ImageOps
 
     try:
         img = Image.open(file_path)
@@ -225,7 +288,7 @@ def _generate_image_thumbnail(file_path: Path) -> bytes | None:
         elif img.mode == "L":
             img = img.convert("RGB")
 
-        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), _LANCZOS)
+        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), _lanczos_filter())
 
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=THUMBNAIL_QUALITY, optimize=True)
@@ -334,7 +397,7 @@ def _generate_video_thumbnail(file_path: Path) -> bytes | None:
 # ---------------------------------------------------------------------------
 def _generate_raw_thumbnail(file_path: Path) -> bytes | None:
     """Decode a raw image and return JPEG thumbnail bytes, or None."""
-    if not _RAWPY_READY:
+    if not _rawpy_ready():
         return None
 
     try:
@@ -350,7 +413,7 @@ def _generate_raw_thumbnail(file_path: Path) -> bytes | None:
         from PIL import Image as _PilImage
 
         img = _PilImage.fromarray(rgb)
-        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), _LANCZOS)
+        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), _lanczos_filter())
         if img.mode != "RGB":
             img = img.convert("RGB")
         buf = io.BytesIO()
@@ -404,7 +467,7 @@ def generate_thumbnail_bytes(source_path: Path) -> bytes | None:
         return None
 
     if ext in _IMAGE_EXTENSIONS:
-        if ext in (".heic", ".heif") and not _PILLOW_HEIF_READY:
+        if ext in (".heic", ".heif") and not _pillow_heif_ready():
             return None
 
         # Huge files: embedded preview first to bound decode memory.
@@ -417,7 +480,7 @@ def generate_thumbnail_bytes(source_path: Path) -> bytes | None:
             if embedded:
                 return embedded
 
-        if _PILLOW_READY:
+        if _pillow_ready():
             result = _generate_image_thumbnail(path)
             if result:
                 return result

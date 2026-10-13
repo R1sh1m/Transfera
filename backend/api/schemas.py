@@ -841,6 +841,10 @@ class ClearSessionsRequest(BaseModel):
         ge=1,
         description="If set, only clear sessions created more than N days ago. If omitted, all sessions are cleared.",
     )
+    session_ids: list[int] | None = Field(
+        None,
+        description="If set, only clear the listed session IDs. Combines with older_than_days when both are set.",
+    )
 
 
 class ClearResponse(BaseModel):

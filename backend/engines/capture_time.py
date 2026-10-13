@@ -13,21 +13,39 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Register pillow-heif opener so Image.open() can decode HEIC/HEIF files
-try:
-    from pillow_heif import register_heif_opener
+# pillow-heif opener registration is LAZY (see note in device_preview):
+# importing it at module top added ~25 ms to engine cold start. It is
+# registered on first use in _extract_image_capture_time(), before any
+# Pillow HEIC decode.
+_heif_attempted = False
+_heif_lock = threading.Lock()
 
-    register_heif_opener()
-    logger.debug("pillow-heif registered for HEIC/HEIF support")
-except ImportError:
-    logger.warning(
-        "pillow-heif not installed — HEIC files will fall back to mtime. Install with: pip install pillow-heif"
-    )
+
+def _ensure_heif_opener() -> None:
+    """Register the pillow-heif opener on first use (idempotent, thread-safe)."""
+    global _heif_attempted
+    if _heif_attempted:
+        return
+    with _heif_lock:
+        if _heif_attempted:
+            return
+        _heif_attempted = True
+        try:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+            logger.debug("pillow-heif registered for HEIC/HEIF support")
+        except ImportError:
+            logger.warning(
+                "pillow-heif not installed — HEIC files will fall back to mtime. Install with: pip install pillow-heif"
+            )
+
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".heic", ".png", ".webp", ".tiff", ".tif", ".bmp", ".avif", ".jxl"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp", ".webm", ".m4v", ".wmv"}
@@ -47,6 +65,7 @@ def _extract_image_capture_time(file_path: Path) -> datetime | None:
     Never raises.
     """
     # Strategy 1-3: Pillow-based extraction
+    _ensure_heif_opener()
     try:
         from PIL import Image
     except ImportError:

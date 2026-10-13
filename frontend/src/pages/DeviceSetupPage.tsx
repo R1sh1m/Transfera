@@ -5,7 +5,7 @@
 // a virtual folder browser backed by the device API, not the native OS dialog.
 // ---------------------------------------------------------------------------
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FolderOpen,
@@ -34,6 +34,7 @@ import {
   RotateCcw,
   X,
   Lock,
+  Terminal,
 } from "lucide-react";
 import { getDeviceMeta } from "@/lib/device-utils";
 import { useQueryClient } from "@tanstack/react-query";
@@ -50,8 +51,6 @@ import {
   useTier2ExecuteStep,
   useTier2Cancel,
   useTier2Reset,
-  useDevicePreference,
-  useSetDevicePreference,
   useDeviceBackendStatus,
   useInstallDriver,
   useRecoverIOSDevice,
@@ -124,12 +123,14 @@ function TierSelect({
   availableTiers,
   disabled,
   onChange,
+  onOpenTier2Setup,
 }: {
   value: DeviceTierChoice;
   serving?: string | null;
   availableTiers?: Record<string, AvailableTierInfo> | null;
   disabled?: boolean;
   onChange: (tier: DeviceTierChoice) => void;
+  onOpenTier2Setup?: () => void;
 }) {
   const optionState = (tier: string) => {
     const info = availableTiers?.[tier];
@@ -169,11 +170,22 @@ function TierSelect({
     },
     {
       value: "tier2",
-      label: `Linux bridge${t2.disabled ? " — unavailable" : ""}`,
-      disabled: t2.disabled,
-      title: t2.title,
+      label: "Linux bridge",
+      badge: t2.disabled ? "Set up" : undefined,
+      disabled: false,
+      title: t2.disabled
+        ? "Linux bridge requires setup — click to view download & setup steps"
+        : TIER_OPTION_DESCRIPTIONS.tier2,
     },
   ];
+
+  const handleSelect = (val: DeviceTierChoice) => {
+    if (val === "tier2" && t2.disabled) {
+      onOpenTier2Setup?.();
+      return;
+    }
+    onChange(val);
+  };
 
   return (
     <div
@@ -190,7 +202,7 @@ function TierSelect({
         className="flex-1 min-w-0"
         triggerClassName="w-full justify-between"
         menuClassName="w-full min-w-[220px]"
-        onChange={(val) => onChange(val as DeviceTierChoice)}
+        onChange={(val) => handleSelect(val as DeviceTierChoice)}
         options={tierOptions}
         title={
           serving
@@ -206,22 +218,256 @@ function TierMismatchNotice({
   preferred,
   serving,
   availableTiers,
+  onOpenTier2Setup,
 }: {
   preferred: DeviceTierChoice;
   serving?: string | null;
   availableTiers?: Record<string, AvailableTierInfo> | null;
+  onOpenTier2Setup?: () => void;
 }) {
   if (!preferred || preferred === "auto" || !serving || serving === preferred) {
     return null;
   }
   const err = availableTiers?.[preferred]?.error;
+  const isTier2Unavailable =
+    preferred === "tier2" && availableTiers?.tier2 && !availableTiers.tier2.available;
+
   return (
-    <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-snug">
-      Serving via {tierLabel(serving)}
-      {err
-        ? ` (${tierLabel(preferred)} failed: ${err})`
-        : ` (${tierLabel(preferred)} unavailable)`}
-    </p>
+    <div className="flex items-center gap-1.5 text-[10px] text-amber-600 dark:text-amber-400 leading-snug">
+      <span>
+        Serving via {tierLabel(serving)}
+        {err
+          ? ` (${tierLabel(preferred)} failed: ${err})`
+          : ` (${tierLabel(preferred)} unavailable)`}
+      </span>
+      {isTier2Unavailable && onOpenTier2Setup && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenTier2Setup();
+          }}
+          className="text-action underline hover:text-action/80 font-medium ml-1 cursor-pointer"
+        >
+          Set up now
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AppleBlindSpotGuide — proactive step-by-step guidance for the Tier-1
+// blind spot (WPD sees the iPhone, the Apple driver does not).
+// Rendered under the same gate as the old single-hint banner. Every step
+// state derives from live signals already available to the frontend:
+// driver_status, ready rows per active_tier, non-ready LOCKED/NOT_TRUSTED
+// rows, and the recover mutation result. No new backend signals required.
+// ---------------------------------------------------------------------------
+type GuideStepState = "done" | "current" | "pending";
+
+interface BlindSpotStep {
+  id: string;
+  label: string;
+  hint?: string;
+  state: GuideStepState;
+}
+
+function AppleBlindSpotGuide({
+  driverStatus,
+  wpdAppleNames,
+  trustNames,
+  hasTier1Ready,
+  recoverOverall,
+  tier1Found,
+  elevationPending,
+  recoverBusy,
+  recoverCooldown,
+  recoverPending,
+  onRetry,
+}: {
+  driverStatus?: string;
+  wpdAppleNames: string[];
+  trustNames: string[];
+  hasTier1Ready: boolean;
+  recoverOverall?: string;
+  tier1Found?: boolean;
+  elevationPending: boolean;
+  recoverBusy: boolean;
+  recoverCooldown: boolean;
+  recoverPending: boolean;
+  onRetry: () => void;
+}) {
+  const driverMissing =
+    driverStatus === "no_driver" || driverStatus === "no_pymobiledevice3";
+  // Step 1: the Apple service answers. The gate already implies ready, and
+  // a successful recover confirms it — either signal marks it done.
+  const serviceRunning =
+    driverStatus === "ready" ||
+    recoverOverall === "service_restored" ||
+    recoverOverall === "service_already_running";
+  // Step 2: a ready Tier-1 row exists (or the last recover re-enumerated one).
+  const tier1Visible = hasTier1Ready || tier1Found === true;
+  const needsTrust = trustNames.length > 0;
+  const phoneLabel =
+    wpdAppleNames.length > 0 ? wpdAppleNames[0] : "Your iPhone";
+  const trustLabel =
+    trustNames.length === 1
+      ? trustNames[0]
+      : trustNames.length > 1
+        ? `${trustNames[0]} (and ${trustNames.length - 1} more)`
+        : phoneLabel;
+
+  const steps: BlindSpotStep[] = driverMissing
+    ? [
+        {
+          id: "install",
+          label: "Install Apple device support",
+          hint: "Needed before the Apple driver can see any iPhone.",
+          state: "current",
+        },
+        {
+          id: "visible",
+          label: "iPhone visible to Apple driver",
+          hint: "Unlock, replug, then retry below.",
+          state: "pending",
+        },
+      ]
+    : [
+        {
+          id: "service",
+          label: "Apple service is running",
+          state: serviceRunning ? "done" : "current",
+        },
+        {
+          id: "visible",
+          label: "iPhone visible to Apple driver",
+          hint: tier1Visible
+            ? "Found — you can pick it from the list."
+            : "Not yet — work through the steps below.",
+          state: tier1Visible ? "done" : "current",
+        },
+        {
+          id: "trust",
+          label: needsTrust
+            ? `Unlock ${trustLabel} and tap Trust`
+            : "iPhone unlocked",
+          hint: needsTrust
+            ? "Use the passcode, then accept Trust This Computer."
+            : "Keep the screen on while you replug.",
+          state: tier1Visible ? "done" : needsTrust ? "current" : "done",
+        },
+        {
+          id: "replug",
+          label: "Unplug, replug, wait a few seconds",
+          hint: "Use a data-capable cable, not a charge-only one.",
+          state: tier1Visible ? "done" : needsTrust ? "pending" : "current",
+        },
+      ];
+
+  return (
+    <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-3.5">
+      <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+          {driverMissing
+            ? "Apple device support is missing"
+            : tier1Visible
+              ? "iPhone found on the Apple driver"
+              : `${phoneLabel} is on USB, but the Apple driver can't see it`}
+        </p>
+        {driverMissing ? (
+          <div className="mt-2">
+            <DriverInstallerInline />
+          </div>
+        ) : (
+          <ol className="mt-2 space-y-1.5">
+            {steps.map((step, idx) => (
+              <li key={step.id} className="flex items-start gap-2">
+                <span
+                  className={cn(
+                    "w-4 h-4 rounded-full flex items-center justify-center shrink-0 text-[9px] font-bold mt-px",
+                    step.state === "done" &&
+                      "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400",
+                    step.state === "current" &&
+                      "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300",
+                    step.state === "pending" &&
+                      "bg-muted text-muted-foreground",
+                  )}
+                >
+                  {step.state === "done" ? (
+                    <CheckCircle2 className="w-3 h-3" />
+                  ) : (
+                    idx + 1
+                  )}
+                </span>
+                <div className="min-w-0">
+                  <p
+                    className={cn(
+                      "text-[11px] leading-snug",
+                      step.state === "done"
+                        ? "text-muted-foreground"
+                        : "text-amber-700 dark:text-amber-300 font-semibold",
+                    )}
+                  >
+                    {step.label}
+                  </p>
+                  {step.hint && (
+                    <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-snug">
+                      {step.hint}
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+        {!driverMissing && !tier1Visible && (
+          <button
+            type="button"
+            onClick={onRetry}
+            disabled={recoverBusy}
+            title={
+              recoverCooldown ? "Wait a few seconds before retrying" : undefined
+            }
+            className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-pill text-xs font-normal active:scale-[0.95] transition-all"
+          >
+            {recoverPending ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <RefreshCw className="w-3 h-3" />
+            )}
+            {recoverPending
+              ? "Retrying…"
+              : recoverCooldown
+                ? "Wait before retrying…"
+                : "Retry Apple driver"}
+          </button>
+        )}
+        {elevationPending && (
+          <p className="mt-2 flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-300 leading-snug">
+            <Shield className="w-3 h-3 mt-px shrink-0" />
+            <span>
+              Still stuck? Restart the Apple service from the permission prompt
+              below, then retry.
+            </span>
+          </p>
+        )}
+        {!driverMissing && (
+          <details className="mt-1.5 text-[10px] text-amber-600 dark:text-amber-400">
+            <summary className="cursor-pointer hover:text-amber-700 dark:hover:text-amber-300 transition-colors">
+              Why am I seeing this?
+            </summary>
+            <p className="mt-1 leading-snug">
+              Photos still work over the Windows USB fallback, but previews and
+              transfers are much faster over the Apple driver. This sometimes
+              clears on its own; retrying re-checks the driver without
+              replugging.
+            </p>
+          </details>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -288,6 +534,19 @@ function SourcePicker({
     sourceRef?.type !== "local_folder",
   );
 
+  const selectedDeviceConnected = useMemo(() => {
+    if (sourceRef?.type !== "device" || !iosDevices?.devices) return false;
+    const targetSerial = canonicalSerial(sourceRef.device_id)?.toLowerCase();
+    if (!targetSerial) return false;
+    return iosDevices.devices.some(
+      (d) =>
+        canonicalSerial(d.serial)?.toLowerCase() === targetSerial &&
+        d.status !== "disconnected",
+    );
+  }, [sourceRef, iosDevices]);
+  const isDeviceDisconnected =
+    sourceRef?.type === "device" && !iosLoading && !selectedDeviceConnected;
+
   // Auto-collapse device list when a local folder source is selected
   useEffect(() => {
     if (sourceRef?.type === "local_folder") setDeviceListExpanded(false);
@@ -310,17 +569,14 @@ function SourcePicker({
     }
   }, [backendStatus.data?.initializing]);
 
-  const backendActiveTier = backendStatus.data?.active_tier;
   const iosAvailable = !!backendStatus.data?.ios_available;
 
   const tier2Status = useTier2Status();
   const allDevices = iosDevices?.devices || [];
   const readyDevices = allDevices.filter((d) => d.status === "ready");
   const nonReadyDevices = allDevices.filter((d) => d.status !== "ready");
-  const tier2Attention =
-    !!tier2Status.data?.error &&
-    backendActiveTier !== "wpd" &&
-    backendActiveTier !== "tier1";
+  const [tier2ModalOpen, setTier2ModalOpen] = useState(false);
+  const [activeSetupSerial, setActiveSetupSerial] = useState<string | null>(null);
 
   const recoverMutation = useRecoverIOSDevice();
   // 10 s cooldown after each recovery settles so users can't hammer the
@@ -457,6 +713,10 @@ function SourcePicker({
           "error",
           "No Apple device found. Check your USB connection and try again.",
         );
+    } else if (r.overall === "service_already_running") {
+      // Service was already running — nothing changed, so this is NOT a
+      // success. The guidance toast already fired from the mutation's
+      // onSuccess; leave the failure banner as-is (no toast here).
     }
     // Lane 3: forward re-enumerated devices so the page can auto-migrate
     // the preview source onto the live Tier-1 serial + force a refetch.
@@ -683,7 +943,9 @@ function SourcePicker({
           className={cn(
             "border rounded-xl transition-colors",
             isIOS
-              ? "border-blue-300 dark:border-blue-700 bg-blue-50/50 dark:bg-blue-950/20"
+              ? isDeviceDisconnected
+                ? "border-amber-300 dark:border-amber-700 bg-amber-50/30 dark:bg-amber-950/20"
+                : "border-blue-300 dark:border-blue-700 bg-blue-50/50 dark:bg-blue-950/20"
               : "border-border hover:border-muted-foreground/30",
           )}
         >
@@ -694,14 +956,20 @@ function SourcePicker({
             <div
               className={cn(
                 "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-                isIOS ? "bg-blue-100 dark:bg-blue-900/30" : "bg-muted",
+                isIOS
+                  ? isDeviceDisconnected
+                    ? "bg-amber-100 dark:bg-amber-900/30"
+                    : "bg-blue-100 dark:bg-blue-900/30"
+                  : "bg-muted",
               )}
             >
               <Smartphone
                 className={cn(
                   "w-5 h-5",
                   isIOS
-                    ? "text-blue-600 dark:text-blue-400"
+                    ? isDeviceDisconnected
+                      ? "text-amber-600 dark:text-amber-400"
+                      : "text-blue-600 dark:text-blue-400"
                     : "text-muted-foreground",
                 )}
               />
@@ -710,13 +978,24 @@ function SourcePicker({
               <p className="text-sm font-semibold text-foreground">
                 Connected devices
               </p>
-              {isIOS &&
-                sourceRef.type === "device" &&
-                sourceRef.device_name && (
-                  <p className="text-xs text-muted-foreground truncate mt-0.5">
-                    {sourceRef.device_name} — {sourceRef.device_path}
-                  </p>
-                )}
+              {isIOS && sourceRef.type === "device" && (
+                <p
+                  className={cn(
+                    "text-xs truncate mt-0.5",
+                    isDeviceDisconnected
+                      ? "text-amber-600 dark:text-amber-400"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {isDeviceDisconnected
+                    ? sourceRef.device_name
+                      ? `${sourceRef.device_name} (Disconnected)`
+                      : "Device disconnected"
+                    : sourceRef.device_name
+                      ? `${sourceRef.device_name} — ${sourceRef.device_path}`
+                      : "Device connected"}
+                </p>
+              )}
               {!isIOS && (
                 <p className="text-xs text-muted-foreground mt-0.5">
                   iPhone, iPad, or other connected device
@@ -968,14 +1247,6 @@ function SourcePicker({
                                 <div className="text-xs text-muted-foreground">
                                   <DriverInstallerInline />
                                 </div>
-                                <details className="text-[11px] text-muted-foreground">
-                                  <summary className="cursor-pointer hover:text-foreground transition-colors">
-                                    Advanced connection options (Linux bridge)
-                                  </summary>
-                                  <div className="mt-2">
-                                    <Tier2SetupPanel />
-                                  </div>
-                                </details>
                               </div>
                             );
                           }
@@ -1001,14 +1272,6 @@ function SourcePicker({
                                   <DriverInstallerInline />
                                 </div>
                               </div>
-                              <details className="text-[11px] text-muted-foreground">
-                                <summary className="cursor-pointer hover:text-foreground transition-colors">
-                                  Advanced connection options (Linux bridge)
-                                </summary>
-                                <div className="mt-2">
-                                  <Tier2SetupPanel />
-                                </div>
-                              </details>
                             </div>
                           );
                         }
@@ -1180,6 +1443,10 @@ function SourcePicker({
                             onChange={(tier) =>
                               handleTierChange(device.serial, tier)
                             }
+                            onOpenTier2Setup={() => {
+                              setActiveSetupSerial(device.serial);
+                              setTier2ModalOpen(true);
+                            }}
                           />
                           <TierMismatchNotice
                             preferred={preferred}
@@ -1187,6 +1454,10 @@ function SourcePicker({
                             availableTiers={
                               iosDevices?.available_tiers ?? undefined
                             }
+                            onOpenTier2Setup={() => {
+                              setActiveSetupSerial(device.serial);
+                              setTier2ModalOpen(true);
+                            }}
                           />
                           {preferred === "wpd" && isIOSRow && (
                             <p className="text-[10px] text-muted-foreground leading-snug">
@@ -1267,60 +1538,38 @@ function SourcePicker({
                         ),
                     ) &&
                     !readyDevices.some((d) => d.active_tier === "tier1") && (
-                      <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-3.5">
-                        <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
-                            iPhone on USB, but the Apple driver can&apos;t see
-                            it
-                          </p>
-                          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                            Unlock your iPhone and unplug/replug it — previews
-                            and transfers are much faster over the Apple driver
-                            than USB fallback. This sometimes clears on its own;
-                            retrying re-probes the driver without replugging.
-                          </p>
-                          <button
-                            type="button"
-                            onClick={triggerRecover}
-                            disabled={recoverBusy}
-                            title={
-                              recoverCooldown
-                                ? "Wait a few seconds before retrying"
-                                : undefined
-                            }
-                            className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-pill text-xs font-normal active:scale-[0.95] transition-all"
-                          >
-                            {recoverMutation.isPending ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <RefreshCw className="w-3 h-3" />
-                            )}
-                            {recoverMutation.isPending
-                              ? "Retrying…"
-                              : recoverCooldown
-                                ? "Wait before retrying…"
-                                : "Retry Apple driver"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                  {/* Prefer Tier 2 setting — only show when Apple driver is not already actively handling devices */}
-                  {backendActiveTier !== "tier1" &&
-                    readyDevices.every((d) => d.active_tier !== "tier1") && (
-                      <PreferTier2Toggle
-                        attention={tier2Attention}
-                        activeTier={backendActiveTier}
-                      >
-                        {allDevices.length > 0 &&
-                          backendActiveTier !== "wpd" &&
-                          !readyDevices.some(
+                      <AppleBlindSpotGuide
+                        driverStatus={iosDevices?.driver_status}
+                        wpdAppleNames={readyDevices
+                          .filter(
                             (d) =>
-                              d.active_tier === "wpd" ||
-                              d.active_tier === "tier1",
-                          ) && <Tier2SetupPanel />}
-                      </PreferTier2Toggle>
+                              d.active_tier === "wpd" &&
+                              /apple|iphone|ipad|vid_05ac/i.test(
+                                `${d.name} ${d.model}`,
+                              ),
+                          )
+                          .map((d) => d.name)}
+                        trustNames={nonReadyDevices
+                          .filter(
+                            (d) =>
+                              d.status === "locked" ||
+                              d.status === "not_trusted",
+                          )
+                          .map((d) => d.name)}
+                        hasTier1Ready={readyDevices.some(
+                          (d) => d.active_tier === "tier1",
+                        )}
+                        recoverOverall={recoverMutation.data?.overall}
+                        tier1Found={recoverMutation.data?.tier1_found}
+                        elevationPending={
+                          !!appleElevationCommand ||
+                          recoverMutation.data?.overall === "elevation_required"
+                        }
+                        recoverBusy={recoverBusy}
+                        recoverCooldown={recoverCooldown}
+                        recoverPending={recoverMutation.isPending}
+                        onRetry={triggerRecover}
+                      />
                     )}
 
                   {/* Apple service elevation notification */}
@@ -1370,122 +1619,18 @@ function SourcePicker({
           </AnimatePresence>
         </div>
       </div>
-    </div>
-  );
-}
 
-// ---------------------------------------------------------------------------
-// PreferTier2Toggle — advanced setting to prefer open-source bridge
-// ---------------------------------------------------------------------------
-function PreferTier2Toggle({
-  children,
-  attention,
-  activeTier,
-}: {
-  children?: React.ReactNode;
-  attention?: boolean;
-  activeTier?: string;
-}) {
-  const { data: pref } = useDevicePreference();
-  const setPref = useSetDevicePreference();
-  const [expanded, setExpanded] = useState(false);
-  const tier2Status = useTier2Status();
-
-  const preferTier2 = pref?.prefer_tier2 ?? false;
-  const bridgeError = tier2Status.data?.bridge_error;
-  const wpdActive = activeTier === "wpd";
-
-  const handleToggle = () => {
-    setPref.mutate({ prefer_tier2: !preferTier2 });
-  };
-
-  return (
-    <div className="border border-border rounded-lg overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className={cn(
-          "w-full flex items-center justify-between px-3 py-2 text-[10px] transition-colors",
-          attention
-            ? "text-amber-600 dark:text-amber-400 bg-amber-50/50 dark:bg-amber-950/20 hover:bg-amber-50 dark:hover:bg-amber-950/30"
-            : "text-muted-foreground hover:bg-muted/50",
-        )}
-      >
-        <span className="flex items-center gap-2">
-          {attention && <AlertTriangle className="w-3 h-3" />}
-          <span className="font-semibold uppercase tracking-wide">
-            Advanced
-          </span>
-        </span>
-        <ChevronRight
-          className={cn(
-            "w-3 h-3 transition-transform",
-            expanded && "rotate-90",
-          )}
-        />
-      </button>
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0 }}
-            animate={{ height: "auto" }}
-            exit={{ height: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="px-3 pb-3 space-y-2">
-              <label className="flex items-start gap-3 cursor-pointer group">
-                <input
-                  type="checkbox"
-                  checked={preferTier2}
-                  onChange={handleToggle}
-                  disabled={setPref.isPending}
-                  className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-ring accent-primary"
-                />
-                <div>
-                  <span className="text-xs text-foreground">
-                    Prefer open-source bridge over Apple driver
-                  </span>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    Skip Apple Mobile Device Support and use the open-source WSL
-                    bridge instead. Enable this if you don't want Apple software
-                    installed on your PC.
-                  </p>
-                </div>
-              </label>
-              {children && (
-                <div className="border-t border-border pt-2">{children}</div>
-              )}
-              {bridgeError && wpdActive && (
-                <div className="border-t border-border pt-2">
-                  <div className="flex items-start gap-2 bg-muted/30 rounded-lg p-2.5">
-                    <span className="text-[10px] text-muted-foreground leading-relaxed">
-                      ⓘ Linux bridge unavailable — using Windows driver instead.
-                    </span>
-                  </div>
-                  <details className="mt-1">
-                    <summary className="text-[9px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
-                      Show error details
-                    </summary>
-                    <pre className="text-[10px] text-red-600 dark:text-red-400 bg-muted/50 rounded p-2 mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap overflow-wrap-anywhere font-mono leading-relaxed select-text">
-                      {bridgeError}
-                    </pre>
-                  </details>
-                </div>
-              )}
-              {bridgeError && !wpdActive && (
-                <div className="border-t border-border pt-2">
-                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
-                    Bridge log
-                  </p>
-                  <pre className="text-[10px] text-red-600 dark:text-red-400 bg-muted/50 rounded p-2 max-h-32 overflow-y-auto whitespace-pre-wrap overflow-wrap-anywhere font-mono leading-relaxed select-text">
-                    {bridgeError}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Linux Bridge Setup Modal triggered from Driver dropdown */}
+      <LinuxBridgeSetupModal
+        open={tier2ModalOpen}
+        onClose={() => setTier2ModalOpen(false)}
+        onComplete={() => {
+          if (activeSetupSerial) {
+            handleTierChange(activeSetupSerial, "tier2");
+          }
+          setTier2ModalOpen(false);
+        }}
+      />
     </div>
   );
 }
@@ -1691,14 +1836,26 @@ function WslServiceBrokenCard() {
 }
 
 // ---------------------------------------------------------------------------
-// Tier2SetupPanel — step-by-step wizard for WSL2 + usbipd-win setup
+// LinuxBridgeSetupModal — step-by-step modal for WSL2 + usbipd-win setup
+// Opened from Driver dropdown menu ("Linux bridge [Set up]")
 // ---------------------------------------------------------------------------
-function Tier2SetupPanel() {
+function LinuxBridgeSetupModal({
+  open,
+  onClose,
+  onComplete,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onComplete?: () => void;
+}) {
   const tier2Status = useTier2Status();
   const preview = useTier2SetupPreview();
   const executeStep = useTier2ExecuteStep();
   const cancelSetup = useTier2Cancel();
   const resetSetup = useTier2Reset();
+  const queryClient = useQueryClient();
+
+  const [hasStarted, setHasStarted] = useState(false);
   const [completedSteps, setCompletedSteps] = useState<string[]>([]);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [notificationShown, setNotificationShown] = useState<
@@ -1706,7 +1863,6 @@ function Tier2SetupPanel() {
   >({});
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
-  const [errorCount, setErrorCount] = useState(0);
   const [restartNotification, setRestartNotification] = useState<{
     step: Tier2StepPreview;
   } | null>(null);
@@ -1716,31 +1872,12 @@ function Tier2SetupPanel() {
 
   const steps = preview.data?.steps || [];
   const status = tier2Status.data;
+  const isBridgeReady = status?.bridge_running && status?.bridge_reachable;
 
   // Determine which step is next
   const nextStep = steps.find(
     (s) => !completedSteps.includes(s.step_id) && s.step_id !== currentStep,
   );
-
-  // Auto-start next step when current completes
-  useEffect(() => {
-    if (!currentStep && nextStep && preview.data) {
-      // Show notification before each step
-      if (!notificationShown[nextStep.step_id]) {
-        setNotificationShown((prev) => ({ ...prev, [nextStep.step_id]: true }));
-        if (nextStep.requires_restart) {
-          setRestartNotification({ step: nextStep });
-          return;
-        }
-        if (nextStep.requires_elevation) {
-          setElevationNotification({ step: nextStep });
-          return;
-        }
-        // Auto-advance for non-blocking steps
-        handleStartStep(nextStep);
-      }
-    }
-  }, [currentStep, nextStep, completedSteps, notificationShown]);
 
   const handleStartStep = async (step: Tier2StepPreview) => {
     setCurrentStep(step.step_id);
@@ -1754,47 +1891,75 @@ function Tier2SetupPanel() {
       if (result.completed) {
         setCompletedSteps((prev) => [...prev, step.step_id]);
         setCurrentStep(null);
+        queryClient.invalidateQueries({ queryKey: ["tier2-status"] });
+        queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
       } else if (result.restart_required) {
-        // Need restart — show notification
         setRestartNotification({ step });
       } else if (result.error) {
         setError(result.error);
         setErrorCode(result.error_code ?? null);
-        setErrorCount((prev) => prev + 1);
         setCurrentStep(null);
       }
     } catch (err) {
       setError(extractErrorMessage(err));
-      setErrorCount((prev) => prev + 1);
       setCurrentStep(null);
     }
   };
+
+  // Auto-advance once user has pressed Start Setup
+  useEffect(() => {
+    if (hasStarted && !currentStep && nextStep && preview.data) {
+      if (!notificationShown[nextStep.step_id]) {
+        setNotificationShown((prev) => ({ ...prev, [nextStep.step_id]: true }));
+        if (nextStep.requires_restart) {
+          setRestartNotification({ step: nextStep });
+          return;
+        }
+        if (nextStep.requires_elevation) {
+          setElevationNotification({ step: nextStep });
+          return;
+        }
+        handleStartStep(nextStep);
+      }
+    }
+  }, [hasStarted, currentStep, nextStep, completedSteps, notificationShown]);
+
+  const allCompleted = steps.length > 0 && completedSteps.length >= steps.length;
+
+  useEffect(() => {
+    if (allCompleted) {
+      queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
+      queryClient.invalidateQueries({ queryKey: ["tier2-status"] });
+      queryClient.invalidateQueries({ queryKey: ["device-backend-status"] });
+    }
+  }, [allCompleted, queryClient]);
 
   const handleReset = async () => {
     try {
       await resetSetup.mutateAsync();
     } catch {
-      // Error notification already handled in mutation
+      // Ignored
     }
     setCompletedSteps([]);
     setCurrentStep(null);
     setError(null);
     setErrorCode(null);
-    setErrorCount(0);
     setNotificationShown({});
     setRestartNotification(null);
     setElevationNotification(null);
+    setHasStarted(false);
   };
 
   const handleRetry = () => {
     setError(null);
     setErrorCode(null);
-    setErrorCount((prev) => prev - 1);
+    if (nextStep) {
+      handleStartStep(nextStep);
+    }
   };
 
   const handleRestartConfirm = async () => {
     setRestartNotification(null);
-    // Tauri shell restart (applies Tier-2 WSL changes)
     if (isDesktop) {
       await restartApp();
     }
@@ -1815,6 +1980,7 @@ function Tier2SetupPanel() {
   const handleElevationCancel = () => {
     setElevationNotification(null);
     setCurrentStep(null);
+    setHasStarted(false);
   };
 
   const handleCancel = () => {
@@ -1822,327 +1988,316 @@ function Tier2SetupPanel() {
     setCompletedSteps([]);
     setCurrentStep(null);
     setError(null);
-    setErrorCount(0);
     setNotificationShown({});
+    setHasStarted(false);
+    onClose();
   };
 
-  const tier2PanelBackendStatus = useDeviceBackendStatus();
+  const handleFinishAndSwitch = () => {
+    onComplete?.();
+    onClose();
+  };
 
-  // Don't show panel if bridge is already running and devices are accessible
-  if (status?.bridge_running && status?.active_tier === "tier2") {
-    return null;
-  }
-
-  // Don't show panel if WPD is already working with a device
-  if (tier2PanelBackendStatus.data?.active_tier === "wpd") {
-    return null;
-  }
-
-  // Don't show panel if any device is already ready on WPD or Tier 1
-  const { data: iosDevices } = useIOSDevices();
-  const readyDevices =
-    iosDevices?.devices.filter((d) => d.status === "ready") || [];
-  if (
-    readyDevices.some(
-      (d) => d.active_tier === "wpd" || d.active_tier === "tier1",
-    )
-  ) {
-    return null;
-  }
-
-  // Don't show if no Apple devices detected at all (nothing to fall back to)
-  if (!tier2Status.isLoading && !status) {
-    return null;
-  }
-
-  // WSL service broken — show repair card instead of retry loop
-  if (status?.wsl_service_broken) {
-    return <WslServiceBrokenCard />;
-  }
+  if (!open) return null;
 
   return (
-    <div className="space-y-3">
-      {/* Restart notification — blocks everything until user acts */}
-      <AnimatePresence>
-        {restartNotification && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-4 space-y-3"
-          >
-            <div className="flex items-start gap-2.5">
-              <RefreshCw className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+    <AnimatePresence>
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ opacity: 0, scale: 0.96, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.96, y: 10 }}
+          transition={{ duration: 0.18, ease: "easeOut" }}
+          className="relative w-full max-w-lg bg-card border border-border shadow-2xl rounded-2xl overflow-hidden flex flex-col max-h-[85vh]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-card/60 backdrop-blur-md">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-action/10 text-action flex items-center justify-center">
+                <Terminal className="w-4 h-4" />
+              </div>
               <div>
-                <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">
-                  Restart Required
-                </p>
-                <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                  {restartNotification.step.restart_description ||
-                    `Restarting enables the ${restartNotification.step.title} feature. Your backup progress is saved and will resume automatically.`}
+                <h2 className="text-sm font-semibold tracking-tight text-foreground">
+                  Linux Bridge Setup
+                </h2>
+                <p className="text-xs text-muted-foreground">
+                  Open-source device access via WSL2
                 </p>
               </div>
             </div>
-            <div className="flex gap-2 ml-6">
-              <button
-                type="button"
-                onClick={handleRestartConfirm}
-                className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-normal hover:bg-amber-700 active:scale-[0.95] transition-all"
-              >
-                Restart now
-              </button>
-              <button
-                type="button"
-                onClick={handleRestartLater}
-                className="px-3 py-1.5 bg-muted text-foreground rounded-lg text-xs font-normal hover:bg-muted/80 transition-colors"
-              >
-                I'll restart later
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Elevation notification */}
-      <AnimatePresence>
-        {elevationNotification && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-4 space-y-3"
-          >
-            <div className="flex items-start gap-2.5">
-              <Shield className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
-              <div>
-                <p className="text-sm font-semibold text-blue-700 dark:text-blue-300">
-                  Permission Required
-                </p>
-                <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                  {elevationNotification.step.elevation_description ||
-                    `This step requires administrator permissions: ${elevationNotification.step.title}. A Windows User Account Control dialog will appear.`}
-                </p>
-              </div>
-            </div>
-            <div className="flex gap-2 ml-6">
-              <button
-                type="button"
-                onClick={handleElevationConfirm}
-                className="px-3 py-1.5 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
-              >
-                Continue
-              </button>
-              <button
-                type="button"
-                onClick={handleElevationCancel}
-                className="px-3 py-1.5 bg-muted text-foreground rounded-lg text-xs font-normal hover:bg-muted/80 transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Step progress */}
-      {currentStep && (
-        <motion.div
-          initial={{ opacity: 0, y: -4 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-muted/50 border border-border rounded-xl p-4"
-        >
-          <div className="flex items-center gap-2">
-            <Loader2 className="w-4 h-4 text-primary animate-spin" />
-            <span className="text-sm font-semibold text-foreground">
-              {steps.find((s) => s.step_id === currentStep)?.title ||
-                "Processing..."}
-            </span>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors"
+              aria-label="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
-        </motion.div>
-      )}
 
-      {/* Error */}
-      {error && (
-        <motion.div
-          initial={{ opacity: 0, y: -4 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl p-4 space-y-3 overflow-hidden"
-        >
-          <div className="flex items-start gap-2.5">
-            <XCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-            <div>
-              <p className="text-sm font-semibold text-red-700 dark:text-red-300">
-                Setup Error
-              </p>
-              {errorCode === "NO_WSL_DISTRO" ? (
-                <p className="text-xs text-red-600 dark:text-red-400 mt-1 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">
-                  No WSL Linux environment found. Install Ubuntu from the
-                  Microsoft Store, then return here and click 'Set up Linux-side
-                  tools'.
-                </p>
-              ) : errorCode === "APT_LOCK_TIMEOUT" ||
-                (error && error.includes("--lock-timeout")) ? (
-                <p className="text-xs text-red-600 dark:text-red-400 mt-1 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">
-                  Ubuntu is running background updates. This usually clears in
-                  1–2 minutes — tap 'Retry' to try again.
-                </p>
-              ) : (
-                <p className="text-xs text-red-600 dark:text-red-400 mt-1 break-words overflow-wrap-anywhere whitespace-pre-wrap select-text">
-                  {error}
-                </p>
-              )}
-            </div>
-          </div>
-          {errorCount >= 1 && (
-            <div className="flex gap-2 ml-6">
-              {errorCode === "NO_WSL_DISTRO" ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    openExternal(
-                      "https://apps.microsoft.com/detail/9PDXGNCFSCZV",
-                    );
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
-                >
-                  Open Microsoft Store
-                </button>
-              ) : errorCode === "APT_LOCK_TIMEOUT" ||
-                (error && error.includes("--lock-timeout")) ? (
-                <button
-                  type="button"
-                  onClick={handleRetry}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-normal hover:bg-amber-700 active:scale-[0.95] transition-all"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Retry
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  disabled={resetSetup.isPending}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-normal hover:bg-red-700 active:scale-[0.95] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  {resetSetup.isPending ? "Resetting..." : "Reset Device Setup"}
-                </button>
-              )}
-            </div>
-          )}
-        </motion.div>
-      )}
-
-      {/* Steps list — only show when preview is loading or has steps */}
-      {preview.isLoading && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          <span>Checking device access setup...</span>
-        </div>
-      )}
-
-      {!preview.isLoading &&
-        steps.length > 0 &&
-        !currentStep &&
-        completedSteps.length < steps.length && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                Device Access Setup
-              </p>
-              {errorCount >= 1 ? (
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  disabled={resetSetup.isPending}
-                  className="flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors disabled:opacity-50"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  {resetSetup.isPending ? "Resetting..." : "Reset setup"}
-                </button>
-              ) : completedSteps.length > 0 ? (
-                <button
-                  type="button"
-                  onClick={handleCancel}
-                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  Cancel setup
-                </button>
-              ) : null}
-            </div>
-
-            <div className="space-y-1">
-              {steps.map((step, idx) => {
-                const isCompleted = completedSteps.includes(step.step_id);
-                const isActive = currentStep === step.step_id;
-                const isPending = !isCompleted && !isActive;
-
-                return (
-                  <div
-                    key={step.step_id}
-                    className={cn(
-                      "flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors",
-                      isCompleted && "bg-green-50 dark:bg-green-950/20",
-                      isActive && "bg-blue-50 dark:bg-blue-950/20",
-                      isPending && "opacity-60",
-                    )}
-                  >
-                    <div
-                      className={cn(
-                        "w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold",
-                        isCompleted &&
-                          "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400",
-                        isActive &&
-                          "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400",
-                        isPending && "bg-muted text-muted-foreground",
-                      )}
-                    >
-                      {isCompleted ? "✓" : idx + 1}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-foreground">
-                        {step.title}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground truncate">
-                        {step.description}
-                      </p>
-                    </div>
-                    {step.requires_restart && (
-                      <span className="text-[9px] px-1 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded shrink-0">
-                        Restart
-                      </span>
-                    )}
-                    {step.requires_elevation && (
-                      <span className="text-[9px] px-1 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 rounded shrink-0">
-                        Admin
-                      </span>
-                    )}
+          {/* Body */}
+          <div className="p-6 space-y-4 overflow-y-auto flex-1">
+            {status?.wsl_service_broken ? (
+              <WslServiceBrokenCard />
+            ) : isBridgeReady || allCompleted ? (
+              <div className="space-y-4">
+                <div className="p-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 flex items-start gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-foreground">
+                      Linux Bridge is Ready
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      The open-source bridge service is running on port 18920. You can now use it for iOS device transfers without Apple drivers.
+                    </p>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleFinishAndSwitch}
+                    className="px-4 py-2 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
+                  >
+                    Use Linux Bridge
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Transfera uses an open-source bridge running inside your WSL2 Ubuntu environment to talk to your iOS device. Follow the steps below to download and configure it.
+                </p>
 
-      {/* Completed message */}
-      {!preview.isLoading &&
-        completedSteps.length === steps.length &&
-        steps.length > 0 &&
-        !currentStep && (
-          <motion.div
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 rounded-xl p-3"
-          >
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-green-600 dark:text-green-400" />
-              <p className="text-xs font-normal text-green-700 dark:text-green-300">
-                Device access setup complete
-              </p>
-            </div>
-          </motion.div>
-        )}
-    </div>
+                <AnimatePresence>
+                  {restartNotification && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl p-3.5 space-y-2.5"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <RefreshCw className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                        <div>
+                          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                            Restart Required
+                          </p>
+                          <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                            {restartNotification.step.restart_description ||
+                              `Restarting enables the ${restartNotification.step.title} feature.`}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 ml-6.5">
+                        <button
+                          type="button"
+                          onClick={handleRestartConfirm}
+                          className="px-3 py-1 bg-amber-600 text-white rounded-pill text-xs font-normal hover:bg-amber-700 active:scale-[0.95] transition-all"
+                        >
+                          Restart now
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleRestartLater}
+                          className="px-3 py-1 bg-muted text-foreground rounded-pill text-xs font-normal hover:bg-muted/80 transition-colors"
+                        >
+                          I'll restart later
+                        </button>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                  {elevationNotification && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -8 }}
+                      className="bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-3.5 space-y-2.5"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <Shield className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                        <div>
+                          <p className="text-xs font-semibold text-blue-700 dark:text-blue-300">
+                            Administrator Permission Required
+                          </p>
+                          <p className="text-[11px] text-blue-600 dark:text-blue-400 mt-0.5">
+                            {elevationNotification.step.elevation_description ||
+                              `This step requires administrator permissions: ${elevationNotification.step.title}. A Windows UAC prompt will appear.`}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 ml-6.5">
+                        <button
+                          type="button"
+                          onClick={handleElevationConfirm}
+                          className="px-3 py-1 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
+                        >
+                          Continue
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleElevationCancel}
+                          className="px-3 py-1 bg-muted text-foreground rounded-pill text-xs font-normal hover:bg-muted/80 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {currentStep && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="bg-muted/50 border border-border rounded-xl p-3 flex items-center gap-2.5"
+                  >
+                    <Loader2 className="w-4 h-4 text-action animate-spin shrink-0" />
+                    <span className="text-xs font-semibold text-foreground">
+                      {steps.find((s) => s.step_id === currentStep)?.title || "Executing step..."}
+                    </span>
+                  </motion.div>
+                )}
+
+                {error && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl p-3.5 space-y-2.5"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <XCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-xs font-semibold text-red-700 dark:text-red-300">
+                          Setup Error
+                        </p>
+                        <p className="text-[11px] text-red-600 dark:text-red-400 mt-0.5 break-words whitespace-pre-wrap select-text">
+                          {errorCode === "NO_WSL_DISTRO"
+                            ? "No WSL Linux environment found. Install Ubuntu from the Microsoft Store, then retry."
+                            : error}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 ml-6.5">
+                      {errorCode === "NO_WSL_DISTRO" ? (
+                        <button
+                          type="button"
+                          onClick={() => openExternal("https://apps.microsoft.com/detail/9PDXGNCFSCZV")}
+                          className="px-3 py-1 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all"
+                        >
+                          Open Microsoft Store
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={handleRetry}
+                            className="flex items-center gap-1.5 px-3 py-1 bg-amber-600 text-white rounded-pill text-xs font-normal hover:bg-amber-700 active:scale-[0.95] transition-all"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            Retry
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleReset}
+                            disabled={resetSetup.isPending}
+                            className="flex items-center gap-1.5 px-3 py-1 bg-red-600 text-white rounded-pill text-xs font-normal hover:bg-red-700 active:scale-[0.95] transition-all disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            Reset
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+
+                {preview.isLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground py-3">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Detecting WSL environment...</span>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {steps.map((step, idx) => {
+                      const isCompleted = completedSteps.includes(step.step_id);
+                      const isActive = currentStep === step.step_id;
+                      const isPending = !isCompleted && !isActive;
+
+                      return (
+                        <div
+                          key={step.step_id}
+                          className={cn(
+                            "flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs transition-colors border",
+                            isCompleted && "bg-emerald-500/5 border-emerald-500/20",
+                            isActive && "bg-action/5 border-action/30",
+                            isPending && "bg-muted/30 border-transparent opacity-70",
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              "w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px] font-semibold",
+                              isCompleted && "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400",
+                              isActive && "bg-action/20 text-action",
+                              isPending && "bg-muted text-muted-foreground",
+                            )}
+                          >
+                            {isCompleted ? "✓" : idx + 1}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-foreground text-[11px]">
+                              {step.title}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground truncate">
+                              {step.description}
+                            </p>
+                          </div>
+                          {step.requires_restart && (
+                            <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded-pill shrink-0">
+                              Restart
+                            </span>
+                          )}
+                          {step.requires_elevation && (
+                            <span className="text-[9px] px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 rounded-pill shrink-0">
+                              Admin
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pt-3 border-t border-border">
+                  <button
+                    type="button"
+                    onClick={handleCancel}
+                    className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  {!hasStarted && steps.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setHasStarted(true)}
+                      className="px-4 py-1.5 bg-action text-white rounded-pill text-xs font-normal hover:bg-action/90 active:scale-[0.95] transition-all shadow-xs"
+                    >
+                      Start Setup
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </motion.div>
+      </div>
+    </AnimatePresence>
   );
 }
 
@@ -2610,7 +2765,40 @@ export default function DeviceSetupPage() {
     );
   }, [sourceRef, retryDevicePreview, showNotification]);
   const hasDeviceState = !!deviceImportState?.last_successful_cutoff;
-  const isIOSDevice = sourceRef?.type === "device";
+
+  const { data: pageIosDevices, isLoading: pageIosLoading } = useIOSDevices(
+    sourceRef?.type !== "local_folder",
+  );
+
+  const pageConnectedDevice = useMemo(() => {
+    if (sourceRef?.type !== "device" || !pageIosDevices?.devices) return null;
+    const targetSerial = canonicalSerial(sourceRef.device_id)?.toLowerCase();
+    if (!targetSerial) return null;
+    return (
+      pageIosDevices.devices.find(
+        (d) =>
+          canonicalSerial(d.serial)?.toLowerCase() === targetSerial &&
+          d.status !== "disconnected",
+      ) ?? null
+    );
+  }, [sourceRef, pageIosDevices]);
+
+  const isDeviceConnected =
+    sourceRef?.type === "device"
+      ? !pageIosLoading && !!pageConnectedDevice && pageConnectedDevice.status === "ready"
+      : true;
+
+  const isIOSDevice = useMemo(() => {
+    if (sourceRef?.type !== "device" || !pageConnectedDevice) return false;
+    const meta = getDeviceMeta(pageConnectedDevice);
+    return (
+      meta.platformBadge === "iOS" ||
+      meta.platformBadge === "iPadOS" ||
+      meta.category === "iphone" ||
+      meta.category === "ipad" ||
+      meta.category === "ipod"
+    );
+  }, [sourceRef, pageConnectedDevice]);
 
   // Handle device lock state from preview panel
   const handleDeviceLocked = useCallback(() => {
@@ -2658,7 +2846,8 @@ export default function DeviceSetupPage() {
     spaceSufficient &&
     !isSamePath &&
     !needsMoveConfirm &&
-    !createSession.isPending;
+    !createSession.isPending &&
+    (sourceRef?.type !== "device" || isDeviceConnected);
 
   // Sync sourceRef changes from this page back to store
   useEffect(() => {
@@ -2981,7 +3170,7 @@ export default function DeviceSetupPage() {
           sourceRef.device_id &&
           sourceRef.device_path && (
             <>
-              <KeepAwakeBanner />
+              {isDeviceConnected && isIOSDevice && <KeepAwakeBanner />}
               <div
                 key={`device-preview:${sourceRef.device_id}:${previewNonce}`}
                 className="border border-border rounded-xl p-3 bg-card"
@@ -2992,6 +3181,7 @@ export default function DeviceSetupPage() {
                     device_id: sourceRef.device_id,
                     device_path: sourceRef.device_path,
                   }}
+                  isDeviceConnected={isDeviceConnected}
                   onSelectionConfirm={handleSelectionConfirm}
                   onTransferStart={handleTransferStart}
                   onTryAnotherDriver={handlePreviewTryAnotherDriver}

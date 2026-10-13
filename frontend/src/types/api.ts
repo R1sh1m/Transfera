@@ -823,6 +823,7 @@ export interface DeviceBackendStatusResponse {
 export interface IOSDeviceRecoverResponse {
   overall:
     | "service_restored"
+    | "service_already_running"
     | "usb_passthrough_restored"
     | "elevation_required"
     | "needs_bind"
@@ -855,6 +856,8 @@ export interface IOSDeviceRecoverResponse {
   }[];
   driver_status?: string;
   active_tier?: string;
+  /** True when Phase-3 re-enumeration surfaced a Tier-1 row (optional, backward-compat). */
+  tier1_found?: boolean;
 }
 
 export interface Pymobiledevice3InstallResponse {

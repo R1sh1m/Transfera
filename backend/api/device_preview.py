@@ -34,17 +34,41 @@ _PREVIEW_MAX_DEPTH = 8
 logger = logging.getLogger(__name__)
 
 # HEIF opener for Pillow decodes below (mirrors thumbnailer/metadata_extractor).
-# Registration is process-global; other modules usually beat us to it, but the
-# preview endpoints must not depend on import order.
+# Registration is process-global and deliberately LAZY: importing pillow_heif
+# (+ its PIL cascade) at module top added ~40 ms to engine cold start while
+# the "Starting engine…" splash is up. The first thumbnail request pays for
+# it instead via _ensure_heif_opener() — preview endpoints must not depend
+# on import order, only on the opener being registered before decode.
 _HEIF_AVAILABLE = False
-try:
-    from pillow_heif import register_heif_opener as _register_heif_opener
+_heif_attempted = False
+_heif_lock = threading.Lock()
 
-    _register_heif_opener()
-    _HEIF_AVAILABLE = True
-except Exception as _heif_exc:
-    _HEIF_AVAILABLE = False
-    logger.debug("pillow-heif unavailable — HEIF preview thumbnails will fall back to gray: %s", _heif_exc)
+
+def _ensure_heif_opener() -> bool:
+    """Register the pillow-heif opener on first use (idempotent, thread-safe).
+
+    Returns True when HEIC/HEIF decode is available. Import failure is
+    cached so repeated thumbnail calls never retry the import.
+    """
+    global _HEIF_AVAILABLE, _heif_attempted
+    if _heif_attempted:
+        return _HEIF_AVAILABLE
+    with _heif_lock:
+        if _heif_attempted:
+            return _HEIF_AVAILABLE
+        try:
+            from pillow_heif import register_heif_opener as _register_heif_opener
+
+            _register_heif_opener()
+            _HEIF_AVAILABLE = True
+        except Exception as _heif_exc:
+            _HEIF_AVAILABLE = False
+            logger.debug(
+                "pillow-heif unavailable — HEIF preview thumbnails will fall back to gray: %s",
+                _heif_exc,
+            )
+        _heif_attempted = True
+        return _HEIF_AVAILABLE
 
 
 def _is_transient_thumb_error(exc: BaseException | None) -> bool:
@@ -165,7 +189,26 @@ def _make_gray_fallback() -> bytes:
         return b"\xff\xd8\xff\xd9"
 
 
-_GRAY_FALLBACK_JPEG: bytes = _make_gray_fallback()
+# Fallback JPEG — generated lazily on first use via Pillow (never a tuple).
+# Building it at import time pulled PIL into engine cold start; the first
+# fallback response pays for it instead (~10 ms, once per process).
+_GRAY_FALLBACK_JPEG_CACHE: bytes | None = None
+
+
+def _gray_fallback_jpeg() -> bytes:
+    """Return the cached gray fallback JPEG, generating it on first use."""
+    global _GRAY_FALLBACK_JPEG_CACHE
+    if _GRAY_FALLBACK_JPEG_CACHE is None:
+        _GRAY_FALLBACK_JPEG_CACHE = _make_gray_fallback()
+    return _GRAY_FALLBACK_JPEG_CACHE
+
+
+def __getattr__(name: str) -> bytes:
+    # Backwards-compat: external code may read
+    # ``device_preview._GRAY_FALLBACK_JPEG`` directly (PEP 562).
+    if name == "_GRAY_FALLBACK_JPEG":
+        return _gray_fallback_jpeg()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _get_thumb_cache_size() -> int:
@@ -818,11 +861,12 @@ def _get_video_duration(path: str) -> float | None:
 
 def _generate_gray_fallback() -> bytes:
     """Return a 1x1 gray JPEG pixel as fallback."""
-    return _GRAY_FALLBACK_JPEG
+    return _gray_fallback_jpeg()
 
 
 def _generate_photo_thumbnail(path: str, size: int) -> bytes | None:
     """Generate thumbnail for a photo using EXIF embedded preview fast-path, then Pillow."""
+    _ensure_heif_opener()
     ext = os.path.splitext(path)[1].lower()
 
     # Fast path 1: Extract embedded JPEG thumbnail from EXIF (JPEG, HEIC, RAW files)
@@ -991,6 +1035,7 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
     Tries an embedded-EXIF thumbnail first (fast path for JPEG/HEIC).
     Falls back to full decode with Pillow.
     """
+    _ensure_heif_opener()
     img = None
     try:
         from PIL import Image, ImageOps
@@ -1337,7 +1382,7 @@ async def ios_preview_directory(
             status_code=404,
             detail={
                 "status": "disconnected",
-                "message": f"Device {device_id} is not connected or not reachable. "
+                "message": "Device is not connected or not reachable. "
                 "Ensure the device is plugged in via USB and unlocked.",
             },
         )

@@ -17,6 +17,7 @@ export interface PillSelectOption {
   label: string;
   disabled?: boolean;
   title?: string;
+  badge?: string;
 }
 
 export interface PillSelectProps {
@@ -168,14 +169,28 @@ export function PillSelect({
                     )}
                   >
                     <span className="truncate">{opt.label}</span>
-                    {isItemActive && (
-                      <Check
-                        className={cn(
-                          "text-white shrink-0",
-                          size === "sm" ? "w-3 h-3" : "w-3.5 h-3.5",
-                        )}
-                      />
-                    )}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {opt.badge && (
+                        <span
+                          className={cn(
+                            "text-[9px] px-1.5 py-0.5 rounded-pill font-normal tracking-tight leading-none",
+                            isItemActive
+                              ? "bg-white/20 text-white"
+                              : "bg-action/10 text-action dark:bg-action/20",
+                          )}
+                        >
+                          {opt.badge}
+                        </span>
+                      )}
+                      {isItemActive && (
+                        <Check
+                          className={cn(
+                            "text-white shrink-0",
+                            size === "sm" ? "w-3 h-3" : "w-3.5 h-3.5",
+                          )}
+                        />
+                      )}
+                    </div>
                   </button>
                 );
               })}

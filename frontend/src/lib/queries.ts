@@ -358,6 +358,45 @@ export function useClearSessions() {
   });
 }
 
+export function useDeleteSession() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (sessionId: number) => {
+      const { data } = await apiClient.post<ClearResponse>("/sessions/clear", {
+        session_ids: [sessionId],
+      });
+      return data;
+    },
+    onSuccess: async (data, sessionId) => {
+      const store = useTransferStore.getState();
+
+      await qc.cancelQueries({ queryKey: ["session-progress", sessionId] });
+      await qc.cancelQueries({ queryKey: ["session", sessionId] });
+      await qc.cancelQueries({ queryKey: ["batches", sessionId] });
+
+      qc.removeQueries({ queryKey: ["session-progress", sessionId] });
+      qc.removeQueries({ queryKey: ["session", sessionId] });
+      qc.removeQueries({ queryKey: ["batches", sessionId] });
+
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+
+      if (store.transfer.sessionId === sessionId) {
+        store.clearAllExceptPage();
+        requestAnimationFrame(() => {
+          store.setCurrentPage("dashboard");
+        });
+      }
+
+      store.showNotification("success", data.message);
+    },
+    onError: (error) => {
+      useTransferStore
+        .getState()
+        .showNotification("error", extractErrorMessage(error));
+    },
+  });
+}
+
 export function useClearLibrary() {
   const qc = useQueryClient();
   return useMutation({
@@ -972,13 +1011,26 @@ export function useRecoverIOSDevice() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ["device-backend-status"] });
       qc.invalidateQueries({ queryKey: ["ios-devices"] });
-      if (
-        data.overall === "service_restored" ||
-        data.overall === "usb_passthrough_restored"
-      ) {
+      if (data.overall === "usb_passthrough_restored") {
         useTransferStore
           .getState()
           .showNotification("success", "iOS device connectivity restored");
+      } else if (
+        data.overall === "service_restored" ||
+        data.overall === "service_already_running"
+      ) {
+        if (data.tier1_found === true) {
+          useTransferStore
+            .getState()
+            .showNotification("success", "iOS device connectivity restored");
+        } else {
+          useTransferStore
+            .getState()
+            .showNotification(
+              "warning",
+              "Apple service is running but the iPhone isn't visible to it yet. Unlock the phone, accept the Trust prompt, then unplug, replug, and retry.",
+            );
+        }
       }
     },
     onError: (error) => {

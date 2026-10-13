@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useIOSDevices } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
-import { getDeviceMeta } from "@/lib/device-utils";
+import { getDeviceMeta, canonicalSerial } from "@/lib/device-utils";
 import { isDesktop, onNewRemovableDrive } from "@/lib/desktop";
 import type { IOSDeviceInfo } from "@/types/api";
 
@@ -37,15 +37,43 @@ export function useDeviceWatcher() {
       initialMountRef.current = false;
       prevDevicesRef.current = currentDevices;
 
-      if (!setupSourcePath && !isTransferRunning) {
-        const firstReady = currentDevices.find((d) => d.status === "ready");
-        if (firstReady) {
-          const meta = getDeviceMeta(firstReady);
-          setSetupSourcePath(`ios://${firstReady.serial}/DCIM`);
-          showNotification(
-            "info",
-            `Connected ${meta.displayName} — set as transfer source`,
+      if (!isTransferRunning) {
+        if (!setupSourcePath) {
+          const firstReady = currentDevices.find((d) => d.status === "ready");
+          if (firstReady) {
+            const meta = getDeviceMeta(firstReady);
+            setSetupSourcePath(`ios://${firstReady.serial}/DCIM`);
+            showNotification(
+              "info",
+              `Connected ${meta.displayName} — set as transfer source`,
+            );
+          }
+        } else if (
+          setupSourcePath.startsWith("ios://") ||
+          setupSourcePath.startsWith("wpd://")
+        ) {
+          // Verify if the restored device is currently connected
+          const activeSerial = setupSourcePath
+            .replace(/^ios:\/\//, "")
+            .replace(/^wpd:\/\//, "")
+            .split("/")[0]!;
+          const canonActive = canonicalSerial(activeSerial)?.toLowerCase();
+          const isPresent = currentDevices.some(
+            (d) =>
+              canonicalSerial(d.serial)?.toLowerCase() === canonActive &&
+              d.status === "ready",
           );
+          if (!isPresent) {
+            const firstReady = currentDevices.find((d) => d.status === "ready");
+            if (firstReady) {
+              const meta = getDeviceMeta(firstReady);
+              setSetupSourcePath(`ios://${firstReady.serial}/DCIM`);
+              showNotification(
+                "info",
+                `Connected ${meta.displayName} — set as transfer source`,
+              );
+            }
+          }
         }
       }
       return;
@@ -54,19 +82,23 @@ export function useDeviceWatcher() {
     const prevDevices = prevDevicesRef.current || [];
     prevDevicesRef.current = currentDevices;
 
-    const prevSerials = new Set(prevDevices.map((d) => d.serial.toLowerCase()));
+    const prevSerials = new Set(
+      prevDevices.map((d) => canonicalSerial(d.serial)?.toLowerCase() || d.serial.toLowerCase()),
+    );
     const currentSerials = new Set(
-      currentDevices.map((d) => d.serial.toLowerCase()),
+      currentDevices.map((d) => canonicalSerial(d.serial)?.toLowerCase() || d.serial.toLowerCase()),
     );
 
     // Detect newly plugged in devices
     const newlyConnected = currentDevices.filter(
-      (d) => !prevSerials.has(d.serial.toLowerCase()) && d.status === "ready",
+      (d) =>
+        !prevSerials.has(canonicalSerial(d.serial)?.toLowerCase() || d.serial.toLowerCase()) &&
+        d.status === "ready",
     );
 
     // Detect disconnected devices
     const disconnected = prevDevices.filter(
-      (d) => !currentSerials.has(d.serial.toLowerCase()),
+      (d) => !currentSerials.has(canonicalSerial(d.serial)?.toLowerCase() || d.serial.toLowerCase()),
     );
 
     // Handle NEW device plugged in -> automatically switch
@@ -82,15 +114,18 @@ export function useDeviceWatcher() {
     }
 
     // Handle currently active device being unplugged
-    if (setupSourcePath && (setupSourcePath.startsWith("ios://") || setupSourcePath.startsWith("wpd://"))) {
+    if (
+      setupSourcePath &&
+      (setupSourcePath.startsWith("ios://") || setupSourcePath.startsWith("wpd://"))
+    ) {
       const activeSerial = setupSourcePath
         .replace(/^ios:\/\//, "")
         .replace(/^wpd:\/\//, "")
-        .split("/")[0]!
-        .toLowerCase();
+        .split("/")[0]!;
+      const canonActive = canonicalSerial(activeSerial)?.toLowerCase();
 
       const wasActiveDisconnected = disconnected.some(
-        (d) => d.serial.toLowerCase() === activeSerial,
+        (d) => canonicalSerial(d.serial)?.toLowerCase() === canonActive,
       );
 
       if (wasActiveDisconnected && !isTransferRunning) {
@@ -105,11 +140,9 @@ export function useDeviceWatcher() {
             `Device disconnected — switched source to ${meta.displayName}`,
           );
         } else {
-          // Reset source cleanly
-          setSetupSourcePath("");
           showNotification(
             "warning",
-            "Device disconnected — source directory reset",
+            "Device disconnected — connect device to preview and transfer",
           );
         }
       }

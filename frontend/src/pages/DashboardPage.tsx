@@ -44,6 +44,7 @@ import {
   useHealth,
   useDiskSpace,
   useClearSessions,
+  useDeleteSession,
   useDeviceBackendStatus,
   useInstallDriver,
   useInstallPymobiledevice3,
@@ -1059,10 +1060,33 @@ function LastBackupCard({ sessions }: { sessions: SessionInfo[] }) {
 function SessionRow({ session }: { session: SessionInfo }) {
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const initTransfer = useTransferStore((s) => s.initTransfer);
+  const activeSessionId = useTransferStore((s) => s.transfer.sessionId);
+  const showNotification = useTransferStore((s) => s.showNotification);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const deleteSession = useDeleteSession();
 
   const handleResume = () => {
     initTransfer(session);
     setCurrentPage("transfer");
+  };
+
+  const handleDeleteClick = () => {
+    // Only block sessions with work in flight (active or running). Paused
+    // sessions are resumable but idle, so they can be deleted outright.
+    if (activeSessionId === session.id || session.status === "running") {
+      showNotification(
+        "warning",
+        "A transfer is currently in progress. Please pause or complete the transfer before deleting this session.",
+      );
+      return;
+    }
+    setShowDeleteDialog(true);
+  };
+
+  const handleDeleteConfirm = () => {
+    deleteSession.mutate(session.id, {
+      onSettled: () => setShowDeleteDialog(false),
+    });
   };
 
   const handleViewReport = () => {
@@ -1080,114 +1104,132 @@ function SessionRow({ session }: { session: SessionInfo }) {
   };
 
   return (
-    <tr className="border-b border-border last:border-b-0 hover:bg-muted/30 transition-colors">
-      <td className="py-3 pl-4 pr-3">
-        <StatusBadge status={session.status} />
-      </td>
-      <td className="py-2.5 pr-3">
-        <p
-          className="text-sm font-semibold text-foreground truncate max-w-[180px]"
-          title={session.session_name}
-        >
-          {session.session_name}
-        </p>
-      </td>
-      <td className="py-3 pr-3">
-        <p
-          className="text-xs text-muted-foreground truncate max-w-[220px]"
-          title={session.source_root}
-        >
-          {session.source_root}
-        </p>
-      </td>
-      <td className="py-3 pr-3">
-        <p
-          className="text-xs text-muted-foreground truncate max-w-[220px]"
-          title={session.dest_root}
-        >
-          {session.dest_root}
-        </p>
-      </td>
-      <td className="py-3 pr-3">
-        <div className="flex items-center gap-2">
+    <>
+      <tr className="border-b border-border last:border-b-0 hover:bg-muted/30 transition-colors">
+        <td className="py-3 pl-4 pr-3">
+          <StatusBadge status={session.status} />
+        </td>
+        <td className="py-2.5 pr-3">
+          <p
+            className="text-sm font-semibold text-foreground truncate max-w-[180px]"
+            title={session.session_name}
+          >
+            {session.session_name}
+          </p>
+        </td>
+        <td className="py-3 pr-3">
+          <p
+            className="text-xs text-muted-foreground truncate max-w-[220px]"
+            title={session.source_root}
+          >
+            {session.source_root}
+          </p>
+        </td>
+        <td className="py-3 pr-3">
+          <p
+            className="text-xs text-muted-foreground truncate max-w-[220px]"
+            title={session.dest_root}
+          >
+            {session.dest_root}
+          </p>
+        </td>
+        <td className="py-3 pr-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {session.completed_items.toLocaleString()} /{" "}
+              {session.total_items.toLocaleString()}
+            </span>
+            {session.total_bytes_volume != null &&
+              session.total_bytes_volume > 0 && (
+                <span className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                  {formatBytes(session.total_bytes_volume)}
+                </span>
+              )}
+          </div>
+        </td>
+        <td className="py-3 pr-3">
           <span className="text-xs text-muted-foreground">
-            {session.completed_items.toLocaleString()} /{" "}
-            {session.total_items.toLocaleString()}
+            {parseBackendDate(session.created_at).toLocaleDateString()}
           </span>
-          {session.total_bytes_volume != null &&
-            session.total_bytes_volume > 0 && (
-              <span className="text-[10px] font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                {formatBytes(session.total_bytes_volume)}
-              </span>
-            )}
-        </div>
-      </td>
-      <td className="py-3 pr-3">
-        <span className="text-xs text-muted-foreground">
-          {parseBackendDate(session.created_at).toLocaleDateString()}
-        </span>
-      </td>
-      <td className="py-3 pr-4">
-        <div className="flex items-center gap-1.5">
-          {session.status === "paused" && (
-            <button
-              onClick={handleResume}
-              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-amber-500 text-white rounded text-xs font-normal hover:bg-amber-600 transition-colors"
-            >
-              <Play className="w-3 h-3" />
-              Resume
-            </button>
-          )}
-          {["completed", "completed_with_errors"].includes(session.status) &&
-            session.dest_root &&
-            isDesktop && (
+        </td>
+        <td className="py-3 pr-4">
+          <div className="flex items-center gap-1.5">
+            {session.status === "paused" && (
               <button
-                onClick={() => openPath(session.dest_root)}
-                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
-                title="Open destination folder in Explorer"
+                onClick={handleResume}
+                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-amber-500 text-white rounded text-xs font-normal hover:bg-amber-600 transition-colors"
               >
-                <FolderOpen className="w-3 h-3" />
-                Folder
+                <Play className="w-3 h-3" />
+                Resume
               </button>
             )}
-          {["completed", "completed_with_errors", "failed"].includes(
-            session.status,
-          ) &&
-            session.session_report_path && (
+            {["completed", "completed_with_errors"].includes(session.status) &&
+              session.dest_root &&
+              isDesktop && (
+                <button
+                  onClick={() => openPath(session.dest_root)}
+                  className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+                  title="Open destination folder in Explorer"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  Folder
+                </button>
+              )}
+            {["completed", "completed_with_errors", "failed"].includes(
+              session.status,
+            ) &&
+              session.session_report_path && (
+                <button
+                  onClick={handleViewReport}
+                  className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+                  title="Open HTML report"
+                >
+                  <FileText className="w-3 h-3" />
+                  Report
+                </button>
+              )}
+            {["failed", "cancelled", "completed_with_errors"].includes(
+              session.status,
+            ) &&
+              !session.session_report_path && (
+                <span
+                  className="text-xs text-muted-foreground"
+                  title="Report not available — session did not complete"
+                >
+                  —
+                </span>
+              )}
+            {["completed", "completed_with_errors", "failed"].includes(
+              session.status,
+            ) && (
               <button
-                onClick={handleViewReport}
+                onClick={handleResume}
                 className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
-                title="Open HTML report"
               >
-                <FileText className="w-3 h-3" />
-                Report
+                <ArrowRight className="w-3 h-3" />
+                View
               </button>
             )}
-          {["failed", "cancelled", "completed_with_errors"].includes(
-            session.status,
-          ) &&
-            !session.session_report_path && (
-              <span
-                className="text-xs text-muted-foreground"
-                title="Report not available — session did not complete"
-              >
-                —
-              </span>
-            )}
-          {["completed", "completed_with_errors", "failed"].includes(
-            session.status,
-          ) && (
             <button
-              onClick={handleResume}
-              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+              onClick={handleDeleteClick}
+              className="no-drag inline-flex items-center px-2 py-1 rounded text-muted-foreground hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 transition-colors active:scale-[0.95]"
+              title="Delete session"
             >
-              <ArrowRight className="w-3 h-3" />
-              View
+              <Trash2 className="w-3 h-3" />
             </button>
-          )}
-        </div>
-      </td>
-    </tr>
+          </div>
+        </td>
+      </tr>
+      <ConfirmDialog
+        open={showDeleteDialog}
+        title="Delete Session"
+        description={`Delete '${session.session_name}'? This permanently removes its batches, library items, and generated thumbnails from the app. Your actual files at the transfer destination are not affected. This action cannot be undone.`}
+        confirmLabel="Delete Session"
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setShowDeleteDialog(false)}
+        loading={deleteSession.isPending}
+      />
+    </>
   );
 }
 

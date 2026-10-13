@@ -915,55 +915,73 @@ class DeviceBackendManager:
             else:
                 self._tier2_error = status.error or status.last_error
                 logger.info("DeviceBackend: Tier 2 bridge not reachable -- checking auto-start")
-                # Auto-activation: if WSL distro is ready but bridge isn't running,
-                # try to auto-start the bridge.
+                # Cold-start gate: the feasibility probe + bridge auto-start
+                # below can stall for ~60s (WSL cold boot, usbipd attach). A
+                # cheap `usbipd list` runs first — with no Apple-USB device
+                # present there is nothing Tier 2 could serve, so the slow
+                # probing is skipped entirely. The Apple-driver (Tier 1) and
+                # WPD probes always run regardless of this gate.
                 try:
-                    feasibility = await self._wsl_orchestrator.check_feasibility()
-                    if feasibility.distro_ready:
-                        logger.info("DeviceBackend: WSL distro ready -- auto-starting bridge")
-                        await self._wsl_orchestrator.start_bridge()
-                        retry_status = await self._wsl_orchestrator.get_bridge_status()
-                        if retry_status.reachable:
-                            self._tier2.set_bridge_url(f"http://127.0.0.1:{BRIDGE_PORT}")
-                            self._bridge_auto_started = True
-                            self._tier2_error = None
-                            logger.info("DeviceBackend: Bridge auto-started successfully")
+                    _usb_devices = await self._wsl_orchestrator.list_usb_devices()
+                except Exception as _usb_exc:
+                    logger.debug("DeviceBackend: usbipd list check failed: %s", _usb_exc)
+                    _usb_devices = []
+                if not any(getattr(_d, "is_apple", False) for _d in _usb_devices):
+                    logger.info(
+                        "DeviceBackend: no Apple USB device visible via usbipd — "
+                        "skipping WSL feasibility/auto-start probing"
+                    )
+                    self._wsl_setup_suggested = True
+                else:
+                    # Auto-activation: if WSL distro is ready but bridge isn't running,
+                    # try to auto-start the bridge.
+                    try:
+                        feasibility = await self._wsl_orchestrator.check_feasibility()
+                        if feasibility.distro_ready:
+                            logger.info("DeviceBackend: WSL distro ready -- auto-starting bridge")
+                            await self._wsl_orchestrator.start_bridge()
+                            retry_status = await self._wsl_orchestrator.get_bridge_status()
+                            if retry_status.reachable:
+                                self._tier2.set_bridge_url(f"http://127.0.0.1:{BRIDGE_PORT}")
+                                self._bridge_auto_started = True
+                                self._tier2_error = None
+                                logger.info("DeviceBackend: Bridge auto-started successfully")
+                            else:
+                                self._tier2_error = retry_status.error or retry_status.last_error
+                                # Bridge start failed -- try USB passthrough recovery
+                                # before giving up.  The Apple device may exist in
+                                # usbipd but not be attached to WSL.
+                                try:
+                                    recovery = await self._wsl_orchestrator.auto_recover_apple_device()
+                                    if recovery.get("success"):
+                                        logger.info(
+                                            "DeviceBackend: Apple device auto-attached via usbipd -- retrying bridge probe"
+                                        )
+                                        retry2 = await self._wsl_orchestrator.get_bridge_status()
+                                        if retry2.reachable:
+                                            self._tier2.set_bridge_url(f"http://127.0.0.1:{BRIDGE_PORT}")
+                                            self._bridge_auto_started = True
+                                            self._tier2_error = None
+                                            logger.info("DeviceBackend: Bridge reachable after USB attach")
+                                    elif recovery.get("needs_bind"):
+                                        logger.info(
+                                            "DeviceBackend: Apple device needs bind before attach -- busids: %s",
+                                            recovery["needs_bind"],
+                                        )
+                                    elif recovery.get("needs_elevation"):
+                                        logger.info(
+                                            "DeviceBackend: Apple device attach needs elevation -- frontend will prompt"
+                                        )
+                                except Exception as recovery_exc:
+                                    logger.debug("DeviceBackend: USB passthrough recovery failed: %s", recovery_exc)
+                        elif feasibility.wsl_installed or not feasibility.error:
+                            self._wsl_setup_suggested = True
+                            logger.info("DeviceBackend: WSL available but not ready -- surfacing setup card")
                         else:
-                            self._tier2_error = retry_status.error or retry_status.last_error
-                            # Bridge start failed -- try USB passthrough recovery
-                            # before giving up.  The Apple device may exist in
-                            # usbipd but not be attached to WSL.
-                            try:
-                                recovery = await self._wsl_orchestrator.auto_recover_apple_device()
-                                if recovery.get("success"):
-                                    logger.info(
-                                        "DeviceBackend: Apple device auto-attached via usbipd -- retrying bridge probe"
-                                    )
-                                    retry2 = await self._wsl_orchestrator.get_bridge_status()
-                                    if retry2.reachable:
-                                        self._tier2.set_bridge_url(f"http://127.0.0.1:{BRIDGE_PORT}")
-                                        self._bridge_auto_started = True
-                                        self._tier2_error = None
-                                        logger.info("DeviceBackend: Bridge reachable after USB attach")
-                                elif recovery.get("needs_bind"):
-                                    logger.info(
-                                        "DeviceBackend: Apple device needs bind before attach -- busids: %s",
-                                        recovery["needs_bind"],
-                                    )
-                                elif recovery.get("needs_elevation"):
-                                    logger.info(
-                                        "DeviceBackend: Apple device attach needs elevation -- frontend will prompt"
-                                    )
-                            except Exception as recovery_exc:
-                                logger.debug("DeviceBackend: USB passthrough recovery failed: %s", recovery_exc)
-                    elif feasibility.wsl_installed or not feasibility.error:
-                        self._wsl_setup_suggested = True
-                        logger.info("DeviceBackend: WSL available but not ready -- surfacing setup card")
-                    else:
-                        self._wsl_setup_suggested = True
-                        logger.info("DeviceBackend: WSL not installed -- surfacing setup card")
-                except Exception as exc:
-                    logger.debug("DeviceBackend: WSL auto-activation check failed: %s", exc)
+                            self._wsl_setup_suggested = True
+                            logger.info("DeviceBackend: WSL not installed -- surfacing setup card")
+                    except Exception as exc:
+                        logger.debug("DeviceBackend: WSL auto-activation check failed: %s", exc)
         except Exception as exc:
             logger.debug("DeviceBackend: Tier 2 initialization failed: %s", exc)
 

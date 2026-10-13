@@ -43,7 +43,12 @@ jobs:
               Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but src-tauri/Cargo.toml version is '$cargoVersion'."
               exit 1
           }
-          Write-Host "Version verification successful: tag '$tag' matches package.json, pyproject.toml, tauri.conf.json, and Cargo.toml ('$version')."
+          $appVersion = (Select-String -Path backend/config.py -Pattern '^APP_VERSION[^"]*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($tagVersion -ne $appVersion) {
+              Write-Error "Version mismatch! Git tag is '$tag' (parsed: '$tagVersion') but backend/config.py APP_VERSION is '$appVersion'."
+              exit 1
+          }
+          Write-Host "Version verification successful: tag '$tag' matches package.json, pyproject.toml, tauri.conf.json, Cargo.toml, and APP_VERSION ('$version')."
 
       - name: Set up Rust (stable, MSVC)
         uses: dtolnay/rust-toolchain@stable

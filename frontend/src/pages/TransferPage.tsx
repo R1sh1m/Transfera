@@ -285,14 +285,21 @@ function PreviewThumbnail({
               return;
             }
             if (res.ok) {
-              const blob = await res.blob();
-              if (blob.size > 0) {
-                const objectUrl = URL.createObjectURL(blob);
-                setImgSrc(objectUrl);
-                setLoadState("loaded");
-                slotHeld.current = false;
-                thumbQueue.release();
-                return;
+              // Gray placeholders arrive as 200 with a fallback header —
+              // never render them as loaded images; fall through to retry.
+              const greyHeader = (res.headers.get("X-Thumb-Status") || "")
+                .trim()
+                .toLowerCase();
+              if (!greyHeader.startsWith("fallback")) {
+                const blob = await res.blob();
+                if (blob.size > 0) {
+                  const objectUrl = URL.createObjectURL(blob);
+                  setImgSrc(objectUrl);
+                  setLoadState("loaded");
+                  slotHeld.current = false;
+                  thumbQueue.release();
+                  return;
+                }
               }
             }
           }

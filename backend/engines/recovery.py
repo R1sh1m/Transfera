@@ -183,16 +183,27 @@ async def recover_interrupted_batches(
                     db_batch.touch()
                 _mark_resumable(batch.session_id)
 
-    # Orphaned partials cleanup (sync, no DB session needed — runs every startup)
-    orphaned_partials_removed = _clean_orphaned_partials(cache_dir=cache_dir)
-    if orphaned_partials_removed > 0:
-        logger.info("Cleaned up %d orphaned .partial cache files.", orphaned_partials_removed)
-    stats["orphaned_partials_removed"] = orphaned_partials_removed  # type: ignore[index]
-    # Destination partial sweep (crash with renamed dest_root previously leaked)
-    try:
-        dest_partials_removed = await _clean_orphaned_dest_partials_async()
-    except Exception:
+    # Orphaned .partial sweeps (rglob over cache_dir + every known dest_root —
+    # the old ~7s cold-start blocker on large caches) run only when at least
+    # one stuck batch existed. With zero stuck batches there is nothing to
+    # resume, so any lingering orphans are left in place and retried on the
+    # next boot whose recovery finds stuck batches and sweeps then. This
+    # keeps the common clean-boot path to the single indexed DB query above.
+    if not stuck_batches:
+        logger.debug("No stuck batches — skipping orphaned .partial sweeps (retried next boot)")
+        orphaned_partials_removed = 0
         dest_partials_removed = 0
+    else:
+        # Orphaned partials cleanup (sync, no DB session needed)
+        orphaned_partials_removed = _clean_orphaned_partials(cache_dir=cache_dir)
+        if orphaned_partials_removed > 0:
+            logger.info("Cleaned up %d orphaned .partial cache files.", orphaned_partials_removed)
+        # Destination partial sweep (crash with renamed dest_root previously leaked)
+        try:
+            dest_partials_removed = await _clean_orphaned_dest_partials_async()
+        except Exception:
+            dest_partials_removed = 0
+    stats["orphaned_partials_removed"] = orphaned_partials_removed  # type: ignore[index]
     stats["orphaned_dest_partials_removed"] = dest_partials_removed  # type: ignore[index]
 
     orphaned_thumbnails_removed = _clean_orphaned_thumbnails()

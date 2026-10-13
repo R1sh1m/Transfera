@@ -70,19 +70,38 @@ function getInitialNum(key: string): number | null {
 }
 
 function updaterErrorMessage(err: unknown, fallback: string): string {
-  if (err instanceof Error && err.message) return err.message;
-  if (typeof err === "string" && err) return err;
-  try {
-    const s = JSON.stringify(err);
-    if (s && s !== "{}" && s !== "null") return s;
-  } catch {
-    /* fall through */
+  let raw: string | null = null;
+  if (err instanceof Error && err.message) raw = err.message;
+  else if (typeof err === "string" && err) raw = err;
+  else {
+    try {
+      const s = JSON.stringify(err);
+      if (s && s !== "{}" && s !== "null") raw = s;
+    } catch {
+      /* fall through */
+    }
+  }
+  if (raw) {
+    const lower = raw.toLowerCase();
+    // Map the updater-plugin ordering error to friendly copy.
+    // Raw detail stays in console (callers log `err`); toast/store only gets friendly text.
+    // Narrow match: broader "download" text would mislabel check/network
+    // failures (which trigger no retry) as a re-download in progress.
+    if (lower.includes("install called before")) {
+      return "The update wasn't fully downloaded. Trying the download again.";
+    }
+    return raw;
   }
   return fallback;
 }
 
-// Module-level reference to the active Tauri Update resource
+// Module-level reference to the active Tauri Update resource.
+// Invariant: status === 'downloaded' ⟹ the current resource completed download().
 let activeUpdateResource: any = null;
+let downloadedFlag = false;
+// Set when dismiss() is called mid-download so the in-flight promise
+// completion does not resurrect the banner.
+let downloadCancelled = false;
 
 export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   status: "idle",
@@ -98,12 +117,20 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
   checkForUpdates: async (manual = false) => {
     const { status, autoDownloadEnabled } = get();
+    // Never orphan a completed download or race an in-flight one.
+    // A downloaded resource must survive re-checks (launch timer, 4h
+    // interval, focus/online, tray, dashboard nonce). Manual checks are
+    // the only exception, and even then they must not replace a ready
+    // resource for the same version (handled below).
     if (
       status === "checking" ||
       status === "downloading" ||
-      status === "installing"
+      status === "installing" ||
+      status === "downloaded"
     ) {
-      return;
+      if (!(manual && status === "downloaded")) {
+        return;
+      }
     }
 
     set({ status: "checking", errorMessage: null });
@@ -145,7 +172,24 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       }
 
       if (update && update.available) {
+        // Manual re-check while a download already completed: keep the
+        // ready resource when it targets the same version; only replace
+        // when versions differ (resetting downloadedFlag).
+        const existingInfo = get().updateInfo;
+        if (
+          manual &&
+          downloadedFlag &&
+          activeUpdateResource &&
+          existingInfo &&
+          existingInfo.version &&
+          update.version === existingInfo.version
+        ) {
+          // Restore the downloaded status clobbered by the "checking" set above.
+          set({ status: "downloaded", errorMessage: null });
+          return;
+        }
         activeUpdateResource = update;
+        downloadedFlag = false;
         const info: UpdateInfo = {
           version: update.version,
           currentVersion,
@@ -167,7 +211,14 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
           set({ status: "available" });
         }
       } else {
+        // Preserve a completed download across re-checks: a manual check
+        // that reports "no update" must not orphan the ready resource.
+        if (downloadedFlag && activeUpdateResource && get().updateInfo) {
+          set({ status: "downloaded", errorMessage: null });
+          return;
+        }
         activeUpdateResource = null;
+        downloadedFlag = false;
         set({ updateInfo: null, status: "up-to-date" });
 
         if (manual) {
@@ -182,6 +233,11 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       }
     } catch (err) {
       console.warn("[updater] Update check failed:", err);
+      // A failed re-check must not orphan a completed download.
+      if (downloadedFlag && activeUpdateResource && get().updateInfo) {
+        set({ status: "downloaded", errorMessage: null });
+        return;
+      }
       const msg = updaterErrorMessage(err, "Failed to check for updates.");
       if (manual) {
         set({ status: "error", errorMessage: msg });
@@ -194,7 +250,14 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   },
 
   downloadUpdate: async () => {
+    // Re-entrancy guard: banner + settings modal can invoke concurrently
+    // on the same resource object.
+    if (get().status === "downloading") return;
     if (!activeUpdateResource || !isTauri) return;
+
+    // New download attempt supersedes any prior dismiss-during-download.
+    downloadCancelled = false;
+    const resource = activeUpdateResource;
 
     set({
       status: "downloading",
@@ -208,7 +271,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       let total = 0;
       let downloaded = 0;
 
-      await activeUpdateResource.download((event: any) => {
+      await resource.download((event: any) => {
         if (!event) return;
         if (event.event === "Started") {
           total = event.data?.contentLength || 0;
@@ -225,6 +288,12 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         }
       });
 
+      // Dismissed mid-download: do not resurrect the banner.
+      if (downloadCancelled || activeUpdateResource !== resource) {
+        downloadCancelled = false;
+        return;
+      }
+      downloadedFlag = true;
       set({
         status: "downloaded",
         downloadProgress: 100,
@@ -239,6 +308,10 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       }).catch(() => {});
     } catch (err) {
       console.error("[updater] Download failed:", err);
+      if (downloadCancelled) {
+        downloadCancelled = false;
+        return;
+      }
       const msg = updaterErrorMessage(err, "Failed to download update.");
       set({ status: "error", errorMessage: msg });
     }
@@ -259,7 +332,29 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       return;
     }
 
-    if (!activeUpdateResource || !isTauri) return;
+    if (!isTauri) return;
+
+    // Enforce download-before-install invariant: never call install() on a
+    // resource that hasn't completed download(). Kick off the download
+    // instead so users never see the raw plugin ordering error.
+    const ready =
+      !!activeUpdateResource &&
+      downloadedFlag &&
+      (!get().updateInfo?.version ||
+        !activeUpdateResource.version ||
+        activeUpdateResource.version === get().updateInfo?.version);
+    if (!ready) {
+      set({ errorMessage: "Update files aren't ready yet — downloading now." });
+      await get().downloadUpdate();
+      // downloadUpdate clears errorMessage on start; restore friendly copy
+      // if the update still isn't ready.
+      if (!downloadedFlag) {
+        set({
+          errorMessage: "Update files aren't ready yet — downloading now.",
+        });
+      }
+      return;
+    }
 
     try {
       set({ status: "installing", errorMessage: null });
@@ -285,6 +380,20 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
   dismiss: () => {
     const { status } = get();
+    // Dismissing mid-download cancels the banner resurrection: the
+    // in-flight download promise checks downloadCancelled on completion.
+    if (status === "downloading") {
+      downloadCancelled = true;
+      set({
+        status: "idle",
+        updateInfo: null,
+        downloadProgress: null,
+        downloadedBytes: null,
+        totalBytes: null,
+        errorMessage: null,
+      });
+      return;
+    }
     // If downloaded, keep updateInfo so UI pills and settings know it's ready,
     // but close the toast / banner
     if (status === "downloaded") {
