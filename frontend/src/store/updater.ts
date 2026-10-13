@@ -91,6 +91,12 @@ function updaterErrorMessage(err: unknown, fallback: string): string {
     if (lower.includes("install called before")) {
       return "The update wasn't fully downloaded. Trying the download again.";
     }
+    // Map updater-manifest deserialization failures (e.g. serde
+    // "invalid type: sequence, expected a string" when notes is a JSON
+    // array) to friendly copy. Raw detail stays in console.
+    if (lower.includes("invalid type") || lower.includes("expected a string")) {
+      return "Couldn't read the update info from the release server. Please try again later.";
+    }
     return raw;
   }
   return fallback;

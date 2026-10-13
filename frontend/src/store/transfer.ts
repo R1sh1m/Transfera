@@ -97,13 +97,25 @@ export interface NotificationAction {
   primary?: boolean;
 }
 
+export interface NotificationItem {
+  id: string;
+  type: "success" | "error" | "warning" | "info";
+  message: string;
+  actions?: NotificationAction[];
+}
+
 export interface UIState {
   currentPage: "dashboard" | "setup" | "transfer" | "library";
+  /** Legacy mirror of the newest notification — kept so existing
+      `ui.notification` readers keep working. New code should read
+      `notifications`. */
   notification: {
     type: "success" | "error" | "warning" | "info";
     message: string;
     actions?: NotificationAction[];
   } | null;
+  /** Phone-like push stack, newest last. Capped (oldest dropped). */
+  notifications: NotificationItem[];
   defaultTransferMode: TransferMode;
   serverDown: boolean;
   setupSourcePath: string;
@@ -169,6 +181,7 @@ export interface TransferStore {
     actions?: NotificationAction[],
   ) => void;
   clearNotification: () => void;
+  dismissNotification: (id: string) => void;
   requestUpdateCheck: () => void;
   setServerDown: (down: boolean) => void;
   setSetupSourcePath: (path: string) => void;
@@ -248,6 +261,7 @@ const initialLibrary: LibraryState = {
 const initialUI: UIState = {
   currentPage: "dashboard",
   notification: null,
+  notifications: [],
   defaultTransferMode: "copy",
   serverDown: false,
   setupSourcePath: "",
@@ -267,6 +281,36 @@ const initialUI: UIState = {
 // Track which sessions have already fired a completion notification to
 // prevent duplicate toasts if the WS event is dispatched more than once.
 const _notifiedSessions = new Set<number>();
+
+// ---------------------------------------------------------------------------
+// Notification queue helpers (phone-like push stack, cap ~4, drop oldest)
+// ---------------------------------------------------------------------------
+const MAX_NOTIFICATIONS = 4;
+let _notifSeq = 0;
+
+function nextNotifId(): string {
+  _notifSeq += 1;
+  return `${Date.now().toString(36)}-${_notifSeq.toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function pushNotification(
+  existing: NotificationItem[],
+  type: NotificationItem["type"],
+  message: string,
+  actions?: NotificationAction[],
+): {
+  notifications: NotificationItem[];
+  notification: UIState["notification"];
+} {
+  const item: NotificationItem = {
+    id: nextNotifId(),
+    type,
+    message,
+    actions,
+  };
+  const notifications = [...existing, item].slice(-MAX_NOTIFICATIONS);
+  return { notifications, notification: { type, message, actions } };
+}
 
 // ---------------------------------------------------------------------------
 // Reducer: handleWsEvent
@@ -536,22 +580,26 @@ function handleWsEventReducer(
         activeBatch: null,
       };
       if (isError) {
+        const queued = pushNotification(
+          state.ui.notifications,
+          "warning",
+          `${imported} transferred, ${failed} failed. See library for details.`,
+        );
         patch.ui = {
           ...state.ui,
           lastCompletedSessionId: sessionId,
-          notification: {
-            type: "warning",
-            message: `${imported} transferred, ${failed} failed. See library for details.`,
-          },
+          ...queued,
         };
       } else {
+        const queued = pushNotification(
+          state.ui.notifications,
+          "success",
+          `${imported} file${imported !== 1 ? "s" : ""} transferred successfully.`,
+        );
         patch.ui = {
           ...state.ui,
           lastCompletedSessionId: sessionId,
-          notification: {
-            type: "success",
-            message: `${imported} file${imported !== 1 ? "s" : ""} transferred successfully.`,
-          },
+          ...queued,
         };
       }
       break;
@@ -559,12 +607,14 @@ function handleWsEventReducer(
 
     // --- System events ----------------------------------------------------
     case "error": {
+      const queued = pushNotification(
+        state.ui.notifications,
+        "error",
+        (d.message as string) ?? "Unknown error",
+      );
       patch.ui = {
         ...state.ui,
-        notification: {
-          type: "error",
-          message: (d.message as string) ?? "Unknown error",
-        },
+        ...queued,
       };
       break;
     }
@@ -767,11 +817,35 @@ export const useTransferStore = create<TransferStore>()(
 
       showNotification: (type, message, actions) =>
         set((s) => ({
-          ui: { ...s.ui, notification: { type, message, actions } },
+          ui: {
+            ...s.ui,
+            ...pushNotification(s.ui.notifications, type, message, actions),
+          },
         })),
 
       clearNotification: () =>
-        set((s) => ({ ui: { ...s.ui, notification: null } })),
+        set((s) => ({
+          ui: { ...s.ui, notification: null, notifications: [] },
+        })),
+
+      dismissNotification: (id) =>
+        set((s) => {
+          const notifications = s.ui.notifications.filter((n) => n.id !== id);
+          const latest = notifications[notifications.length - 1] ?? null;
+          return {
+            ui: {
+              ...s.ui,
+              notifications,
+              notification: latest
+                ? {
+                    type: latest.type,
+                    message: latest.message,
+                    actions: latest.actions,
+                  }
+                : null,
+            },
+          };
+        }),
 
       // Bumps a counter the AppUpdateNotification listens for, so any
       // surface (e.g. Dashboard) can trigger a manual update check through
@@ -844,6 +918,7 @@ export const useTransferStore = create<TransferStore>()(
           ui: {
             ...s.ui,
             notification: null,
+            notifications: [],
             wsError: null,
             completedSnapshot: null,
             lastCompletedSessionId: null,
@@ -871,6 +946,7 @@ export const useTransferStore = create<TransferStore>()(
             ...s.ui,
             currentPage: "dashboard" as const,
             notification: null,
+            notifications: [],
             wsError: null,
             completedSnapshot: null,
             lastCompletedSessionId: null,

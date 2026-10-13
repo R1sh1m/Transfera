@@ -310,9 +310,14 @@ jobs:
           $platform = [ordered]@{ signature = $sigText; url = $url }
 
           # Extract actual release notes from git commit body, tag annotation, or commit range
-          $commitBody = (git log -1 --format=%b HEAD).Trim()
-          $commitSubject = (git log -1 --format=%s HEAD).Trim()
-          $tagMsg = (git tag -l --format='%(contents)' $tag).Trim()
+          # NOTE: multi-line git output arrives as Object[]; calling .Trim()
+          # on it member-enumerates to string[], which ConvertTo-Json emits
+          # as a JSON array. The Tauri updater expects notes:string (serde
+          # fails with "invalid type: sequence, expected a string"), so every
+          # git capture below is coerced to a single string via Out-String.
+          $commitBody = ((git log -1 --format=%b HEAD) | Out-String).Trim()
+          $commitSubject = ((git log -1 --format=%s HEAD) | Out-String).Trim()
+          $tagMsg = ((git tag -l --format='%(contents)' $tag) | Out-String).Trim()
           $notes = ""
           if ($commitBody -and $commitBody.Length -gt 5) {
             $notes = $commitBody
@@ -321,7 +326,7 @@ jobs:
           } else {
             $prevTag = (git describe --tags --abbrev=0 HEAD~1 2>$null)
             if ($prevTag) {
-              $notes = (git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges).Trim()
+              $notes = ((git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges) | Out-String).Trim()
             }
           }
           if (-not $notes) {
@@ -330,6 +335,10 @@ jobs:
           if (-not $notes) {
             $notes = "Transfera $version release"
           }
+          # Fail-closed guard: never let an array reach ConvertTo-Json as notes.
+          if ($notes -is [array]) { $notes = ($notes -join "`n").Trim() }
+          if ($notes -isnot [string]) { $notes = [string]$notes }
+          if (-not ($notes -is [string])) { Write-Error "Release notes did not resolve to a single string"; exit 1 }
           Write-Host "Resolved release notes: $notes"
 
           $notesPath = Join-Path $releaseDir "RELEASE_NOTES.md"

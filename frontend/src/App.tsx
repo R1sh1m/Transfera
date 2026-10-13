@@ -152,101 +152,119 @@ const notifIcons: Record<
 };
 
 function NotificationToast() {
-  const notification = useTransferStore((s) => s.ui.notification);
-  const clearNotification = useTransferStore((s) => s.clearNotification);
+  const notifications = useTransferStore((s) => s.ui.notifications);
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end pointer-events-none">
+      <AnimatePresence mode="popLayout">
+        {notifications.map((n) => (
+          <NotificationCard key={n.id} notification={n} />
+        ))}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function NotificationCard({
+  notification,
+}: {
+  notification: {
+    id: string;
+    type: "success" | "error" | "warning" | "info";
+    message: string;
+    actions?: { id: string; label: string; primary?: boolean }[];
+  };
+}) {
+  const dismissNotification = useTransferStore((s) => s.dismissNotification);
   const [expanded, setExpanded] = useState(false);
 
-  // Notifications dismiss themselves after 100 s; a new notification
-  // restarts the clock and collapses any expanded text.
+  // Each toast owns its timer: a new arrival never resets or kills others.
+  // Success/info auto-dismiss quickly; errors/warnings linger.
   useEffect(() => {
-    if (!notification) return;
-    setExpanded(false);
-    const t = setTimeout(clearNotification, 100_000);
+    const delay =
+      notification.type === "success" || notification.type === "info"
+        ? 8_000
+        : 15_000;
+    const t = setTimeout(() => dismissNotification(notification.id), delay);
     return () => clearTimeout(t);
-  }, [notification, clearNotification]);
+  }, [notification.id, notification.type, dismissNotification]);
 
-  const message = notification?.message ?? "";
+  const message = notification.message;
   const long = message.length > 180;
 
   return (
-    <AnimatePresence>
-      {notification && (
-        <motion.div
-          initial={{ opacity: 0, y: 20, x: 20 }}
-          animate={{ opacity: 1, y: 0, x: 0 }}
-          exit={{ opacity: 0, y: 20 }}
-          onClick={() => {
-            if (long) setExpanded((e) => !e);
-          }}
-          title={
-            long
-              ? expanded
-                ? "Click to collapse"
-                : "Click to expand"
-              : undefined
-          }
-          className={cn(
-            "fixed bottom-4 right-4 z-50 glass rounded-lg p-3 flex items-center gap-3 max-w-md",
-            long && "cursor-pointer",
-          )}
-        >
-          {notifIcons[notification.type]}
-          <p
-            className={cn(
-              "text-sm text-foreground flex-1 break-words [overflow-wrap:anywhere]",
-              !expanded && "line-clamp-3",
-              expanded && "max-h-[40vh] overflow-y-auto",
-            )}
-          >
-            {message}
-          </p>
-          {notification.actions && notification.actions.length > 0 && (
-            <div className="flex items-center gap-1.5 shrink-0">
-              {notification.actions.map((action) => (
-                <button
-                  key={action.id}
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    window.dispatchEvent(
-                      new CustomEvent("transfera:notification-action", {
-                        detail: { id: action.id },
-                      }),
-                    );
-                    clearNotification();
-                  }}
-                  className={cn(
-                    "px-3 py-1 rounded-pill text-xs font-normal active:scale-[0.95] transition-all",
-                    action.primary
-                      ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                      : "border border-border text-foreground hover:bg-muted",
-                  )}
-                >
-                  {action.label}
-                </button>
-              ))}
-            </div>
-          )}
-          {long && (
-            <ChevronDown
-              className={cn(
-                "w-3.5 h-3.5 shrink-0 text-muted-foreground transition-transform",
-                expanded && "rotate-180",
-              )}
-            />
-          )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              clearNotification();
-            }}
-            className="p-1 rounded hover:bg-muted text-muted-foreground shrink-0"
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </motion.div>
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 16, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 8, scale: 0.96 }}
+      transition={{ duration: 0.2 }}
+      onClick={() => {
+        if (long) setExpanded((e) => !e);
+      }}
+      title={
+        long ? (expanded ? "Click to collapse" : "Click to expand") : undefined
+      }
+      className={cn(
+        "pointer-events-auto glass rounded-lg p-3 flex items-center gap-3 w-[min(28rem,calc(100vw-2rem))]",
+        long && "cursor-pointer",
       )}
-    </AnimatePresence>
+    >
+      {notifIcons[notification.type]}
+      <p
+        className={cn(
+          "text-sm text-foreground flex-1 break-words [overflow-wrap:anywhere]",
+          !expanded && "line-clamp-3",
+          expanded && "max-h-[40vh] overflow-y-auto",
+        )}
+      >
+        {message}
+      </p>
+      {notification.actions && notification.actions.length > 0 && (
+        <div className="flex items-center gap-1.5 shrink-0">
+          {notification.actions.map((action) => (
+            <button
+              key={action.id}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                window.dispatchEvent(
+                  new CustomEvent("transfera:notification-action", {
+                    detail: { id: action.id },
+                  }),
+                );
+                dismissNotification(notification.id);
+              }}
+              className={cn(
+                "px-3 py-1 rounded-pill text-xs font-normal active:scale-[0.95] transition-all",
+                action.primary
+                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                  : "border border-border text-foreground hover:bg-muted",
+              )}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {long && (
+        <ChevronDown
+          className={cn(
+            "w-3.5 h-3.5 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+      )}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          dismissNotification(notification.id);
+        }}
+        className="p-1 rounded hover:bg-muted text-muted-foreground shrink-0"
+      >
+        <X className="w-3 h-3" />
+      </button>
+    </motion.div>
   );
 }
 
