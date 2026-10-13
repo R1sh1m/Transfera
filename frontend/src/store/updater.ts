@@ -363,9 +363,12 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       }
       const msg = updaterErrorMessage(err, "Failed to check for updates.");
       if (manual) {
+        // Single surface for check failures: the AppUpdateNotification error
+        // card (title + settings shortcut + dismiss) renders from this
+        // status. Do NOT also push a store toast here — same text in both the
+        // banner (bottom-6 right-6) and the toast stack (bottom-4 right-4)
+        // renders as two overlapping cards.
         set({ status: "error", errorMessage: msg });
-        const { useTransferStore } = await import("@/store/transfer");
-        useTransferStore.getState().showNotification("error", msg);
       } else {
         set({ status: "idle" });
       }
