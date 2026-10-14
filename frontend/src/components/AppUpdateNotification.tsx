@@ -28,6 +28,7 @@ export default function AppUpdateNotification() {
   const installAndRestart = useUpdaterStore((s) => s.installAndRestart);
   const dismiss = useUpdaterStore((s) => s.dismiss);
   const setIsSettingsOpen = useUpdaterStore((s) => s.setIsSettingsOpen);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
 
   const [notesExpanded, setNotesExpanded] = useState(false);
 
@@ -47,7 +48,13 @@ export default function AppUpdateNotification() {
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-full bg-action/10 text-action flex items-center justify-center shrink-0">
+            <div
+              className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                status === "error"
+                  ? "bg-destructive/10 text-destructive"
+                  : "bg-action/10 text-action"
+              }`}
+            >
               {status === "error" ? (
                 <AlertCircle className="w-4 h-4 text-destructive" />
               ) : (
@@ -63,19 +70,26 @@ export default function AppUpdateNotification() {
                 {status === "installing" && `Installing update...`}
                 {status === "error" && `Update check issue`}
               </p>
-              <p className="text-[11px] text-muted-foreground mt-0.5 leading-tight">
-                {status === "available" &&
-                  "A new version with the latest features is available."}
-                {status === "downloading" &&
-                  (downloadProgress !== null
-                    ? `${downloadProgress}% downloaded in background`
-                    : "Downloading in background...")}
-                {status === "downloaded" &&
-                  "Restart Transfera to apply the update and enjoy the latest features."}
-                {status === "installing" && "Relaunching Transfera..."}
-                {status === "error" &&
-                  (errorMessage || "Could not complete update check.")}
-              </p>
+              {status === "error" ? (
+                <p
+                  className="text-[11px] text-muted-foreground mt-0.5 leading-tight break-words line-clamp-3 overflow-hidden"
+                  title={errorMessage || "Could not complete update check."}
+                >
+                  {errorMessage || "Could not complete update check."}
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground mt-0.5 leading-tight">
+                  {status === "available" &&
+                    "A new version with the latest features is available."}
+                  {status === "downloading" &&
+                    (downloadProgress !== null
+                      ? `${downloadProgress}% downloaded in background`
+                      : "Downloading in background...")}
+                  {status === "downloaded" &&
+                    "Restart Transfera to apply the update and enjoy the latest features."}
+                  {status === "installing" && "Relaunching Transfera..."}
+                </p>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-1">
@@ -204,6 +218,26 @@ export default function AppUpdateNotification() {
           <div className="flex items-center justify-center py-0.5 text-xs text-muted-foreground gap-1.5">
             <RefreshCw className="w-3.5 h-3.5 animate-spin text-action" />
             <span>Restarting Transfera...</span>
+          </div>
+        )}
+
+        {status === "error" && (
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={dismiss}
+              className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-pill hover:bg-muted transition-colors active:scale-[0.95]"
+            >
+              Dismiss
+            </button>
+            <button
+              type="button"
+              onClick={() => checkForUpdates(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-action text-white text-xs font-normal rounded-pill hover:bg-action/90 active:scale-[0.95] transition-all shadow-xs"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Retry
+            </button>
           </div>
         )}
       </motion.div>

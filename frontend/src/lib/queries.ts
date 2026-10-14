@@ -466,7 +466,9 @@ export function useSessionBatches(sessionId: number | null) {
       );
       return data;
     },
-    enabled: shouldPoll,
+    // Fetch once even for terminal sessions (View-option detail needs the
+    // data); only live sessions keep polling.
+    enabled: sessionId !== null,
     refetchInterval: shouldPoll ? 3000 : false,
   });
 }
@@ -489,8 +491,11 @@ export function useSessionProgress(sessionId: number | null) {
       );
       return data;
     },
-    enabled: shouldPoll,
-    refetchInterval: isRunning ? 500 : 2000,
+    enabled: sessionId !== null,
+    // One-shot fetch for terminal sessions (View-option detail needs the
+    // data); live sessions keep polling. updateFromPolling preserves the
+    // terminal status, so hydrating from this data is safe.
+    refetchInterval: shouldPoll ? (isRunning ? 500 : 2000) : false,
     staleTime: 0,
   });
 }

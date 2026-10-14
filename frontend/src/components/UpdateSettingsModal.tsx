@@ -226,7 +226,12 @@ export default function UpdateSettingsModal() {
               {status === "error" && (
                 <div className="flex items-center gap-2 text-xs text-destructive pt-1 border-t border-border/50">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>
+                  <span
+                    className="break-words line-clamp-3 overflow-hidden"
+                    title={
+                      errorMessage || "Unable to check for updates right now."
+                    }
+                  >
                     {errorMessage || "Unable to check for updates right now."}
                   </span>
                 </div>

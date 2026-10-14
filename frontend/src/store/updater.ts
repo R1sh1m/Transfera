@@ -6,6 +6,9 @@
 
 import { create } from "zustand";
 import { isTauri, restartApp, showNotification } from "@/lib/desktop";
+import { updaterErrorMessage } from "./updaterErrors";
+
+export { updaterErrorMessage };
 
 export type UpdateStatus =
   | "idle"
@@ -68,38 +71,6 @@ function getInitialNum(key: string): number | null {
   } catch {
     return null;
   }
-}
-
-function updaterErrorMessage(err: unknown, fallback: string): string {
-  let raw: string | null = null;
-  if (err instanceof Error && err.message) raw = err.message;
-  else if (typeof err === "string" && err) raw = err;
-  else {
-    try {
-      const s = JSON.stringify(err);
-      if (s && s !== "{}" && s !== "null") raw = s;
-    } catch {
-      /* fall through */
-    }
-  }
-  if (raw) {
-    const lower = raw.toLowerCase();
-    // Map the updater-plugin ordering error to friendly copy.
-    // Raw detail stays in console (callers log `err`); toast/store only gets friendly text.
-    // Narrow match: broader "download" text would mislabel check/network
-    // failures (which trigger no retry) as a re-download in progress.
-    if (lower.includes("install called before")) {
-      return "The update wasn't fully downloaded. Trying the download again.";
-    }
-    // Map updater-manifest deserialization failures (e.g. serde
-    // "invalid type: sequence, expected a string" when notes is a JSON
-    // array) to friendly copy. Raw detail stays in console.
-    if (lower.includes("invalid type") || lower.includes("expected a string")) {
-      return "Couldn't read the update info from the release server. Please try again later.";
-    }
-    return raw;
-  }
-  return fallback;
 }
 
 /** Returns true if notes are empty, just the app name/version, or a generic placeholder. */

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -241,6 +242,75 @@ def _cleanup_session_state(session_id: int) -> None:
     _cancellation_events.pop(session_id, None)
     _session_locks.pop(session_id, None)  # Q-5 fix: prevent unbounded dict growth
     _session_scan_reuse.pop(session_id, None)
+
+
+_TERMINAL_SESSION_STATUSES: frozenset[str] = frozenset()
+_YEAR_SEGMENT_RE = re.compile(r"^(19|20)\d{2}$")
+
+
+def _terminal_session_statuses() -> frozenset[str]:
+    """Lazily resolve terminal statuses (avoids import-order issues)."""
+    global _TERMINAL_SESSION_STATUSES
+    if not _TERMINAL_SESSION_STATUSES:
+        _TERMINAL_SESSION_STATUSES = frozenset(
+            {
+                SessionStatus.COMPLETED.value,
+                SessionStatus.COMPLETED_WITH_ERRORS.value,
+                SessionStatus.FAILED.value,
+                SessionStatus.CANCELLED.value,
+            }
+        )
+    return _TERMINAL_SESSION_STATUSES
+
+
+def _is_session_delete_blocked(status: str | None, session_id: int) -> bool:
+    """Return True only when a session delete must be refused with 409.
+
+    Terminal sessions (COMPLETED / COMPLETED_WITH_ERRORS / FAILED /
+    CANCELLED) are always deletable — any leftover ``_active_tasks`` entry
+    or held lock for them is stale bookkeeping, evicted here so a
+    completed session never 409s. Only genuinely running work blocks.
+    """
+    if status in _terminal_session_statuses():
+        # Evict stale bookkeeping so it can never 409 a later request.
+        _active_tasks.pop(session_id, None)
+        return False
+    if status == SessionStatus.RUNNING.value:
+        return True
+    if session_id in _active_tasks:
+        return True
+    lock = _session_locks.get(session_id)
+    return lock is not None and lock.locked()
+
+
+def _normalize_dest_root(dest_root: str) -> str:
+    """Collapse a doubled trailing year (``.../2026/2026`` -> ``.../2026``).
+
+    The organizer already avoids duplicating a year *folder* at file
+    placement time, but the stored ``dest_root`` itself was saved verbatim —
+    so a second backup that re-appended the year produced a doubled path in
+    the session record and Dashboard. Normalizing once at session creation
+    keeps the stored value canonical without touching placement logic.
+    Only an exact duplicate 4-digit year tail is collapsed; anything else
+    (e.g. ``.../2026/10 - October``) is returned unchanged.
+    """
+    if not dest_root:
+        return dest_root
+    stripped = dest_root.rstrip("/\\")
+    # Preserve UNC / drive-root trailing separators implicitly by re-adding
+    # nothing — normpath-style handling is done by callers via abspath.
+    parts = re.split(r"[\\/]+", stripped)
+    if len(parts) >= 2 and _YEAR_SEGMENT_RE.match(parts[-1] or "") and parts[-1] == parts[-2]:
+        collapsed = "/".join(parts[:-1]) if "/" in stripped and "\\" not in stripped else "\\".join(parts[:-1])
+        # Keep Windows drive-letter form (``D:`` -> ``D:\\...`` joins
+        # naturally via backslash) and POSIX leading slash.
+        if stripped.startswith("\\\\"):
+            collapsed = "\\\\" + collapsed.lstrip("\\")
+        elif stripped.startswith("/") and not collapsed.startswith("/"):
+            collapsed = "/" + collapsed
+        logger.info("Normalized dest_root %r -> %r (collapsed duplicate year)", dest_root, collapsed)
+        return collapsed
+    return dest_root
 
 
 # ---------------------------------------------------------------------------
@@ -1584,10 +1654,15 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
     if os.path.normpath(source_root_str) == os.path.normpath(req.dest_root):
         raise HTTPException(status_code=400, detail="Source and destination cannot be the same directory")
 
+    # Normalize a doubled trailing year (Issue B: second backup saved
+    # ``D:\transferred\2026\2026``). Placement logic is untouched — only the
+    # stored dest_root is canonicalized.
+    dest_root_normalized = _normalize_dest_root(req.dest_root)
+
     # Fail fast only on structural problems here; source-exists is checked
     # at start time (preflight) so sessions can be created before a device
     # is plugged in or a network path is mounted.
-    dest_resolved = os.path.abspath(req.dest_root)
+    dest_resolved = os.path.abspath(dest_root_normalized)
     if os.path.exists(dest_resolved) and not os.path.isdir(dest_resolved):
         raise HTTPException(status_code=400, detail="Destination path exists and is not a directory")
     try:
@@ -1601,7 +1676,7 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
         ts = TransferSession(
             session_name=req.session_name,
             source_root=source_root_str,
-            dest_root=req.dest_root,
+            dest_root=dest_root_normalized,
             transfer_mode=req.transfer_mode,
             only_new_mode=req.only_new_since_last_import,
             folder_layout=req.folder_layout,
@@ -1657,7 +1732,7 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
                     "Session %d created: source_root=%s dest_root=%s selected=%d samples=%s%s",
                     ts.id,
                     source_root_str[:260],
-                    req.dest_root[:260],
+                    dest_root_normalized[:260],
                     len(normalized),
                     _sample_display,
                     f" serials=[{'; '.join(_serial_notes)}]" if _serial_notes else "",
@@ -1875,18 +1950,15 @@ async def clear_sessions(
 
         # Active-transfer guard (selective path only — fail-closed, delete none).
         # Leave the unfiltered clear-all path behavior exactly as-is.
+        # Terminal sessions are always deletable: _is_session_delete_blocked
+        # evicts stale task bookkeeping for them, so deleting a completed
+        # session never 409s. Only genuinely running transfers refuse.
         if selective:
             refused: list[int] = []
             for s in sessions_to_delete:
-                if s.status == SessionStatus.RUNNING.value:
+                if _is_session_delete_blocked(s.status, s.id):
                     refused.append(s.id)
                     continue
-                if s.id in _active_tasks:
-                    refused.append(s.id)
-                    continue
-                lock = _session_locks.get(s.id)
-                if lock is not None and lock.locked():
-                    refused.append(s.id)
             # Also refuse requested ids with in-flight work but no DB row match
             # (defensive: task/lock present for an id not returned above).
             matched_ids = {s.id for s in sessions_to_delete}
@@ -2908,6 +2980,7 @@ async def _phase_finalize(session_id: int) -> None:
                     session_id,
                 )
                 _active_tasks.pop(session_id, None)
+                _cleanup_session_state(session_id)
                 return
 
             result = await session.execute(select(MediaItem).where(MediaItem.session_id == session_id))
@@ -2918,6 +2991,22 @@ async def _phase_finalize(session_id: int) -> None:
 
             ts.completed_items = completed_count
             ts.failed_items = failed_count
+
+            # Reconcile cumulative display counters (Issue A): several paths
+            # mark rows COMPLETED without bumping ts.cached_files /
+            # ts.imported_files (resume re-verify skips the delta via the
+            # was_completed guard, ARCHIVED recovery verifies in place,
+            # duplicate-skip marks COMPLETED directly). The detail view reads
+            # those cumulatives, so a session could show 25/25 in the list
+            # but 0/25 Cached/Transferred. Clamp upward to the verified row
+            # count — never downward, so genuinely re-counted runs keep
+            # their exact totals and double-counting is impossible.
+            if (ts.cached_files or 0) < completed_count:
+                ts.cached_files = completed_count
+            if (ts.imported_files or 0) < completed_count:
+                ts.imported_files = completed_count
+            if (ts.failed_files or 0) < failed_count:
+                ts.failed_files = failed_count
 
             volume_result = await session.execute(
                 select(func.sum(MediaItem.file_size)).where(

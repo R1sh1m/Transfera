@@ -412,10 +412,21 @@ function PreviewThumbnail({
 function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
   const status = useTransferStore((s) => s.transfer.status);
   const storeSessionId = useTransferStore((s) => s.transfer.sessionId);
+  // Store counters as fallback totals: when viewing a terminal session the
+  // progress one-shot fetch may still be in flight (or fail), but the store
+  // is hydrated from session/progress by TransferPage effects.
+  const storeTotal =
+    useTransferStore((s) => s.transfer.totalFiles || s.transfer.totalItems) ||
+    0;
+  const storeDone =
+    useTransferStore(
+      (s) => s.transfer.importedFiles || s.transfer.completedItems,
+    ) || 0;
   const sessionId = progress?.session_id ?? storeSessionId;
   const completedItems =
-    progress?.imported_files ?? progress?.completed_items ?? 0;
-  const totalItems = progress?.total_files ?? progress?.total_items ?? 0;
+    progress?.imported_files ?? progress?.completed_items ?? storeDone;
+  const totalItems =
+    progress?.total_files ?? progress?.total_items ?? storeTotal;
   const isRunning = status === "running";
 
   // Get session source info for device preview fallback
@@ -475,8 +486,9 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
 
   const fallbackFiles = useMemo<RecentItemProgress[]>(() => {
     if (recentFiles.length > 0) return [];
-    if (!progress) return [];
-    const total = progress.total_files ?? progress.total_items ?? 0;
+    // Prefer progress totals, fall back to hydrated store counters so the
+    // completed-session preview renders even if progress is still loading.
+    const total = progress?.total_files ?? progress?.total_items ?? storeTotal;
     if (total <= 0) return [];
     return (fallbackData?.items ?? [])
       .map((item) => ({
@@ -492,7 +504,7 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
           new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
       )
       .slice(0, 30);
-  }, [recentFiles.length, progress, fallbackData]);
+  }, [recentFiles.length, progress, fallbackData, storeTotal]);
 
   const displayFiles = recentFiles.length > 0 ? recentFiles : fallbackFiles;
 
@@ -1320,13 +1332,19 @@ export default function TransferPage() {
     };
   }, []);
 
-  // Sync session data into store once on mount (initial values from REST)
+  // Sync session data into store once on mount (initial values from REST).
+  // When entering via View on a terminal session, progress data may already
+  // be cached (one-shot fetch) — hydrate counters immediately after
+  // initTransfer resets them, so the detail never shows 0/0. The reverse
+  // order (progress arriving later) is covered by the polling-sync effect
+  // below. updateFromPolling preserves terminal status, so this is safe.
   useEffect(() => {
     if (session && !initialisedRef.current) {
       initialisedRef.current = true;
       initTransfer(session);
+      if (progress) updateFromPolling(progress);
     }
-  }, [session, initTransfer]);
+  }, [session, progress, initTransfer, updateFromPolling]);
 
   // Auto-start: when a fresh session (status 'created') is loaded, immediately
   // call the start endpoint so the user doesn't need to click "Start" manually.
