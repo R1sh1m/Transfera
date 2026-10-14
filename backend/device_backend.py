@@ -507,9 +507,29 @@ class Tier2Backend(DeviceBackend):
             return await resp.read()
 
     async def read_partial(self, serial: str, path: str, max_bytes: int) -> bytes | None:
-        # No range endpoint on the bridge: full download, prefix-kept.
-        # Same bytes a full thumbnail read would use today, just truncated
-        # before the EXIF/Pillow stage.
+        # Range-first prefix read (audit item 2): ask the bridge for only the
+        # first max_bytes via HTTP Range so thumbnails/EXIF never pay a full
+        # download. Falls back to full-download-truncate on bridges without
+        # Range support. Same bytes as before, just cheaper.
+        try:
+            import aiohttp
+
+            capped = max(0, int(max_bytes))
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    f"{self._bridge_url}/api/ios-devices/file/{_url_quote(serial, safe='')}{path}",
+                    headers={"Range": f"bytes=0-{capped - 1}"} if capped > 0 else {},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp,
+            ):
+                if resp.status in (200, 206):
+                    data = await resp.read()
+                    if data:
+                        return data[:capped] if len(data) > capped else data
+                    return None
+        except Exception:
+            pass
         try:
             data = await self.read_file(serial, path)
         except Exception:
@@ -529,6 +549,12 @@ class Tier2Backend(DeviceBackend):
 # ---------------------------------------------------------------------------
 # Bridge file reader (Tier 2 streaming)
 # ---------------------------------------------------------------------------
+# Streaming reads are capped (audit item 5): a wedged bridge must fail the
+# file, never buffer an unbounded response into memory.
+_BRIDGE_MAX_READ_BYTES = 512 * 1024 * 1024
+_BRIDGE_CLOSE_TIMEOUT_S = 2.0
+
+
 class _BridgeFileReader:
     """Async file reader that streams from the WSL bridge instead of buffering the entire file."""
 
@@ -573,20 +599,41 @@ class _BridgeFileReader:
         if self._resp is None:
             return b""
         if n == -1:
-            chunk = await self._resp.content.read()
+            # Stream with a hard cap so a misbehaving bridge cannot OOM us.
+            chunks: list[bytes] = []
+            total = 0
+            while total < _BRIDGE_MAX_READ_BYTES:
+                want = min(4 * 1024 * 1024, _BRIDGE_MAX_READ_BYTES - total)
+                chunk = await self._resp.content.read(want)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                self._pos += len(chunk)
+            return b"".join(chunks)
         elif n <= 0:
             return b""
         else:
+            n = min(n, _BRIDGE_MAX_READ_BYTES - self._pos) if self._pos < _BRIDGE_MAX_READ_BYTES else 0
+            if n <= 0:
+                return b""
             chunk = await self._resp.content.read(n)
-        self._pos += len(chunk)
-        return chunk
+            self._pos += len(chunk)
+            return chunk
 
-    async def close(self):
+    async def close(self, lock_timeout: float = _BRIDGE_CLOSE_TIMEOUT_S):
+        """Bounded teardown (audit item 5): never hang shutdown on a wedged bridge."""
         if self._resp is not None:
-            self._resp.close()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self._resp.close), timeout=lock_timeout)
+            except Exception:
+                pass
             self._resp = None
         if self._session is not None:
-            await self._session.close()
+            try:
+                await asyncio.wait_for(self._session.close(), timeout=lock_timeout)
+            except Exception:
+                pass
             self._session = None
         self._pos = 0
 

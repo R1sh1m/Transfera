@@ -146,6 +146,16 @@ class SessionInfo(BaseModel):
     total_bytes_volume: int | None = None
     session_report_path: str | None = None
     error_message: str | None = None
+    # Split error: short user-facing text stays in error_message; machine
+    # detail (samples/serials/cutoff/counts) is exposed here (optional,
+    # backward-compatible — older clients simply ignore it).
+    error_debug_detail: str | None = None
+    # Scan diagnostics persisted even on FAILED 0-match sessions.
+    scan_scanned_total: int = 0
+    scan_skipped_by_cutoff: int = 0
+    scan_walk_total: int = 0
+    scan_cutoff_iso: str | None = None
+    scan_serial_verdict: str | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
@@ -310,6 +320,7 @@ class PersonSchema(BaseModel):
     cover_face_id: int | None = None
     cover_media_id: int | None = None
     cover_thumbnail_url: str | None = None
+    cover_bbox: list[float] | None = None
     hidden: bool = False
 
 
@@ -434,13 +445,16 @@ class PrescanCandidate(BaseModel):
 
 
 class PrescanRequest(BaseModel):
-    candidates: list[PrescanCandidate]
+    candidates: list[PrescanCandidate] = []
+    scan_id: str | None = None
 
 
 class PrescanResponse(BaseModel):
     checked: int = 0
     likely_duplicate_count: int = 0
     likely_duplicate_paths: list[str] = []
+    new_count: int = 0
+    new_paths: list[str] = []
 
 
 class DuplicateCheckRequest(BaseModel):
@@ -543,6 +557,12 @@ class PreflightValidateRequest(BaseModel):
     source_path: str = Field("", description="Source directory to measure (legacy)")
     source_ref: SourceRef | None = Field(None, description="Typed source reference (preferred)")
     dest_path: str = Field(..., min_length=1, description="Destination drive/directory to check free space")
+    scan_id: str | None = Field(
+        None,
+        description="Optional scan_id from GET /api/device/ios-preview: when its snapshot "
+        "is still fresh the device walk is skipped and frozen totals are reused. "
+        "Additive-only — absent falls back to a full walk with no shape change.",
+    )
 
     @field_validator("source_path", "dest_path")
     @classmethod

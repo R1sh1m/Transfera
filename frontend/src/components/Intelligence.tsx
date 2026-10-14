@@ -27,19 +27,20 @@ import {
   useModelStatus,
   useMoments,
   usePeople,
+  usePersonFaces,
   useRenamePerson,
   useResolveDuplicateGroup,
   useSemanticSearch,
   useTimeline,
 } from "@/lib/queries";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
-import apiClient from "@/lib/api-client";
+import apiClient, { API_BASE_URL } from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
 import {
   useBackendReady,
   ENGINE_WAITING_LABEL,
 } from "@/hooks/use-backend-ready";
-import type { Moment } from "@/types/api";
+import type { Moment, Person } from "@/types/api";
 
 function Thumb({
   id,
@@ -80,6 +81,63 @@ function Thumb({
       alt={label}
       className="aspect-square rounded-lg object-cover w-full"
       loading="lazy"
+    />
+  );
+}
+
+/** Face-crop thumbnail for a person cover.
+ *  Tries GET /api/faces/{face_id}/thumbnail first (backend lane); on any
+ *  error degrades gracefully to the full-image Thumb, then initials.
+ *  cover_bbox is accepted for forward-compat and ignored until the backend
+ *  serves cropped covers (graceful degradation per contract). */
+export function FaceThumb({
+  faceId,
+  mediaId,
+  mediaUrl,
+  bbox,
+  label,
+  className,
+}: {
+  faceId?: number | null;
+  mediaId?: number | null;
+  mediaUrl?: string | null;
+  bbox?: number[] | null;
+  label: string;
+  className?: string;
+}) {
+  void bbox;
+  const [faceFailed, setFaceFailed] = useState(false);
+  useEffect(() => {
+    setFaceFailed(false);
+  }, [faceId]);
+  const initials = label
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  if (faceId == null || faceFailed) {
+    if (mediaId != null) {
+      return <Thumb id={mediaId} url={mediaUrl} label={label} />;
+    }
+    return (
+      <div
+        className={
+          className ??
+          "aspect-square rounded-lg bg-muted flex items-center justify-center text-lg font-semibold text-muted-foreground"
+        }
+      >
+        {initials || label}
+      </div>
+    );
+  }
+  return (
+    <img
+      src={`${API_BASE_URL}/api/faces/${faceId}/thumbnail`}
+      alt={label}
+      loading="lazy"
+      onError={() => setFaceFailed(true)}
+      className={className ?? "aspect-square object-cover rounded-lg w-full"}
     />
   );
 }
@@ -637,17 +695,13 @@ export function PeoplePanel({
                 title={`Filter library to ${displayName}`}
                 className="block w-full text-left active:scale-[0.98] transition-transform cursor-pointer disabled:opacity-60"
               >
-                {p.cover_media_id != null ? (
-                  <Thumb
-                    id={p.cover_media_id}
-                    url={p.cover_thumbnail_url}
-                    label={initials}
-                  />
-                ) : (
-                  <div className="aspect-square rounded-lg bg-muted flex items-center justify-center text-lg font-semibold text-muted-foreground">
-                    {initials}
-                  </div>
-                )}
+                <FaceThumb
+                  faceId={p.cover_face_id}
+                  mediaId={p.cover_media_id}
+                  mediaUrl={p.cover_thumbnail_url}
+                  bbox={p.cover_bbox}
+                  label={initials}
+                />
               </button>
               {editing === p.id ? (
                 <div className="mt-2 flex items-center gap-1">
@@ -685,6 +739,88 @@ export function PeoplePanel({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+export function PersonDetail({
+  personId,
+  onBack,
+}: {
+  personId: number;
+  onBack: () => void;
+}) {
+  const facesQuery = usePersonFaces(personId);
+  const { data: people } = usePeople();
+  const person: Person | undefined = people?.people.find(
+    (p) => p.id === personId,
+  );
+  const displayName = person?.name ?? `Person ${personId}`;
+  const faces = facesQuery.data?.faces ?? [];
+  // Dedupe media_ids — one card per photo, fetched directly via Thumb
+  // (never via the library vault filter).
+  const seen = new Set<number>();
+  const mediaCards: { media_id: number; thumbnail_url?: string | null }[] = [];
+  for (const f of faces) {
+    if (seen.has(f.media_id)) continue;
+    seen.add(f.media_id);
+    mediaCards.push({ media_id: f.media_id, thumbnail_url: f.thumbnail_url });
+  }
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 space-y-3">
+      <div className="flex items-center gap-3">
+        <div className="w-16 h-16 shrink-0 overflow-hidden">
+          <FaceThumb
+            faceId={person?.cover_face_id}
+            mediaId={person?.cover_media_id ?? mediaCards[0]?.media_id}
+            mediaUrl={
+              person?.cover_thumbnail_url ?? mediaCards[0]?.thumbnail_url
+            }
+            bbox={person?.cover_bbox}
+            label={displayName}
+            className="aspect-square object-cover rounded-lg w-16 h-16"
+          />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold truncate">{displayName}</div>
+          <div className="text-xs text-muted-foreground">
+            {facesQuery.isLoading
+              ? "Loading photos…"
+              : mediaCards.length === 1
+                ? "1 photo"
+                : `${mediaCards.length} photos`}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onBack}
+          className="px-3 py-1 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] shrink-0"
+        >
+          ← Back · Clear
+        </button>
+      </div>
+      {facesQuery.isLoading ? (
+        <div className="text-sm text-muted-foreground">Loading photos…</div>
+      ) : facesQuery.isError ? (
+        <div className="text-sm text-muted-foreground">
+          Couldn&apos;t load this person&apos;s photos.
+        </div>
+      ) : mediaCards.length === 0 ? (
+        <div className="text-sm text-muted-foreground">
+          No photos found for {displayName}.
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+          {mediaCards.map((m) => (
+            <Thumb
+              key={m.media_id}
+              id={m.media_id}
+              url={m.thumbnail_url}
+              label={`#${m.media_id}`}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

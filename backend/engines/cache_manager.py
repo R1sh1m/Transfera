@@ -135,6 +135,10 @@ except ImportError:
 # and iOS Live Photo coalescing delays.
 HOP1_MAX_RETRIES: int = 2
 HOP1_RETRY_BASE_DELAY: float = 1.0  # seconds; multiplied by attempt number
+HOP1_RETRY_MAX_DELAY: float = 8.0  # cap so backoff never stalls a batch
+# Single per-file deadline budget through the retry loop (audit item 2):
+# retries share one budget instead of each getting a fresh timeout.
+HOP1_FILE_BUDGET_S: float = 300.0
 
 # Exception types (by name string) that are considered transient and safe to retry.
 # Using name-matching to avoid hard importing platform-specific exception types
@@ -214,6 +218,86 @@ def _is_transient_exc(exc: BaseException) -> bool:
             if klass.__name__ in _TRANSIENT_EXC_NAMES:
                 return True
     return False
+
+
+# --- Fail-fast no-retry markers (audit item 2) ---------------------------
+# Lock/trust/hash-mismatch/disk-full never clear on immediate retry: fail
+# fast instead of doubling the per-file latency with doomed retries.
+_NO_RETRY_MARKERS: tuple[str, ...] = (
+    "locked",
+    "not trusted",
+    "not paired",
+    "trust",
+    "pairing",
+    "passcode",
+    "hash mismatch",
+    "source hash mismatch",
+    "no space left",
+    "disk full",
+    "insufficient disk space",
+)
+
+
+def _is_no_retry_exc(exc: BaseException) -> bool:
+    """True when retrying cannot help (lock/trust/hash-mismatch/disk-full)."""
+    try:
+        from backend.device_backend import DeviceLockedError, DeviceNotTrustedError
+
+        if isinstance(exc, (DeviceLockedError, DeviceNotTrustedError)):
+            return True
+    except Exception:
+        pass
+    chain: list[BaseException] = [exc]
+    if exc.__cause__ is not None:
+        chain.append(exc.__cause__)
+    if exc.__context__ is not None:
+        chain.append(exc.__context__)
+    for e in chain:
+        if type(e).__name__ in ("DeviceLockedError", "DeviceNotTrustedError"):
+            return True
+        msg = str(e).lower()
+        if any(m in msg for m in _NO_RETRY_MARKERS):
+            return True
+    return False
+
+
+def _hop1_backoff_delay(attempt: int) -> float:
+    """Jittered capped backoff (audit item 2): base*2^(n-1), cap, ±25% jitter."""
+    import random as _random
+
+    raw = HOP1_RETRY_BASE_DELAY * (2 ** max(0, attempt - 1))
+    capped = min(raw, HOP1_RETRY_MAX_DELAY)
+    jitter = capped * _random.uniform(-0.25, 0.25)
+    return max(0.1, capped + jitter)
+
+
+# --- Memoized free-space checks (audit item 3) ---------------------------
+# One shutil.disk_usage stat per drive per TTL instead of one per file.
+_FREE_SPACE_MEMO_TTL_S = 30.0
+_free_space_memo: dict[str, tuple[float, bool, int, int]] = {}
+
+
+def _check_free_space_memoized(cache_dir: Path, needed: int) -> tuple[bool, int, int]:
+    """Memoized wrapper around durability.check_free_space (TTL 30 s per drive)."""
+    import time as _time
+
+    from backend.utils.durability import check_free_space as _check
+
+    try:
+        drive = str(Path(cache_dir).resolve().anchor or Path(cache_dir).resolve())
+    except Exception:
+        drive = str(cache_dir)
+    key = f"{drive}\x00{needed}"
+    now = _time.monotonic()
+    hit = _free_space_memo.get(key)
+    if hit is not None and (now - hit[0]) < _FREE_SPACE_MEMO_TTL_S:
+        return hit[1], hit[2], hit[3]
+    is_ok, free_b, req_b = _check(cache_dir, needed)
+    # Bound memo growth (one key per distinct size; cap at 64 entries).
+    if len(_free_space_memo) >= 64:
+        _free_space_memo.pop(next(iter(_free_space_memo)))
+    _free_space_memo[key] = (now, is_ok, free_b, req_b)
+    return is_ok, free_b, req_b
 
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
@@ -505,9 +589,9 @@ async def _cache_single_item(
     is_ios = is_ios_source(source_path)
 
     # Check available disk space on the cache drive before writing
-    from backend.utils.durability import check_free_space
-
-    is_ok, free_b, req_b = check_free_space(cache_dir, item.file_size or 0)
+    # (memoized per drive+size, 30 s TTL — audit item 3: one stat per batch,
+    # not one per file).
+    is_ok, free_b, req_b = _check_free_space_memoized(cache_dir, item.file_size or 0)
     if not is_ok:
         err = (
             f"Insufficient disk space on cache drive: {free_b // (1024 * 1024)}MB free, "
@@ -534,30 +618,43 @@ async def _cache_single_item(
                 logger.info("Cache hash mismatch for %s — re-caching", dst.name)
                 dst.unlink(missing_ok=True)
 
-        # Retry transient device errors for the USB/AFC read
+        # Retry transient device errors for the USB/AFC read: single
+        # per-file deadline budget shared across attempts (audit item 2),
+        # fail-fast no-retry on lock/trust/hash-mismatch, jittered backoff.
         dst.parent.mkdir(parents=True, exist_ok=True)
         from backend.device_backend import get_device_backend_manager
 
         backend_mgr = get_device_backend_manager()
         computed_hash = ""
         last_exc: BaseException | None = None
+        import time as _time
+
+        _budget_deadline = _time.monotonic() + HOP1_FILE_BUDGET_S
         for attempt in range(1, HOP1_MAX_RETRIES + 2):
             try:
                 # Re-create the file_reader on every retry attempt — stale handles
                 # can persist across a USB blip and must be recreated from scratch.
                 file_reader = backend_mgr.create_file_reader(serial, afc_path)
-                computed_hash = await _copy_and_hash(
-                    file_reader,
-                    partial,
-                    on_progress=on_progress,
-                    file_index=file_index,
-                    file_total=file_total,
+                _remaining = max(1.0, _budget_deadline - _time.monotonic())
+                computed_hash = await asyncio.wait_for(
+                    _copy_and_hash(
+                        file_reader,
+                        partial,
+                        on_progress=on_progress,
+                        file_index=file_index,
+                        file_total=file_total,
+                    ),
+                    timeout=_remaining,
                 )
                 last_exc = None
                 break
             except Exception as exc:
                 last_exc = exc
                 partial.unlink(missing_ok=True)
+                if _is_no_retry_exc(exc):
+                    logger.warning("iOS read fail-fast (no retry) for %s: %s", source_path, exc)
+                    await _mark_item_hop1(item, HopStatus.FAILED, f"iOS device read failed: {exc}")
+                    return (False, None)
                 if not _is_transient_exc(exc) or attempt > HOP1_MAX_RETRIES:
                     logger.error(
                         "iOS device read failed for %s after %d attempt(s): %s",
@@ -567,7 +664,10 @@ async def _cache_single_item(
                     )
                     await _mark_item_hop1(item, HopStatus.FAILED, f"iOS device read failed: {exc}")
                     return (False, None)
-                delay = HOP1_RETRY_BASE_DELAY * attempt
+                if _time.monotonic() >= _budget_deadline:
+                    logger.warning("iOS read budget exhausted for %s after %d attempt(s)", source_path, attempt)
+                    break
+                delay = _hop1_backoff_delay(attempt)
                 logger.warning(
                     "Transient iOS read error for %s (attempt %d/%d) — retrying in %.1fs: %s",
                     source_path,
@@ -618,23 +718,35 @@ async def _cache_single_item(
                 dst.unlink(missing_ok=True)
 
         # Retry transient device errors for local/USB device reads
+        # (same budget + fail-fast + jittered backoff as the iOS path).
         dst.parent.mkdir(parents=True, exist_ok=True)
         last_exc = None
         computed_hash = ""
+        import time as _time2
+
+        _budget_deadline2 = _time2.monotonic() + HOP1_FILE_BUDGET_S
         for attempt in range(1, HOP1_MAX_RETRIES + 2):
             try:
-                computed_hash = await _copy_and_hash(
-                    src,
-                    partial,
-                    on_progress=on_progress,
-                    file_index=file_index,
-                    file_total=file_total,
+                _remaining2 = max(1.0, _budget_deadline2 - _time2.monotonic())
+                computed_hash = await asyncio.wait_for(
+                    _copy_and_hash(
+                        src,
+                        partial,
+                        on_progress=on_progress,
+                        file_index=file_index,
+                        file_total=file_total,
+                    ),
+                    timeout=_remaining2,
                 )
                 last_exc = None
                 break
             except Exception as exc:
                 last_exc = exc
                 partial.unlink(missing_ok=True)
+                if _is_no_retry_exc(exc):
+                    logger.warning("Local read fail-fast (no retry) for %s: %s", source_path, exc)
+                    await _mark_item_hop1(item, HopStatus.FAILED, str(exc))
+                    return (False, None)
                 if not _is_transient_exc(exc) or attempt > HOP1_MAX_RETRIES:
                     logger.error(
                         "Local file read failed for %s after %d attempt(s): %s",
@@ -644,7 +756,10 @@ async def _cache_single_item(
                     )
                     await _mark_item_hop1(item, HopStatus.FAILED, str(exc))
                     return (False, None)
-                delay = HOP1_RETRY_BASE_DELAY * attempt
+                if _time2.monotonic() >= _budget_deadline2:
+                    logger.warning("Local read budget exhausted for %s after %d attempt(s)", source_path, attempt)
+                    break
+                delay = _hop1_backoff_delay(attempt)
                 logger.warning(
                     "Transient local read error for %s (attempt %d/%d) — retrying in %.1fs: %s",
                     source_path,

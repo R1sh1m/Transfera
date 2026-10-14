@@ -41,6 +41,55 @@ logger = logging.getLogger(__name__)
 MAX_IMMEDIATE_RETRIES = 2
 COPY_CONCURRENCY = 4  # safe for HDD; increase to 8 for NVMe source
 
+# Post-copy verification sampling (audit item 3): the streaming copy-hash is
+# the truth — re-reading every destination from disk doubles disk I/O. Only
+# re-read when the copy-hash already mismatched (handled by the retry loop)
+# or on a 1-in-N sample for silent-corruption detection.
+_POST_COPY_SAMPLE_EVERY = 20
+
+# Memoized destination free-space checks (audit item 3): one stat per drive
+# per TTL instead of one per file.
+_DEST_FREE_MEMO_TTL_S = 30.0
+_dest_free_memo: dict[str, tuple[float, bool, int, int]] = {}
+
+
+def _check_dest_free_memoized(dest_root: Path, needed: int) -> tuple[bool, int, int]:
+    import time as _time
+
+    from backend.utils.durability import check_free_space as _check
+
+    try:
+        drive = str(Path(dest_root).resolve().anchor or Path(dest_root).resolve())
+    except Exception:
+        drive = str(dest_root)
+    key = f"{drive}\x00{needed}"
+    now = _time.monotonic()
+    hit = _dest_free_memo.get(key)
+    if hit is not None and (now - hit[0]) < _DEST_FREE_MEMO_TTL_S:
+        return hit[1], hit[2], hit[3]
+    is_ok, free_b, req_b = _check(dest_root, needed)
+    if len(_dest_free_memo) >= 64:
+        _dest_free_memo.pop(next(iter(_dest_free_memo)))
+    _dest_free_memo[key] = (now, is_ok, free_b, req_b)
+    return is_ok, free_b, req_b
+
+
+def _retry_delay(attempt: int) -> float:
+    """Jittered capped backoff for Hop 2 retries (audit item 2)."""
+    import random as _random
+
+    raw = 0.5 * (2 ** max(0, attempt - 1))
+    capped = min(raw, 8.0)
+    return max(0.1, capped + capped * _random.uniform(-0.25, 0.25))
+
+
+def _should_sample_verify(item_id: int) -> bool:
+    try:
+        return (int(item_id) % _POST_COPY_SAMPLE_EVERY) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 # BLAKE3 import — use the centralised flag from utils.hashing to ensure a
 # single source of truth. This prevents algorithm mismatches if blake3 is
 # installed/uninstalled between Hop 1 and Hop 2 (Q-1 fix).
@@ -166,7 +215,9 @@ async def _import_single_item(
     # Step A: Try ExifTool on cache file for EMBEDDED metadata.
     # Embedded EXIF/metadata is preserved through file copy, so ExifTool
     # results from the cache file are valid for files that have EXIF.
-    if ext in {".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4", ".m4v", ".3gp"}:
+    # Skip entirely when the scanner already resolved a date (audit item 3:
+    # one ExifTool round-trip per file max, never a redundant re-extract).
+    if ext in {".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4", ".m4v", ".3gp"} and item.date_taken is None:
         try:
             from backend.engines.metadata_extractor import extract_metadata_batch
 
@@ -227,10 +278,9 @@ async def _import_single_item(
                     db_item.date_source = "exif"
                     db_item.touch()
             item.date_taken = capture_dt
-    # Check destination disk space before copying
-    from backend.utils.durability import check_free_space
+    # Check destination disk space before copying (memoized per drive+size).
 
-    is_ok, free_b, req_b = check_free_space(dest_root, item.file_size or 0)
+    is_ok, free_b, req_b = _check_dest_free_memoized(dest_root, item.file_size or 0)
     if not is_ok:
         err = (
             f"Insufficient disk space on destination drive: {free_b // (1024 * 1024)}MB free, "
@@ -331,11 +381,15 @@ async def _import_single_item(
 
             dst.unlink(missing_ok=True)
             _cleanup_partial(dst)
-            await asyncio.sleep(0.5 * attempt)
+            await asyncio.sleep(_retry_delay(attempt))
             continue
 
-        # Post-copy verification: re-read destination from disk
-        if item.source_hash:
+        # Post-copy verification (sampled — audit item 3): the streaming
+        # copy-hash above is the truth. Re-reading every destination doubles
+        # disk I/O, so only re-read on a 1-in-N sample for
+        # silent-corruption detection. A copy-hash mismatch already retries
+        # via the loop above (fail-fast, no extra re-read needed).
+        if item.source_hash and _should_sample_verify(item.id):
             try:
                 dest_hash = await asyncio.to_thread(hash_file, dst)
             except Exception as exc:
@@ -361,7 +415,7 @@ async def _import_single_item(
 
                 dst.unlink(missing_ok=True)
                 _cleanup_partial(dst)
-                await asyncio.sleep(0.5 * attempt)
+                await asyncio.sleep(_retry_delay(attempt))
                 continue
 
             if dest_hash != item.source_hash.lower():
@@ -395,7 +449,7 @@ async def _import_single_item(
 
                 dst.unlink(missing_ok=True)
                 _cleanup_partial(dst)
-                await asyncio.sleep(0.5 * attempt)
+                await asyncio.sleep(_retry_delay(attempt))
                 continue
 
         # All checks passed

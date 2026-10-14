@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.source_types import SourceRef, SourceRefDevice, SourceRefLocal
@@ -38,6 +38,7 @@ from backend.engines.metadata_extractor import (
 )
 from backend.ios_device import (
     IOS_SOURCE_PREFIX,
+    canonical_device_serial,
     is_ios_source,
     parse_ios_source,
 )
@@ -131,6 +132,95 @@ _IOS_EXIF_IMAGE_EXTS = frozenset(
 )
 _IOS_EXIF_VIDEO_EXTS = frozenset({".mov", ".mp4", ".m4v", ".3gp"})
 
+# Bound for concurrent iOS EXIF partial reads (audit item 1): each read holds
+# a pooled AFC slot (pool size 4 + ephemeral overflow), so 6-way fan-out with
+# a semaphore keeps the walk + snapshot browse responsive. Pillow decode of
+# the prefix bytes runs in threads (never on the event loop).
+_IOS_EXIF_MAX_CONCURRENT = 6
+_IOS_EXIF_READ_BYTES = 256 * 1024
+
+
+async def _assert_device_trusted(serial: str) -> None:
+    """Fast pre-walk trust gate (audit item 4): fail in one cheap listing.
+
+    Raises DeviceLockedError / DeviceNotTrustedError before the recursive
+    walk fans out, so a locked phone fails fast instead of producing N
+    swallowed per-folder warnings + an empty walk that looks like "no
+    files". Non-terminal errors pass through (the walk itself retries).
+    """
+    try:
+        from backend.tier2_manager import get_device_manager
+
+        devices, _tier = await get_device_manager().list_devices()
+    except Exception:
+        return
+    for d in devices:
+        if getattr(d, "serial", None) != serial:
+            continue
+        from backend.device_backend import DeviceLockedError, DeviceNotTrustedError
+
+        status = str(getattr(getattr(d, "status", ""), "value", getattr(d, "status", "")))
+        if status == "locked":
+            raise DeviceLockedError(
+                serial,
+                "Your iPhone is locked. Please unlock it and tap 'Trust This Computer' when prompted, then try again.",
+            )
+        if status == "not_trusted":
+            raise DeviceNotTrustedError(
+                serial, "Please tap 'Trust This Computer' on your iPhone and enter your passcode, then try again."
+            )
+        return
+
+
+def build_ios_entries_from_preview_items(
+    preview_items: list[dict],
+    serial: str,
+) -> list[FileMetadata]:
+    """Build scan entries from a frozen preview listing (audit item 1).
+
+    Reuses the ``get_listing_items_by_scan_id`` snapshot (files + sizes +
+    mtimes) so ``_phase_scan_and_create_batches`` skips the second full AFC
+    walk. No device I/O, no EXIF here — dates resolve from mtime now and
+    Hop 2 backfills real EXIF capture dates (same as the no-EXIF path in
+    ``_upsert_media_item``). Yields no triplicated list copies: callers pass
+    the snapshot list straight through.
+    """
+    entries: list[FileMetadata] = []
+    prefix = f"{IOS_SOURCE_PREFIX}{serial}"
+    for it in preview_items:
+        try:
+            if not isinstance(it, dict):
+                continue
+            abs_path = str(it.get("abs_path") or "")
+            if not abs_path.startswith(prefix):
+                continue
+            fname = str(it.get("filename") or abs_path.rsplit("/", 1)[-1])
+            ext = Path(fname).suffix.lower()
+            if ext not in ALL_MEDIA_EXTENSIONS:
+                continue
+            try:
+                size = int(it.get("size_bytes") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            try:
+                mtime = float(it.get("mtime") or 0)
+            except (TypeError, ValueError):
+                mtime = 0.0
+            dt = _ts_to_datetime(mtime) if mtime > 0 else None
+            entries.append(
+                FileMetadata(
+                    file_path=abs_path,
+                    file_name=fname,
+                    file_size=size,
+                    extension=ext,
+                    date_created=dt,
+                    date_modified=dt,
+                )
+            )
+        except Exception:
+            continue
+    return entries
+
 
 async def _extract_ios_file_date(
     afc,
@@ -212,8 +302,66 @@ async def _extract_ios_file_date(
 
 
 # ---------------------------------------------------------------------------
+# Selective-match helpers (case-insensitive, serial-canonical)
+# ---------------------------------------------------------------------------
+def _split_device_uri(uri: str) -> tuple[str, str, str] | None:
+    """Split an ``ios://``/``wpd://``/``afc://`` URI into (scheme, canon_serial, path_lower).
+
+    Returns None for non-device URIs. The on-device path is lowercased so old
+    rows persisted with a lowercased ``/dcim`` still match a live ``/DCIM``
+    walk, and the serial is canonicalised so Tier 1 <-> WPD id flips
+    (UDID vs PnP id embedding the same UDID) still match.
+    """
+    lowered = uri.replace("\\", "/")
+    for scheme in ("ios://", "wpd://", "afc://"):
+        if lowered.lower().startswith(scheme):
+            rest = lowered[len(scheme) :]
+            parts = rest.split("/", 1)
+            serial = parts[0]
+            path = f"/{parts[1]}" if len(parts) > 1 else "/"
+            try:
+                canon = canonical_device_serial(serial)
+            except Exception:
+                canon = serial.lower()
+            return (scheme, canon, path.lower())
+    return None
+
+
+def _build_allowed_match_set(allowed_paths: frozenset[str] | None) -> tuple[set[str], set[tuple[str, str, str]]] | None:
+    """Build (plain_lower, device_canonical) match sets from *allowed_paths*.
+
+    Plain URIs/paths compare lowercased; device URIs additionally compare by
+    (scheme, canonical serial, lowercased device path) so serial-case flips
+    and ``/dcim``-vs-``/DCIM`` drift never eat an explicit selection.
+    """
+    if allowed_paths is None:
+        return None
+    plain: set[str] = set()
+    device: set[tuple[str, str, str]] = set()
+    for p in allowed_paths:
+        plain.add(p.replace("\\", "/").lower())
+        split = _split_device_uri(p)
+        if split is not None:
+            device.add(split)
+    return (plain, device)
+
+
+def _is_selected_source(source_path: str, match_set: tuple[set[str], set[tuple[str, str, str]]] | None) -> bool:
+    """Return True when *source_path* is in the explicit selection (case-insensitive)."""
+    if match_set is None:
+        return False
+    plain, device = match_set
+    if source_path.replace("\\", "/").lower() in plain:
+        return True
+    split = _split_device_uri(source_path)
+    return split is not None and split in device
+
+
+# ---------------------------------------------------------------------------
 # iOS device scanner
 # ---------------------------------------------------------------------------
+
+
 async def _scan_ios_device(
     serial: str,
     afc_path: str,
@@ -222,14 +370,17 @@ async def _scan_ios_device(
     on_progress: ProgressCallback = None,
     cutoff_datetime: datetime | None = None,
     allowed_paths: frozenset[str] | None = None,
-) -> list[int]:
+    reuse_entries: list[FileMetadata] | None = None,
+    reuse_walk_total: int | None = None,
+) -> tuple[list[int], int, int]:
     """
     Walk an iOS device's DCIM directory via AFC, collecting media files.
 
-    If *cutoff_datetime* is provided, files with mtime at or before the
-    cutoff are skipped entirely — they don't enter metadata extraction,
-    hashing, or the database. This is a performance optimization layered
-    on top of hash-based duplicate detection, never a replacement.
+    Files explicitly listed in *allowed_paths* (user-selected) are exempt
+    from the *cutoff_datetime* incremental filter — the user asked for those
+    files by name, so skipping them as "already imported" would turn an
+    explicit re-transfer into a false 0-match failure. The cutoff still
+    applies to full (non-selective) scans.
 
     Parameters
     ----------
@@ -242,15 +393,27 @@ async def _scan_ios_device(
     on_progress : callback | None
         ``callback(processed, total, current_file)`` invoked per file.
     cutoff_datetime : datetime | None
-        If provided, files with mtime <= this datetime (already adjusted
-        for safety overlap) are skipped.
+        If provided (for non-selective device scans), files with mtime <=
+        this datetime (already adjusted for safety overlap) are skipped.
+    allowed_paths : frozenset[str] | None
+        If set (selective import), only these explicit ``ios://`` URIs are
+        processed; matching is case-insensitive and checked BEFORE the
+        cutoff so selected files are never eaten by it.
 
     Returns
     -------
-    list[int]
-        Ordered list of ``media_items.id`` values (oldest -> newest).
+    tuple[list[int], int, int]
+        ``(item_ids, skipped_by_cutoff, walk_total)`` where ``item_ids``
+        is the ordered list of ``media_items.id`` values (oldest ->
+        newest), ``skipped_by_cutoff`` counts files dropped by the
+        incremental filter, and ``walk_total`` is the raw AFC walk file
+        count (0 means the browse itself came back empty).
     """
-    # 1. Recursively collect all media files from the device
+    # 1. Recursively collect all media files from the device.
+    #    When *reuse_entries* is supplied (frozen preview snapshot), the AFC
+    #    walk is skipped entirely — triple-walk elimination (audit item 1).
+    #    A fast trust gate runs first either way so lock/trust fails fast
+    #    with a terminal error instead of an empty walk (audit item 4).
     logger.info(
         "Scanning iOS device %s at %s (cutoff=%s)",
         serial,
@@ -258,26 +421,69 @@ async def _scan_ios_device(
         cutoff_datetime.isoformat() if cutoff_datetime else "none",
     )
 
-    device_files = await _walk_ios_directory(serial, afc_path)
-    logger.info("Found %d files on device %s under %s", len(device_files), serial, afc_path)
+    await _assert_device_trusted(serial)
 
-    # 2. Filter by media extension and apply cutoff
+    if reuse_entries is not None:
+        # Snapshot reuse path: no AFC walk, no EXIF round trips. Dates come
+        # from listing mtimes; Hop 2 backfills real EXIF capture dates.
+        # Selective-cutoff exemption + prefix-intersect abort are applied by
+        # the caller / below unchanged.
+        device_files: list = []
+        walk_total = reuse_walk_total if reuse_walk_total is not None else len(reuse_entries)
+        snapshot_entries: list[FileMetadata] = list(reuse_entries)
+    else:
+        device_files = await _walk_ios_directory(serial, afc_path)
+        logger.info("Found %d files on device %s under %s", len(device_files), serial, afc_path)
+        walk_total = len(device_files)
+        snapshot_entries = []
+
+    # 2. Filter by media extension, selection, then cutoff.
+    #    Order matters: the allowed_paths (explicit user selection) check
+    #    runs BEFORE the incremental cutoff so selected files are exempt.
+    #    (Selective-cutoff exemption preserved on both walk + reuse paths.)
     entries: list[FileMetadata] = []
     skipped_by_cutoff = 0
 
-    # Open a single AFC connection for EXIF extraction across all files
-    afc_service = None
-    lockdown = None
-    try:
-        from backend.ios_device import _get_afc_service
-
-        afc_service, lockdown = await _get_afc_service(serial)
-    except Exception:
-        logger.warning("Could not open AFC service for EXIF extraction; iOS items will get dates from Hop 2 instead")
-
     allowed_lower = {p.lower() for p in allowed_paths} if allowed_paths is not None else None
+    # Canonical-aware match set (serial-canonical + path-lowercased) so old
+    # lowercased rows (/dcim) and Tier 1 <-> WPD serial flips still match.
+    allowed_match = _build_allowed_match_set(allowed_paths)
 
-    try:
+    def _passes_selection_and_cutoff(source_path: str, mtime: float) -> tuple[bool, bool]:
+        """Return (keep, is_selected) applying selection-first, cutoff-second."""
+        is_selected = False
+        if allowed_match is not None:
+            if not _is_selected_source(source_path, allowed_match):
+                return False, False
+            is_selected = True
+        if cutoff_datetime is not None and not is_selected and mtime > 0:
+            file_mtime_dt = _ts_to_datetime(mtime)
+            if file_mtime_dt is not None:
+                _c_dt = cutoff_datetime if cutoff_datetime.tzinfo is not None else cutoff_datetime.replace(tzinfo=UTC)
+                _f_dt = file_mtime_dt if file_mtime_dt.tzinfo is not None else file_mtime_dt.replace(tzinfo=UTC)
+                if _f_dt <= _c_dt:
+                    return False, is_selected
+        return True, is_selected
+
+    if reuse_entries is not None:
+        # Snapshot reuse: filter only (no AFC I/O at all).
+        for meta in snapshot_entries:
+            # Re-derive mtime from stored date for cutoff comparison.
+            _mtime = 0.0
+            try:
+                if meta.date_modified is not None:
+                    _mtime = meta.date_modified.timestamp()
+            except Exception:
+                _mtime = 0.0
+            keep, _sel = _passes_selection_and_cutoff(meta.file_path, _mtime)
+            if not keep:
+                if cutoff_datetime is not None and not _sel and _mtime > 0:
+                    skipped_by_cutoff += 1
+                continue
+            entries.append(meta)
+    else:
+        # Normal walk path: build entries, then bounded concurrent EXIF.
+        pending: list[tuple[FileMetadata, str]] = []
         for fi in device_files:
             if fi.is_dir:
                 continue
@@ -287,25 +493,18 @@ async def _scan_ios_device(
             if ext not in ALL_MEDIA_EXTENSIONS:
                 continue
 
-            # Apply cutoff filter: skip files with mtime at or before the cutoff
-            if cutoff_datetime is not None and fi.mtime > 0:
-                file_mtime_dt = _ts_to_datetime(fi.mtime)
-                if file_mtime_dt is not None:
-                    _c_dt = (
-                        cutoff_datetime if cutoff_datetime.tzinfo is not None else cutoff_datetime.replace(tzinfo=UTC)
-                    )
-                    _f_dt = file_mtime_dt if file_mtime_dt.tzinfo is not None else file_mtime_dt.replace(tzinfo=UTC)
-                    if _f_dt <= _c_dt:
-                        skipped_by_cutoff += 1
-                        continue
-
-            # Build the ios:// source path
+            # Build the ios:// source path (device path case preserved)
             source_path = f"{IOS_SOURCE_PREFIX}{serial}{fi.path}"
 
-            # Apply allowed_paths filter (selective import)
-            if allowed_lower is not None:
-                if source_path.lower() not in allowed_lower:
-                    continue
+            keep, _sel = _passes_selection_and_cutoff(source_path, fi.mtime)
+            if not keep:
+                if _sel is False and allowed_match is not None and cutoff_datetime is not None:
+                    # Selection miss — not a cutoff drop; fall through to
+                    # cutoff accounting only for non-selective drops.
+                    pass
+                if cutoff_datetime is not None and not _sel and fi.mtime > 0:
+                    skipped_by_cutoff += 1
+                continue
 
             # Build FileMetadata from AFC stat info
             file_mtime_dt = _ts_to_datetime(fi.mtime) if fi.mtime > 0 else None
@@ -318,32 +517,92 @@ async def _scan_ios_device(
                 date_created=file_mtime_dt,
                 date_modified=file_mtime_dt,
             )
+            pending.append((meta, fi.path))
 
-            # Extract real EXIF date from the device file via partial AFC read
-            if afc_service is not None:
-                try:
-                    exif_date = await _extract_ios_file_date(
-                        afc_service,
-                        fi.path,
-                        ext,
-                    )
-                    if exif_date is not None:
-                        meta.date_taken = exif_date
-                except Exception:
-                    pass
+        # Bounded concurrent EXIF via pooled partial reads (audit item 1):
+        # one cheap trust-gated snapshot already ran; each EXIF read holds
+        # a pooled slot briefly, semaphore keeps snapshot browses responsive.
+        # Pillow decode runs in threads. Failures fall back to mtime (Hop 2
+        # backfills), never fail the scan.
+        if pending:
+            import asyncio as _asyncio
 
-            entries.append(meta)
-    finally:
-        if afc_service is not None:
-            try:
-                afc_service.close()
-            except Exception:
-                pass
-        if lockdown is not None:
-            try:
-                lockdown.close()
-            except Exception:
-                pass
+            _exif_sem = _asyncio.Semaphore(_IOS_EXIF_MAX_CONCURRENT)
+
+            async def _exif_one(meta: FileMetadata, dev_path: str) -> None:
+                async with _exif_sem:
+                    try:
+                        from backend.tier2_manager import get_device_manager as _gdm
+
+                        data = await _gdm().read_device_file_partial(serial, dev_path, _IOS_EXIF_READ_BYTES)
+                    except Exception:
+                        return
+                    if not data:
+                        return
+                    ext = (meta.extension or "").lower()
+                    if ext in _IOS_EXIF_IMAGE_EXTS:
+                        try:
+                            from PIL import Image as _PILImage
+
+                            def _decode() -> datetime | None:
+                                import io as _io
+
+                                try:
+                                    with _PILImage.open(_io.BytesIO(data)) as img:
+                                        exif = img.getexif()
+                                        raw = exif.get(36867) or exif.get(36868) or exif.get(306)
+                                        if raw and str(raw).strip():
+                                            from backend.engines.metadata_extractor import (
+                                                _parse_exif_datetime as _parse_dt,
+                                            )
+
+                                            return _parse_dt(str(raw).strip())
+                                except Exception:
+                                    return None
+                                return None
+
+                            dt = await _asyncio.to_thread(_decode)
+                            if dt is not None:
+                                meta.date_taken = dt
+                                return
+                        except Exception:
+                            pass
+                    # Video / Pillow-miss fallback: ExifTool via temp file.
+                    try:
+                        import tempfile as _tf
+
+                        suffix = ext if ext.startswith(".") else f".{ext}"
+
+                        def _et() -> datetime | None:
+                            with _tf.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                                tmp.write(data)
+                                tmp_path = tmp.name
+                            try:
+                                m2 = extract_metadata(Path(tmp_path))
+                                if m2 and m2.date_taken:
+                                    return m2.date_taken
+                            finally:
+                                try:
+                                    Path(tmp_path).unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                            return None
+
+                        dt2 = await _asyncio.to_thread(_et)
+                        if dt2 is not None:
+                            meta.date_taken = dt2
+                    except Exception:
+                        pass
+
+            # Only pay for EXIF on files that can carry it; others skip I/O.
+            _exif_tasks = [
+                _exif_one(meta, dev_path)
+                for meta, dev_path in pending
+                if (meta.extension or "").lower() in (_IOS_EXIF_IMAGE_EXTS | _IOS_EXIF_VIDEO_EXTS)
+            ]
+            if _exif_tasks:
+                await _asyncio.gather(*_exif_tasks, return_exceptions=True)
+            entries.extend(meta for meta, _dp in pending)
 
     if skipped_by_cutoff > 0:
         logger.info(
@@ -354,8 +613,14 @@ async def _scan_ios_device(
 
     total = len(entries)
     if total == 0:
-        logger.info("No media files to process from device %s after cutoff filtering", serial)
-        return []
+        logger.info(
+            "No media files to process from device %s after filtering (walk_total=%d skipped_by_cutoff=%d selective=%s)",
+            serial,
+            walk_total,
+            skipped_by_cutoff,
+            allowed_match is not None,
+        )
+        return [], skipped_by_cutoff, walk_total
 
     logger.info("Processing %d media files from device %s", total, serial)
 
@@ -383,7 +648,7 @@ async def _scan_ios_device(
                 on_progress(idx + 1, total, meta.file_path)
 
     logger.info("iOS scan complete — %d items persisted.", len(inserted_ids))
-    return inserted_ids
+    return inserted_ids, skipped_by_cutoff, walk_total
 
 
 async def _walk_ios_directory(
@@ -732,6 +997,40 @@ async def scan(
     -------
     list[int]
         Ordered list of ``media_items.id`` values (oldest -> newest).
+        Use :func:`scan_with_stats` when cutoff/walk diagnostics are needed.
+    """
+    item_ids, _skipped, _walk_total = await scan_with_stats(
+        source_path,
+        session_id=session_id,
+        on_progress=on_progress,
+        cutoff_datetime=cutoff_datetime,
+        allowed_paths=allowed_paths,
+    )
+    return item_ids
+
+
+async def scan_with_stats(
+    source_path: str | Path,
+    *,
+    session_id: int | None = None,
+    on_progress: ProgressCallback = None,
+    cutoff_datetime: datetime | None = None,
+    allowed_paths: frozenset[str] | None = None,
+    reuse_entries: list[FileMetadata] | None = None,
+    reuse_walk_total: int | None = None,
+) -> tuple[list[int], int, int]:
+    """
+    Same as :func:`scan`, but also returns scan diagnostics.
+
+    *reuse_entries* (built via :func:`build_ios_entries_from_preview_items`)
+    skips the AFC walk entirely — the frozen preview snapshot is filtered +
+    persisted directly. Purely advisory; None falls back to a normal walk.
+
+    Returns
+    -------
+    tuple[list[int], int, int]
+        ``(item_ids, skipped_by_cutoff, walk_total)``. For local sources
+        both counters are 0 and ``walk_total`` is the queued item count.
     """
     source_str = str(source_path)
 
@@ -745,16 +1044,50 @@ async def scan(
             on_progress=on_progress,
             cutoff_datetime=cutoff_datetime,
             allowed_paths=allowed_paths,
+            reuse_entries=reuse_entries,
+            reuse_walk_total=reuse_walk_total,
         )
 
     # --- Local filesystem source ---
     source = Path(source_str).resolve()
-    return await _scan_local_files(
+    item_ids = await _scan_local_files(
         source,
         session_id=session_id,
         on_progress=on_progress,
         allowed_paths=allowed_paths,
     )
+    return item_ids, 0, len(item_ids)
+
+
+async def scan_from_ref_with_stats(
+    source_ref: SourceRef,
+    *,
+    session_id: int | None = None,
+    on_progress: ProgressCallback = None,
+    cutoff_datetime: datetime | None = None,
+    allowed_paths: frozenset[str] | None = None,
+) -> tuple[list[int], int, int]:
+    """Same as :func:`scan_from_ref`, but returns ``(item_ids, skipped_by_cutoff, walk_total)``."""
+    if isinstance(source_ref, SourceRefLocal):
+        source = Path(source_ref.path).resolve()
+        item_ids = await _scan_local_files(
+            source,
+            session_id=session_id,
+            on_progress=on_progress,
+            allowed_paths=allowed_paths,
+        )
+        return item_ids, 0, len(item_ids)
+    elif isinstance(source_ref, SourceRefDevice):
+        return await _scan_ios_device(
+            source_ref.device_id,
+            source_ref.device_path,
+            session_id=session_id,
+            on_progress=on_progress,
+            cutoff_datetime=cutoff_datetime,
+            allowed_paths=allowed_paths,
+        )
+    else:
+        raise ValueError(f"Unknown source ref type: {type(source_ref)}")
 
 
 async def scan_from_ref(
@@ -792,26 +1125,16 @@ async def scan_from_ref(
     -------
     list[int]
         Ordered list of ``media_items.id`` values (oldest -> newest).
+        Use :func:`scan_from_ref_with_stats` when diagnostics are needed.
     """
-    if isinstance(source_ref, SourceRefLocal):
-        source = Path(source_ref.path).resolve()
-        return await _scan_local_files(
-            source,
-            session_id=session_id,
-            on_progress=on_progress,
-            allowed_paths=allowed_paths,
-        )
-    elif isinstance(source_ref, SourceRefDevice):
-        return await _scan_ios_device(
-            source_ref.device_id,
-            source_ref.device_path,
-            session_id=session_id,
-            on_progress=on_progress,
-            cutoff_datetime=cutoff_datetime,
-            allowed_paths=allowed_paths,
-        )
-    else:
-        raise ValueError(f"Unknown source ref type: {type(source_ref)}")
+    item_ids, _skipped, _walk_total = await scan_from_ref_with_stats(
+        source_ref,
+        session_id=session_id,
+        on_progress=on_progress,
+        cutoff_datetime=cutoff_datetime,
+        allowed_paths=allowed_paths,
+    )
+    return item_ids
 
 
 # ---------------------------------------------------------------------------
@@ -830,8 +1153,14 @@ async def _upsert_media_item(
 
     Resolves the item's date using the shared fallback chain and stores it
     along with provenance (date_source).
+
+    Dedup matching is case-insensitive on ``source_path``: iOS device paths
+    (``/DCIM`` vs ``/dcim``) and Windows local paths must hit the same row
+    regardless of the case used at selection vs scan time.
     """
-    lookup = select(MediaItem.id, MediaItem.final_status).where(MediaItem.source_path == meta.file_path)
+    lookup = select(MediaItem.id, MediaItem.final_status).where(
+        func.lower(MediaItem.source_path) == meta.file_path.lower()
+    )
     if session_id is not None:
         lookup = lookup.where(MediaItem.session_id == session_id)
     result = await session.execute(lookup)

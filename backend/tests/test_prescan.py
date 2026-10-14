@@ -6,8 +6,11 @@ Run: python -m pytest backend/tests/test_prescan.py -v
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from backend.api.device_preview import _listing_store
 from backend.database.models import HopStatus, MediaItem
 from backend.engines.duplicate_detector import prescan_against_library
 
@@ -89,3 +92,60 @@ async def test_prescan_only_completed_items(db_session):
 
     result = await prescan_against_library(candidates)
     assert result["likely_duplicate_count"] == 0
+    assert result["new_count"] == 1
+    assert "/device/video.mp4" in result["new_paths"]
+
+
+@pytest.mark.asyncio
+async def test_prescan_returns_new_paths(db_session):
+    """Candidates that do not match library items are included in new_paths."""
+    item = MediaItem(
+        source_path="/src/photo1.jpg",
+        file_name="photo1.jpg",
+        file_size=1000,
+        final_status=HopStatus.COMPLETED.value,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    candidates = [
+        {"abs_path": "/device/photo1.jpg", "filename": "photo1.jpg", "size_bytes": 1000},
+        {"abs_path": "/device/photo2.jpg", "filename": "photo2.jpg", "size_bytes": 2000},
+        {"abs_path": "/device/photo3.jpg", "filename": "photo3.jpg", "size_bytes": 3000},
+    ]
+
+    result = await prescan_against_library(candidates)
+    assert result["checked"] == 3
+    assert result["likely_duplicate_count"] == 1
+    assert result["likely_duplicate_paths"] == ["/device/photo1.jpg"]
+    assert result["new_count"] == 2
+    assert result["new_paths"] == ["/device/photo2.jpg", "/device/photo3.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_prescan_with_scan_id_cache(client, db_session):
+    """POST /api/duplicates/prescan resolves candidates from scan_id listing cache."""
+    item = MediaItem(
+        source_path="/src/img1.jpg",
+        file_name="img1.jpg",
+        file_size=1234,
+        final_status=HopStatus.COMPLETED.value,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    cached_items = [
+        {"abs_path": "ios://dev/img1.jpg", "filename": "img1.jpg", "size_bytes": 1234},
+        {"abs_path": "ios://dev/img2.jpg", "filename": "img2.jpg", "size_bytes": 5678},
+    ]
+    key = ("dev", "/DCIM", True, "newest")
+    scan_id = _listing_store(key, cached_items, 2, 0, 6912, (2, "digest"), time.monotonic())
+
+    resp = client.post("/api/duplicates/prescan", json={"scan_id": scan_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["checked"] == 2
+    assert data["likely_duplicate_count"] == 1
+    assert data["likely_duplicate_paths"] == ["ios://dev/img1.jpg"]
+    assert data["new_count"] == 1
+    assert data["new_paths"] == ["ios://dev/img2.jpg"]

@@ -52,6 +52,7 @@ import {
   MomentsGrid,
   PeoplePanel,
   PERSON_SELECT_EVENT,
+  PersonDetail,
   SemanticSearchBar,
   TimelineStrip,
 } from "@/components/Intelligence";
@@ -618,12 +619,17 @@ export default function LibraryPage() {
     start: string;
     end: string;
   } | null>(null);
-  // Active person filter (set via PERSON_SELECT_EVENT from PeoplePanel).
-  // Mirrors momentRange: applied client-side over the server-filtered list.
+  // Active person filter (legacy PERSON_SELECT_EVENT broadcast path).
+  // The People-tab inline detail (selectedPersonId) is preferred and never
+  // touches the vault list; this stays only for compat with external
+  // broadcasts.
   const [personFilter, setPersonFilter] = useState<{
     person_id: number;
     media_ids: number[];
   } | null>(null);
+  // Inline person detail (People tab) — direct state, independent of
+  // sessionFilter/finalStatus/search.
+  const [selectedPersonId, setSelectedPersonId] = useState<number | null>(null);
   const setCurrentPage = useTransferStore((s) => s.setCurrentPage);
   const [regenStatus, setRegenStatus] = useState<"idle" | "loading" | "done">(
     "idle",
@@ -1070,234 +1076,256 @@ export default function LibraryPage() {
     <div className="h-full flex flex-col space-y-4">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-foreground">Library</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {libraryTotal} items completed
+            {libraryTotal} items
+            {lastSessionId
+              ? showingRecent
+                ? ` · Session #${lastSessionId}`
+                : " · All transfers"
+              : ""}
           </p>
         </div>
         <CapabilitiesBadge />
       </div>
 
-      {/* Section tabs — Vault / Timeline / Moments / Duplicates / People / Trash */}
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {(
-          [
-            ["vault", "Vault", Archive],
-            ["timeline", "Timeline", CalendarDays],
-            ["moments", "Moments", Sparkles],
-            ["duplicates", "Duplicates", Copy],
-            ["people", "People", Users],
-            ["trash", "Trash", Trash2],
-          ] as [LibrarySection, string, LucideIcon][]
-        ).map(([id, label, Icon]) => {
-          const isActive = section === id;
-          return (
+      {/* Single header row: tabs left, controls right (wraps at 800px) */}
+      <div className="flex flex-wrap items-center gap-1.5 justify-between min-w-0">
+        <div className="flex items-center gap-1 flex-wrap min-w-0">
+          {(
+            [
+              ["vault", "Vault", Archive],
+              ["timeline", "Timeline", CalendarDays],
+              ["moments", "Moments", Sparkles],
+              ["duplicates", "Duplicates", Copy],
+              ["people", "People", Users],
+              ["trash", "Trash", Trash2],
+            ] as [LibrarySection, string, LucideIcon][]
+          ).map(([id, label, Icon]) => {
+            const isActive = section === id;
+            return (
+              <button
+                key={id}
+                onClick={() => {
+                  setSection(id);
+                  if (id !== "people") setSelectedPersonId(null);
+                }}
+                title={label}
+                aria-label={label}
+                aria-pressed={isActive}
+                className={cn(
+                  "relative inline-flex items-center justify-center px-3 py-1 text-[13px] rounded-pill transition-colors active:scale-[0.95]",
+                  isActive
+                    ? "bg-action text-white"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                {isActive ? (
+                  <>
+                    <span className="invisible">{label}</span>
+                    <Icon className="absolute w-4 h-4" aria-hidden="true" />
+                  </>
+                ) : (
+                  label
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {section === "vault" && (
+          <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+            <PillSelect
+              size="sm"
+              value={extension}
+              onChange={setExtension}
+              placeholder="All types"
+              options={[
+                { value: "", label: "All types" },
+                ...allExtensions.map((ext) => ({ value: ext, label: ext })),
+              ]}
+            />
+            <PillSelect
+              size="sm"
+              value={docKind}
+              onChange={setDocKind}
+              placeholder="All doc kinds"
+              options={[
+                { value: "", label: "All doc kinds" },
+                ...DOCUMENT_KINDS.map((kind) => ({ value: kind, label: kind })),
+              ]}
+              title="Filter documents by kind folder (Documents/<Kind>/)"
+            />
+            <PillSelect
+              size="sm"
+              value={finalStatus}
+              onChange={setFinalStatus}
+              placeholder="All statuses"
+              options={[
+                { value: "", label: "All statuses" },
+                { value: "completed", label: "Completed (default)" },
+                { value: "failed", label: "Failed" },
+                { value: "pending", label: "Pending" },
+              ]}
+            />
+            <PillSelect
+              size="sm"
+              value={showingRecent && lastSessionId ? "recent" : "all"}
+              onChange={(v) => setShowingRecent(v === "recent")}
+              placeholder="All transfers"
+              options={[
+                { value: "all", label: "All transfers" },
+                {
+                  value: "recent",
+                  label: lastSessionId
+                    ? `Recent Session #${lastSessionId}`
+                    : "Recent session",
+                  disabled: lastSessionId == null,
+                },
+              ]}
+              title="Filter to the most recent transfer session or show everything"
+            />
+            <div className="flex items-center p-0.5 bg-muted/50 border border-border rounded-full">
+              <button
+                onClick={() => setViewMode("masonry")}
+                className={cn(
+                  "p-1.5 rounded-full transition-colors",
+                  viewMode === "masonry"
+                    ? "bg-primary text-primary-foreground shadow-xs"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                title="Grid view"
+              >
+                <Grid3X3 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setViewMode("list")}
+                className={cn(
+                  "p-1.5 rounded-full transition-colors",
+                  viewMode === "list"
+                    ? "bg-primary text-primary-foreground shadow-xs"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                title="List view"
+              >
+                <LayoutList className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setViewMode("history")}
+                className={cn(
+                  "p-1.5 rounded-full transition-colors",
+                  viewMode === "history"
+                    ? "bg-primary text-primary-foreground shadow-xs"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                title="Transfer history"
+              >
+                <History className="w-3.5 h-3.5" />
+              </button>
+            </div>
             <button
-              key={id}
-              onClick={() => setSection(id)}
-              title={label}
-              aria-label={label}
-              aria-pressed={isActive}
+              onClick={handleRegenThumbnails}
+              disabled={regenStatus === "loading"}
               className={cn(
-                "relative inline-flex items-center justify-center px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]",
-                isActive
+                "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-normal border transition-colors active:scale-[0.95]",
+                regenStatus === "done"
+                  ? "border-green-500 text-green-600 bg-green-50 dark:bg-green-950"
+                  : "border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground",
+                regenStatus === "loading" && "opacity-60 cursor-not-allowed",
+              )}
+              title="Re-generate and refresh preview thumbnails for your library"
+            >
+              {regenStatus === "loading" ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : regenStatus === "done" ? (
+                <CheckCircle2 className="w-3 h-3" />
+              ) : (
+                <RefreshCw className="w-3 h-3" />
+              )}
+              {regenStatus === "done" ? "Updated" : "Refresh"}
+            </button>
+            <button
+              onClick={() => setShowClearDialog(true)}
+              disabled={libraryTotal === 0 || !backendReady}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-normal border border-border text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.95]"
+              title={
+                backendReady
+                  ? "Clear all library entries"
+                  : ENGINE_WAITING_LABEL
+              }
+            >
+              <Trash2 className="w-3 h-3" />
+              Clear
+            </button>
+            <button
+              onClick={() => setFavoritesOnly((v) => !v)}
+              className={cn(
+                "px-2.5 py-1 text-[11px] rounded-pill transition-colors active:scale-[0.95]",
+                favoritesOnly
                   ? "bg-action text-white"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground",
               )}
+              title="Show favorites only"
             >
-              {isActive ? (
-                <>
-                  <span className="invisible">{label}</span>
-                  <Icon className="absolute w-4 h-4" aria-hidden="true" />
-                </>
-              ) : (
-                label
-              )}
+              ★ Favorites
             </button>
-          );
-        })}
-        <div className="flex-1" />
-        <button
-          onClick={() => setFavoritesOnly((v) => !v)}
-          className={cn(
-            "px-3.5 py-1.5 text-sm rounded-pill transition-colors active:scale-[0.95]",
-            favoritesOnly
-              ? "bg-action text-white"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-          title="Show favorites only"
-        >
-          ★ Favorites
-        </button>
+          </div>
+        )}
       </div>
 
       {/* Unified search (offline keyword today, CLIP when models installed).
           Single input driving both filename + semantic results, merged below. */}
       {section === "vault" && <SemanticSearchBar value={q} onChange={setQ} />}
 
-      {/* Toolbar — vault only. Other sections render their own headers. */}
+      {/* Document filing helper (vault only, icon w/ hover tooltip) */}
       {section === "vault" && (
-        <div className="flex items-center gap-2.5 flex-wrap">
-          {/* Custom pill-shaped type filter */}
-          <PillSelect
-            value={extension}
-            onChange={setExtension}
-            placeholder="All types"
-            options={[
-              { value: "", label: "All types" },
-              ...allExtensions.map((ext) => ({ value: ext, label: ext })),
-            ]}
-          />
-
-          {/* Custom pill-shaped doc-kind filter */}
-          <PillSelect
-            value={docKind}
-            onChange={setDocKind}
-            placeholder="All doc kinds"
-            options={[
-              { value: "", label: "All doc kinds" },
-              ...DOCUMENT_KINDS.map((kind) => ({ value: kind, label: kind })),
-            ]}
-            title="Filter documents by kind folder (Documents/<Kind>/)"
-          />
-
-          {/* Custom pill-shaped status filter */}
-          <PillSelect
-            value={finalStatus}
-            onChange={setFinalStatus}
-            placeholder="All statuses"
-            options={[
-              { value: "", label: "All statuses" },
-              { value: "completed", label: "Completed (default)" },
-              { value: "failed", label: "Failed" },
-              { value: "pending", label: "Pending" },
-            ]}
-          />
-
-          {/* Pill-shaped View mode segmented control */}
-          <div className="flex items-center p-0.5 bg-muted/50 border border-border rounded-full">
-            <button
-              onClick={() => setViewMode("masonry")}
-              className={cn(
-                "p-1.5 rounded-full transition-colors",
-                viewMode === "masonry"
-                  ? "bg-primary text-primary-foreground shadow-xs"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-              title="Grid view"
-            >
-              <Grid3X3 className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setViewMode("list")}
-              className={cn(
-                "p-1.5 rounded-full transition-colors",
-                viewMode === "list"
-                  ? "bg-primary text-primary-foreground shadow-xs"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-              title="List view"
-            >
-              <LayoutList className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setViewMode("history")}
-              className={cn(
-                "p-1.5 rounded-full transition-colors",
-                viewMode === "history"
-                  ? "bg-primary text-primary-foreground shadow-xs"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-              title="Transfer history"
-            >
-              <History className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* Document filing icon button with pill hover tooltip */}
-          <div className="relative flex items-center">
-            <button
-              type="button"
-              onClick={handleMigrateDocuments}
-              disabled={migrateRunning}
-              onMouseEnter={() => setDocsIconHovered(true)}
-              onMouseLeave={() => setDocsIconHovered(false)}
-              className={cn(
-                "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
-                migrateRunning && "opacity-60 cursor-not-allowed",
-              )}
-              aria-label="Document filing"
-            >
-              {migrateRunning ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-              ) : (
-                <FileText className="w-3.5 h-3.5" />
-              )}
-            </button>
-            <AnimatePresence>
-              {docsIconHovered && (
-                <motion.div
-                  initial={{ opacity: 0, y: 4, scale: 0.96 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 4, scale: 0.96 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute right-0 top-10 z-30 pointer-events-none"
-                >
-                  <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
-                    <FileText className="w-3 h-3 text-action" />
-                    <span>
-                      {migrateResult
-                        ? migrateResult
-                        : migratePreview && migratePreview.total > 0
-                          ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
-                          : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
-                    </span>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
+        <div className="relative flex items-center self-end">
           <button
-            onClick={handleRegenThumbnails}
-            disabled={regenStatus === "loading"}
+            type="button"
+            onClick={handleMigrateDocuments}
+            disabled={migrateRunning}
+            onMouseEnter={() => setDocsIconHovered(true)}
+            onMouseLeave={() => setDocsIconHovered(false)}
             className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border transition-colors active:scale-[0.95]",
-              regenStatus === "done"
-                ? "border-green-500 text-green-600 bg-green-50 dark:bg-green-950"
-                : "border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground",
-              regenStatus === "loading" && "opacity-60 cursor-not-allowed",
+              "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
+              migrateRunning && "opacity-60 cursor-not-allowed",
             )}
-            title="Re-generate and refresh preview thumbnails for your library"
+            aria-label="Document filing"
           >
-            {regenStatus === "loading" ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : regenStatus === "done" ? (
-              <CheckCircle2 className="w-3.5 h-3.5" />
+            {migrateRunning ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
             ) : (
-              <RefreshCw className="w-3.5 h-3.5" />
+              <FileText className="w-3.5 h-3.5" />
             )}
-            {regenStatus === "done" ? "Updated" : "Refresh"}
           </button>
-
-          <button
-            onClick={() => setShowClearDialog(true)}
-            disabled={libraryTotal === 0 || !backendReady}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-normal border border-border text-muted-foreground hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.95]"
-            title={
-              backendReady ? "Clear all library entries" : ENGINE_WAITING_LABEL
-            }
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            Clear
-          </button>
+          <AnimatePresence>
+            {docsIconHovered && (
+              <motion.div
+                initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-0 top-10 z-30 pointer-events-none"
+              >
+                <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
+                  <FileText className="w-3 h-3 text-action" />
+                  <span>
+                    {migrateResult
+                      ? migrateResult
+                      : migratePreview && migratePreview.total > 0
+                        ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
+                        : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
+                  </span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
 
-      {/* Moment filter banner */}
+      {/* Moment filter banner (compact) */}
       {section === "vault" && momentRange && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-action/5 border border-action/30 rounded-lg text-xs">
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-action/5 border border-action/30 rounded-lg text-xs">
           <span className="flex-1 text-muted-foreground">
             Showing moment {momentLabel} · {visibleLibraryItems.length} of{" "}
             {libraryItems.length} items
@@ -1312,9 +1340,9 @@ export default function LibraryPage() {
         </div>
       )}
 
-      {/* Person filter banner */}
-      {section === "vault" && personFilter && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-action/5 border border-action/30 rounded-lg text-xs">
+      {/* Person filter banner (compact, legacy broadcast path only) */}
+      {section === "vault" && !momentRange && personFilter && (
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-action/5 border border-action/30 rounded-lg text-xs">
           <span className="flex-1 text-muted-foreground">
             Showing Person {personFilter.person_id} ·{" "}
             {visibleLibraryItems.length}{" "}
@@ -1326,24 +1354,6 @@ export default function LibraryPage() {
             className="px-2.5 py-1 bg-action text-white rounded-pill font-normal hover:bg-action/90 active:scale-[0.95] transition-colors shrink-0"
           >
             × Clear
-          </button>
-        </div>
-      )}
-
-      {/* Session filter banner */}
-      {section === "vault" && lastSessionId && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg text-xs">
-          <span className="flex-1 text-blue-700 dark:text-blue-300">
-            {showingRecent
-              ? `Showing recent transfer (Session #${lastSessionId})`
-              : `Showing all transfers`}
-          </span>
-          <button
-            type="button"
-            onClick={() => setShowingRecent((r) => !r)}
-            className="px-2.5 py-1 bg-action text-white rounded-pill font-normal hover:bg-action/90 active:scale-[0.95] transition-colors shrink-0"
-          >
-            {showingRecent ? "Show all" : "Show recent"}
           </button>
         </div>
       )}
@@ -1384,8 +1394,18 @@ export default function LibraryPage() {
         </div>
       )}
       {section === "people" && (
-        <div className="rounded-lg border border-border bg-card/50 p-4">
-          <PeoplePanel />
+        <div className="rounded-lg border border-border bg-card/50 p-4 space-y-3">
+          <PeoplePanel
+            onSelect={(d) => {
+              setSelectedPersonId(d.person_id);
+            }}
+          />
+          {selectedPersonId != null && (
+            <PersonDetail
+              personId={selectedPersonId}
+              onBack={() => setSelectedPersonId(null)}
+            />
+          )}
         </div>
       )}
       {section === "trash" && (

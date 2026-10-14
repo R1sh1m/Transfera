@@ -410,10 +410,18 @@ async def prescan_against_library(
         "checked": int,
         "likely_duplicate_count": int,
         "likely_duplicate_paths": list[str],
+        "new_count": int,
+        "new_paths": list[str],
       }
     """
     if not candidates:
-        return {"checked": 0, "likely_duplicate_count": 0, "likely_duplicate_paths": []}
+        return {
+            "checked": 0,
+            "likely_duplicate_count": 0,
+            "likely_duplicate_paths": [],
+            "new_count": 0,
+            "new_paths": [],
+        }
 
     from backend.database.manager import session_scope
     from backend.database.models import HopStatus
@@ -428,16 +436,22 @@ async def prescan_against_library(
     library_set: set[tuple[str, int]] = {(row[0].lower(), row[1]) for row in rows if row[0] and row[1] is not None}
 
     likely_duplicate_paths: list[str] = []
+    new_paths: list[str] = []
     for c in candidates:
         name = (c.get("filename") or "").lower()
         size = c.get("size_bytes") or 0
+        path = c.get("abs_path") or ""
+        if not path:
+            continue
         if (name, size) in library_set:
-            path = c.get("abs_path") or ""
-            if path:
-                likely_duplicate_paths.append(path)
+            likely_duplicate_paths.append(path)
+        else:
+            new_paths.append(path)
 
     return {
         "checked": len(candidates),
         "likely_duplicate_count": len(likely_duplicate_paths),
         "likely_duplicate_paths": likely_duplicate_paths,
+        "new_count": len(new_paths),
+        "new_paths": new_paths,
     }

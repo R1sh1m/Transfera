@@ -981,34 +981,37 @@ class _ExifToolBinarySession:
             if not self._ensure_running():
                 return None
             assert self._proc is not None and self._proc.stdin is not None
-            cmd_block = f"-b\n-ThumbnailImage\n{path}\n-execute\n"
-            try:
-                self._proc.stdin.write(cmd_block.encode("utf-8"))
-                self._proc.stdin.flush()
-            except OSError:
-                self._proc = None
-                return None
-            buf = _io.BytesIO()
-            while True:
+            for tag in ("-ThumbnailImage", "-PreviewImage", "-JpgFromRaw"):
+                cmd_block = f"-b\n{tag}\n{path}\n-execute\n"
                 try:
-                    line = self._stdout_queue.get(timeout=10.0)
-                except _queue.Empty:
-                    logger.warning("ExifTool binary command timed out; recycling session")
+                    self._proc.stdin.write(cmd_block.encode("utf-8"))
+                    self._proc.stdin.flush()
+                except OSError:
+                    self._proc = None
+                    return None
+                buf = _io.BytesIO()
+                while True:
                     try:
-                        if self._proc:
-                            self._proc.kill()
-                    except Exception:
-                        pass
-                    self._proc = None
-                    return None
-                if not line:
-                    self._proc = None
-                    return None
-                if line == self._SENTINEL:
-                    break
-                buf.write(line)
-            data = buf.getvalue()
-            return data if len(data) > 100 else None
+                        line = self._stdout_queue.get(timeout=10.0)
+                    except _queue.Empty:
+                        logger.warning("ExifTool binary command timed out; recycling session")
+                        try:
+                            if self._proc:
+                                self._proc.kill()
+                        except Exception:
+                            pass
+                        self._proc = None
+                        return None
+                    if not line:
+                        self._proc = None
+                        return None
+                    if line == self._SENTINEL:
+                        break
+                    buf.write(line)
+                data = buf.getvalue()
+                if len(data) > 100:
+                    return data
+            return None
 
 
 _binary_session = _ExifToolBinarySession()
@@ -1081,10 +1084,15 @@ def extract_metadata(file_path: str | Path) -> FileMetadata:
 
 def extract_metadata_batch(file_paths: list[Path]) -> dict[str, FileMetadata]:
     """
-    Extract metadata for a list of files in a single ExifTool round-trip.
+    Extract metadata for a list of files in ExifTool round-trips.
 
     Uses the module-level ``_ExifToolSession`` (``-stay_open True``) to keep
     ExifTool alive between calls, avoiding per-file subprocess creation overhead.
+
+    Large lists are chunked (audit item 3: 32 files per round-trip) so one
+    giant camera roll never holds a single ExifTool command + JSON payload
+    unbounded in memory, and a mid-batch process death only loses one chunk
+    (which falls back to filesystem timestamps per file).
 
     Returns a dict mapping resolved path string -> FileMetadata.
     Falls back gracefully to filesystem extraction if ExifTool is unavailable.
@@ -1094,6 +1102,36 @@ def extract_metadata_batch(file_paths: list[Path]) -> dict[str, FileMetadata]:
         return {}
 
     if _bootstrap_exiftool():
-        return _exiftool_session.extract_batch(file_paths)
+        return extract_metadata_batched(file_paths)
 
     return {str(p.resolve()): _extract_via_filesystem(p) for p in file_paths}
+
+
+_EXIF_BATCH_CHUNK_SIZE = 32
+
+
+def extract_metadata_batched(
+    file_paths: list[Path], chunk_size: int = _EXIF_BATCH_CHUNK_SIZE
+) -> dict[str, FileMetadata]:
+    """Chunked variant of :func:`extract_metadata_batch` (20–50 files/chunk).
+
+    Each chunk is one stay-open round-trip; failures degrade per-chunk to
+    filesystem extraction without losing the whole batch.
+    """
+    _ensure_heif_opener()
+    if not file_paths:
+        return {}
+    chunk_size = max(1, min(int(chunk_size), 50))
+    results: dict[str, FileMetadata] = {}
+    for start in range(0, len(file_paths), chunk_size):
+        chunk = file_paths[start : start + chunk_size]
+        try:
+            results.update(_exiftool_session.extract_batch(chunk))
+        except Exception as exc:
+            logger.warning("ExifTool chunk [%d:%d] failed, filesystem fallback: %s", start, start + len(chunk), exc)
+            for p in chunk:
+                try:
+                    results[str(p.resolve())] = _extract_via_filesystem(p)
+                except Exception:
+                    continue
+    return results

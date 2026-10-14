@@ -260,6 +260,56 @@ def resolve_live_photo_folder(
 # ---------------------------------------------------------------------------
 # Folder construction
 # ---------------------------------------------------------------------------
+def _segment_matches(part: str, segment: str, dt: datetime | None, position: int) -> bool:
+    """Semantic equality between a trailing *base* part and a date *segment*.
+
+    position 0 = year (exact ``YYYY``), 1 = month (any recognised month format
+    for the same month number, case-insensitive), 2 = day (numeric day).
+    """
+    if dt is None:
+        return False
+    if position == 0:
+        return part == f"{dt.year}"
+    if position == 1:
+        if part.lower() == segment.lower():
+            return True
+        try:
+            return parse_month_folder(part) == dt.month
+        except Exception:
+            return False
+    if position == 2:
+        try:
+            return part.isdigit() and int(part) == dt.day
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
+def _strip_duplicate_date_suffix(base: Path, segments: list[str], dt: datetime | None) -> list[str]:
+    """Drop leading date segments already present as trailing parts of *base*.
+
+    Prevents ``<dest>/2026`` + ``year/month`` from producing ``.../2026/2026/...``:
+    when the user picks a destination that already ends with the year (or
+    year/month, or year/month/day) the organizer would otherwise duplicate it.
+    Strips the longest leading run of *segments* that semantically equals the
+    trailing run of *base* parts (year must match exactly — ``.../2026`` +
+    2025 content keeps its year folder). Month comparison is case-insensitive
+    and recognises legacy month formats via :func:`parse_month_folder`.
+    """
+    if dt is None or not segments:
+        return segments
+    try:
+        parts = [str(p) for p in base.parts]
+    except Exception:
+        return segments
+    max_k = min(len(segments), len(parts))
+    for k in range(max_k, 0, -1):
+        tail = parts[len(parts) - k :]
+        if all(_segment_matches(p, s, dt, i) for i, (p, s) in enumerate(zip(tail, segments[:k]))):
+            return segments[k:]
+    return segments
+
+
 def build_folder(
     dest_root: Path,
     dt: datetime | None,
@@ -271,6 +321,9 @@ def build_folder(
 
     When *doc_kind* is set, the hierarchy is rooted at
     ``<dest_root>/Documents/<Kind>/``; otherwise directly at *dest_root*.
+
+    A trailing year/month/day already present on *dest_root* is not duplicated
+    (see :func:`_strip_duplicate_date_suffix`).
     """
     base = dest_root / DOCUMENTS_DIR_NAME / doc_kind if doc_kind else dest_root
 
@@ -293,6 +346,10 @@ def build_folder(
 
     if not segments:
         return base / "_unsorted"
+
+    segments = _strip_duplicate_date_suffix(base, segments, dt)
+    if not segments:
+        return base
 
     return base / Path(*segments)
 

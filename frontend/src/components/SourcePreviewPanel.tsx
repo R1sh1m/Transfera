@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { API_BASE_URL, getLocalToken } from "@/lib/api-client";
+import { useTransferStore } from "@/store/transfer";
 import { createThumbQueue, type ThumbQueue } from "@/lib/thumb-queue";
 import { PillSelect } from "./PillSelect";
 import ErrorBoundary from "./ErrorBoundary";
@@ -1115,6 +1116,9 @@ function SourcePreviewPanelInner({
     videos: 0,
     total_size_bytes: 0,
   });
+  const showNotification = useTransferStore((s) => s.showNotification);
+  const allNewPathsRef = useRef<string[] | null>(null);
+  const currentScanIdRef = useRef<string | null>(null);
   const [likelyDupPaths, setLikelyDupPaths] = useState<Set<string>>(new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [page, setPage] = useState(1);
@@ -1228,6 +1232,8 @@ function SourcePreviewPanelInner({
       setFailStreak(0);
       lockNotifiedRef.current = false;
       frozenMetaRef.current = null;
+      allNewPathsRef.current = null;
+      currentScanIdRef.current = null;
       onScanIdRef.current?.(null);
     }
   }, [currentSourceKey, deviceSource, onSelectionConfirm]);
@@ -1401,6 +1407,12 @@ function SourcePreviewPanelInner({
         // skeleton and never triggers a full rescan (backend scan cache).
         const freshItems = data.items || [];
         setItems(freshItems);
+        if (Array.isArray(data.likely_duplicate_paths)) {
+          setLikelyDupPaths(new Set(data.likely_duplicate_paths));
+        }
+        if (Array.isArray(data.new_paths)) {
+          allNewPathsRef.current = data.new_paths;
+        }
         setKnownSizes((prev) => {
           const next = new Map(prev);
           for (const it of freshItems) {
@@ -1423,6 +1435,8 @@ function SourcePreviewPanelInner({
             videos: data.videos || 0,
             total_size_bytes: data.total_size_bytes || 0,
           });
+          currentScanIdRef.current =
+            typeof data.scan_id === "string" ? data.scan_id : null;
           onScanIdRef.current?.(
             typeof data.scan_id === "string" ? data.scan_id : null,
           );
@@ -1478,19 +1492,29 @@ function SourcePreviewPanelInner({
   useEffect(() => {
     if (items.length === 0) {
       setLikelyDupPaths(new Set());
+      allNewPathsRef.current = null;
       return;
     }
-    const candidates = items.slice(0, 2000).map((item) => ({
-      abs_path: item.abs_path,
-      filename: item.filename,
-      size_bytes: item.size_bytes,
-    }));
+    // If the preview response already provided whole-source duplicate data, skip per-page prescan
+    if (allNewPathsRef.current !== null) {
+      return;
+    }
+    const scanId = currentScanIdRef.current;
+    const bodyPayload = scanId
+      ? { scan_id: scanId }
+      : {
+          candidates: items.slice(0, 2000).map((item) => ({
+            abs_path: item.abs_path,
+            filename: item.filename,
+            size_bytes: item.size_bytes,
+          })),
+        };
     const controller = new AbortController();
     const timer = setTimeout(() => {
       fetch(`${API_BASE_URL}/api/duplicates/prescan`, {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ candidates }),
+        body: JSON.stringify(bodyPayload),
         signal: controller.signal,
       })
         .then((res) => {
@@ -1499,6 +1523,9 @@ function SourcePreviewPanelInner({
         })
         .then((data) => {
           setLikelyDupPaths(new Set(data.likely_duplicate_paths || []));
+          if (Array.isArray(data.new_paths)) {
+            allNewPathsRef.current = data.new_paths;
+          }
         })
         .catch((err) => {
           if (err instanceof Error && err.name === "AbortError") return;
@@ -1593,6 +1620,51 @@ function SourcePreviewPanelInner({
     setSelected(next);
     onSelectionConfirm?.(Array.from(next));
   }, [visibleItems, allVisibleSelected, onSelectionConfirm]);
+
+  const handleSelectOnlyNew = useCallback(() => {
+    let targets: string[] = [];
+    if (allNewPathsRef.current !== null) {
+      targets = allNewPathsRef.current;
+    } else {
+      // Fallback: visible items that are not in likelyDupPaths
+      targets = visibleItems
+        .filter((it) => !likelyDupPaths.has(it.abs_path))
+        .map((it) => it.abs_path);
+    }
+
+    if (targets.length === 0) {
+      selectedRef.current = new Set();
+      setSelected(new Set());
+      onSelectionConfirm([], true);
+      const totalCount = metadata.total || visibleItems.length;
+      showNotification(
+        "info",
+        `No new files found — all ${totalCount > 0 ? totalCount.toLocaleString() : ""} files already appear in your library.`.replace("  ", " "),
+      );
+      return;
+    }
+
+    const next = new Set(targets);
+    selectedRef.current = next;
+    setSelected(next);
+    onSelectionConfirm(targets, true);
+
+    const dupCount = likelyDupPaths.size;
+    showNotification(
+      "info",
+      `Selected ${targets.length.toLocaleString()} new file${targets.length !== 1 ? "s" : ""}${
+        dupCount > 0
+          ? ` (${dupCount.toLocaleString()} duplicate${dupCount !== 1 ? "s" : ""} excluded)`
+          : ""
+      }.`,
+    );
+  }, [
+    visibleItems,
+    likelyDupPaths,
+    metadata.total,
+    onSelectionConfirm,
+    showNotification,
+  ]);
 
   const handleRetry = useCallback(() => {
     // Preserve page position: only bump the nonce so the same page
@@ -1967,19 +2039,7 @@ function SourcePreviewPanelInner({
             </span>
             <button
               type="button"
-              onClick={() => {
-                const next = new Set(selectedRef.current);
-                for (const item of visibleItems) {
-                  if (!likelyDupPaths.has(item.abs_path)) {
-                    next.add(item.abs_path);
-                  } else {
-                    next.delete(item.abs_path);
-                  }
-                }
-                selectedRef.current = next;
-                setSelected(next);
-                onSelectionConfirm?.(Array.from(next));
-              }}
+              onClick={handleSelectOnlyNew}
               className="px-2.5 py-1 bg-action text-white rounded-pill hover:bg-action/90 active:scale-[0.95] transition-all shrink-0"
             >
               Select only new files

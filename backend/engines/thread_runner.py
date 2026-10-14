@@ -62,3 +62,26 @@ def submit_and_wait(
     loop = _ensure_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=timeout)
+
+
+def shutdown(timeout: float = 2.0) -> None:
+    """Best-effort drain of the singleton loop thread (audit item 5).
+
+    The loop thread is a daemon (never blocks interpreter exit); this
+    helper merely gives in-flight DB bridge calls a bounded *timeout* to
+    land during teardown instead of being cut mid-write. Never raises.
+    """
+    global _loop, _loop_thread
+    with _lock:
+        loop, thread = _loop, _loop_thread
+    if loop is None or thread is None:
+        return
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_drain_noop(), loop)
+        fut.result(timeout=timeout)
+    except Exception:
+        pass
+
+
+async def _drain_noop() -> None:
+    return None

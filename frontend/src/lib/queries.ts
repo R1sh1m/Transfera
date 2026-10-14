@@ -646,8 +646,13 @@ export function usePreflightValidate(
   sourceRef?: SourceRef | null,
   options?: { enabled?: boolean },
 ) {
+  // Stabilize the query key: sourceRef is a fresh object identity on
+  // every render, which would otherwise defeat React Query dedup and
+  // refetch on each render. Both PreflightMetrics and the page-level
+  // gate share this key, so simultaneous mounts issue ONE request.
+  const sourceRefKey = sourceRef ? JSON.stringify(sourceRef) : null;
   return useQuery({
-    queryKey: ["preflight", sourcePath, destPath, sourceRef],
+    queryKey: ["preflight", sourcePath, destPath, sourceRefKey],
     queryFn: async () => {
       const { data } = await apiClient.post<PreflightValidateResponse>(
         "/utils/preflight-validate",
@@ -666,8 +671,14 @@ export function usePreflightValidate(
       (!!sourcePath || !!sourceRef) &&
       !!destPath &&
       destPath.trim().length > 0,
-    retry: 1,
-    staleTime: 10000,
+    // No retry: a retry doubles the worst-case "Analyzing..." spinner
+    // (up to 4 min back-to-back). The banner's Retry button covers
+    // genuine failures. Long staleTime + page-level dest debounce keep
+    // keystrokes from re-firing the walk.
+    retry: false,
+    staleTime: 60000,
+    gcTime: 300000,
+    refetchOnWindowFocus: false,
   });
 }
 

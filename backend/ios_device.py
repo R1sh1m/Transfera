@@ -914,6 +914,12 @@ async def get_device_info(serial: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Streaming read (for large files in the transfer engine)
 # ---------------------------------------------------------------------------
+# Streaming reads are capped (audit item 5): a wedged AFC handle must fail
+# the file, never buffer an unbounded response into memory.
+_AFC_MAX_READ_BYTES = 512 * 1024 * 1024
+_AFC_CLOSE_TIMEOUT_S = 2.0
+
+
 class AFCFileReader:
     """
     Async file-like reader for iOS device files.
@@ -954,6 +960,8 @@ class AFCFileReader:
             n = self._size - self._pos
         if n <= 0:
             return b""
+        # Hard cap so a corrupt size header cannot OOM the transfer.
+        n = min(n, _AFC_MAX_READ_BYTES)
         data = await asyncio.wait_for(
             asyncio.to_thread(self._afc.fread, self._handle, n),
             timeout=_READ_TIMEOUT_SECONDS,
@@ -961,27 +969,47 @@ class AFCFileReader:
         self._pos += len(data)
         return data
 
-    async def close(self):
-        """Close the file handle and AFC connection."""
+    async def close(self, lock_timeout: float = _AFC_CLOSE_TIMEOUT_S):
+        """Close the file handle and AFC connection (bounded, audit item 5).
+
+        Each close step gets *lock_timeout* seconds: a wedged device must
+        fail teardown fast instead of hanging the batch/shutdown join.
+        Never raises.
+        """
         try:
             if self._handle is not None and self._afc is not None:
                 try:
-                    await asyncio.to_thread(self._afc.fclose, self._handle)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._afc.fclose, self._handle),
+                        timeout=lock_timeout,
+                    )
                 except Exception:
                     pass
         finally:
             self._handle = None
             if self._afc is not None:
                 try:
-                    self._afc.close()
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._afc.close),
+                        timeout=lock_timeout,
+                    )
                 except Exception:
-                    pass
+                    try:
+                        self._afc.close()
+                    except Exception:
+                        pass
                 self._afc = None
             if self._lockdown is not None:
                 try:
-                    self._lockdown.close()
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._lockdown.close),
+                        timeout=lock_timeout,
+                    )
                 except Exception:
-                    pass
+                    try:
+                        self._lockdown.close()
+                    except Exception:
+                        pass
                 self._lockdown = None
 
     async def __aenter__(self):
@@ -1039,11 +1067,28 @@ def canonical_device_serial(serial: str | None) -> str:
     A WPD PnP id often embeds the 40-hex UDID among separators; extracting
     it keeps cutoff keys, selection matching, and tier prefs stable when
     the serving tier flaps. Ids without an embedded UDID (SWD#WPDBUSENUM
-    form) are returned unchanged.
+    form) are returned lowercased — matching the frontend ``canonicalSerial``
+    fallback — so equality checks never flip on path/serial case.
     """
     if not serial:
         return ""
     match = _UDID_SEARCH_RE.search(serial)
     if match:
         return match.group(0).lower()
-    return serial
+    return serial.lower()
+
+
+def normalise_ios_selection_path(path: str) -> str:
+    """Normalise a user-selected ``ios://`` URI for stable matching.
+
+    Backslashes become forward slashes and the device *serial* segment is
+    lowercased (serials are case-insensitive hex/PnP ids); the on-device
+    path case (e.g. ``/DCIM``) is preserved verbatim so diagnostics and
+    display never show a confusing ``dcim``-vs-``DCIM`` mismatch.
+    """
+    cleaned = path.replace("\\", "/")
+    without_prefix = cleaned[len(IOS_SOURCE_PREFIX) :]
+    parts = without_prefix.split("/", 1)
+    serial = parts[0].lower()
+    rest = f"/{parts[1]}" if len(parts) > 1 else ""
+    return f"{IOS_SOURCE_PREFIX}{serial}{rest}"

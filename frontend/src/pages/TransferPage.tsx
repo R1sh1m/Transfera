@@ -26,6 +26,8 @@ import {
   Loader2,
   Zap,
   HardDrive,
+  RefreshCw,
+  Upload,
 } from "lucide-react";
 import {
   useSession,
@@ -35,6 +37,7 @@ import {
   useSessionProgress,
   useSessionBatches,
   useMediaList,
+  useClearDeviceImportState,
 } from "@/lib/queries";
 import { useTransferStore } from "@/store/transfer";
 import { useTransferWs } from "@/hooks/use-transfer-ws";
@@ -510,6 +513,25 @@ function PreviewPanel({ progress }: { progress: SessionProgress | undefined }) {
                 <Loader2 className="w-8 h-8 animate-spin opacity-40" />
                 <p className="text-xs">Processing files...</p>
               </>
+            ) : status === "failed" ? (
+              <>
+                <Image className="w-10 h-10 opacity-20" />
+                <p className="text-xs text-center leading-relaxed">
+                  Nothing transferred — pick your files
+                  <br />
+                  again from the setup preview.
+                </p>
+                <button
+                  onClick={() =>
+                    useTransferStore.getState().setCurrentPage("setup")
+                  }
+                  className="no-drag inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-normal hover:bg-primary/90 transition-colors"
+                  title="Go back to setup and re-select files from the preview"
+                >
+                  <ArrowLeft className="w-3 h-3" />
+                  Choose files again
+                </button>
+              </>
             ) : (
               <>
                 <Image className="w-10 h-10 opacity-20" />
@@ -629,6 +651,264 @@ function TransferCompleteSummary({
 }
 
 // ---------------------------------------------------------------------------
+// Transfer failure helpers — short actionable copy up front, technical
+// detail (raw URIs, cutoff, serial) only inside the Details expander.
+// ---------------------------------------------------------------------------
+type FailureKind =
+  "walk-empty" | "cutoff" | "stale-selection" | "no-media" | "generic";
+
+function parseFailureKind(message: string): FailureKind {
+  const m = (message || "").toLowerCase();
+  if (
+    m.includes("0 files listed") ||
+    m.includes("couldn't read any files") ||
+    m.includes("could not read any files")
+  )
+    return "walk-empty";
+  if (
+    m.includes("since the last import") ||
+    m.includes("cutoff active") ||
+    m.includes("no new files")
+  )
+    return "cutoff";
+  if (
+    m.includes("matched files on the device") ||
+    m.includes("re-select them from the preview") ||
+    m.includes("re-select")
+  )
+    return "stale-selection";
+  if (m.includes("no media files found")) return "no-media";
+  return "generic";
+}
+
+function friendlySourceLabel(sourceRoot: string): string {
+  if (!sourceRoot) return "this source";
+  if (sourceRoot.startsWith("ios://")) return "your iPhone";
+  if (sourceRoot.startsWith("wpd://")) return "your device";
+  // Local folder: show just the folder name, not the whole path.
+  const trimmed = sourceRoot.replace(/[/\\]+$/, "");
+  const parts = trimmed.split(/[/\\]/);
+  const last = parts[parts.length - 1];
+  return last ? `“${last}”` : "this folder";
+}
+
+function parseDeviceSerial(sourceRoot: string): string | null {
+  if (!sourceRoot.startsWith("ios://") && !sourceRoot.startsWith("wpd://"))
+    return null;
+  const without = sourceRoot.split("://")[1] ?? "";
+  const serial = without.split("/")[0];
+  return serial || null;
+}
+
+// ---------------------------------------------------------------------------
+// TransferFailureCard — 2-line summary + action buttons.
+// Raw error text / URIs / cutoff / serial live only in <details>.
+// ---------------------------------------------------------------------------
+function TransferFailureCard({
+  session,
+  sourceRoot,
+  onBackToSetup,
+  onViewReport,
+  hasReport,
+}: {
+  session: ReturnType<typeof useSession>["data"];
+  sourceRoot: string;
+  onBackToSetup: () => void;
+  onViewReport: () => void;
+  hasReport: boolean;
+}) {
+  const [forgetConfirm, setForgetConfirm] = useState(false);
+  const clearDeviceState = useClearDeviceImportState();
+  const raw = (session as unknown as Record<string, unknown>) ?? {};
+  // Backend contract: error_message is the short user-facing text, and
+  // error_debug_detail carries machine detail. Fall back to the legacy
+  // report-JSON keys (user_message/debug_detail) when present.
+  const userMessage =
+    (session?.error_message ?? "") ||
+    (typeof raw["user_message"] === "string"
+      ? (raw["user_message"] as string)
+      : "");
+  const debugDetail =
+    (session as unknown as { error_debug_detail?: string | null } | undefined)
+      ?.error_debug_detail ||
+    (typeof raw["debug_detail"] === "string" && raw["debug_detail"]
+      ? (raw["debug_detail"] as string)
+      : null) ||
+    null;
+  // Scan diagnostics live only in <details> — never in the 2-line summary.
+  const scan = session as unknown as
+    | {
+        scan_scanned_total?: number | null;
+        scan_skipped_by_cutoff?: number | null;
+        scan_walk_total?: number | null;
+        scan_cutoff_iso?: string | null;
+        scan_serial_verdict?: string | null;
+      }
+    | null
+    | undefined;
+  const scanLines: string[] = [];
+  if (
+    typeof scan?.scan_scanned_total === "number" &&
+    scan.scan_scanned_total > 0
+  )
+    scanLines.push(`scanned: ${scan.scan_scanned_total}`);
+  if (typeof scan?.scan_walk_total === "number" && scan.scan_walk_total > 0)
+    scanLines.push(`walked: ${scan.scan_walk_total}`);
+  if (
+    typeof scan?.scan_skipped_by_cutoff === "number" &&
+    scan.scan_skipped_by_cutoff > 0
+  )
+    scanLines.push(`skipped by cutoff: ${scan.scan_skipped_by_cutoff}`);
+  if (scan?.scan_cutoff_iso) scanLines.push(`cutoff: ${scan.scan_cutoff_iso}`);
+  if (scan?.scan_serial_verdict)
+    scanLines.push(`serial: ${scan.scan_serial_verdict}`);
+  const scanDetail = scanLines.length > 0 ? scanLines.join(" · ") : null;
+  const kind = parseFailureKind(userMessage);
+  const sourceLabel = friendlySourceLabel(sourceRoot);
+  const serial = parseDeviceSerial(sourceRoot);
+
+  let title = "This transfer couldn't finish.";
+  let hint = "Check the details below, then go back to setup and try again.";
+  if (kind === "walk-empty") {
+    title = "Couldn't reach your iPhone — it may be locked.";
+    hint =
+      "Unlock it, tap Trust if asked, then check the preview and try again.";
+  } else if (kind === "cutoff") {
+    title = "Nothing new since your last import.";
+    hint =
+      "Import everything anyway, or forget the last import and start fresh.";
+  } else if (kind === "stale-selection") {
+    title = "Those selected files didn't match this time.";
+    hint = "Pick them again from the preview — the list may have changed.";
+  } else if (kind === "no-media") {
+    title = `No photos or videos found in ${sourceLabel}.`;
+    hint = "Try a deeper folder, or import everything below it.";
+  }
+
+  const goSetupFullImport = () => {
+    const st = useTransferStore.getState();
+    st.setSetupOnlyNewMode(false);
+    onBackToSetup();
+  };
+
+  const handleForget = () => {
+    if (!serial) {
+      goSetupFullImport();
+      return;
+    }
+    if (!forgetConfirm) {
+      setForgetConfirm(true);
+      return;
+    }
+    clearDeviceState.mutate(serial, {
+      onSuccess: () => {
+        useTransferStore.getState().setSetupOnlyNewMode(false);
+        setForgetConfirm(false);
+        onBackToSetup();
+      },
+      onError: () => setForgetConfirm(false),
+    });
+  };
+
+  return (
+    <div className="p-3 bg-red-500/5 border border-red-200/20 dark:border-red-900/20 rounded-md space-y-2">
+      <p className="text-xs font-semibold text-red-600 dark:text-red-400 flex items-center gap-1.5">
+        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+        {title}
+      </p>
+      <p className="text-[11px] text-muted-foreground leading-relaxed">
+        {hint}
+      </p>
+
+      <div className="flex items-center gap-2 pt-1 flex-wrap">
+        {kind === "cutoff" ? (
+          <>
+            <button
+              onClick={goSetupFullImport}
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded text-xs font-normal hover:bg-primary/90 transition-colors"
+              title="Go back to setup with full-import mode so everything copies again"
+            >
+              <Upload className="w-3 h-3" />
+              Import anyway
+            </button>
+            <button
+              onClick={handleForget}
+              disabled={clearDeviceState.isPending}
+              className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors disabled:opacity-50"
+              title="Clear the last-import marker so the next run scans everything"
+            >
+              {clearDeviceState.isPending ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3 h-3" />
+              )}
+              {forgetConfirm ? "Confirm forget?" : "Forget last import"}
+            </button>
+          </>
+        ) : kind === "walk-empty" ? (
+          <button
+            onClick={onBackToSetup}
+            className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded text-xs font-normal hover:bg-primary/90 transition-colors"
+            title="Go back to setup — the preview re-scans the device first"
+          >
+            <RefreshCw className="w-3 h-3" />
+            Check preview &amp; retry
+          </button>
+        ) : kind === "stale-selection" ? (
+          <button
+            onClick={onBackToSetup}
+            className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded text-xs font-normal hover:bg-primary/90 transition-colors"
+            title="Go back to setup and pick files again from the preview"
+          >
+            <ArrowLeft className="w-3 h-3" />
+            Re-select from preview
+          </button>
+        ) : (
+          <button
+            onClick={onBackToSetup}
+            className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded text-xs font-normal hover:bg-primary/90 transition-colors"
+            title="Return to setup with the same source and destination"
+          >
+            <ArrowLeft className="w-3 h-3" />
+            Back to setup
+          </button>
+        )}
+        {hasReport && (
+          <button
+            onClick={onViewReport}
+            className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+            title="Open HTML report"
+          >
+            <FileText className="w-3 h-3" />
+            Open report
+          </button>
+        )}
+      </div>
+
+      <details className="pt-1 group">
+        <summary className="text-[11px] text-muted-foreground hover:text-foreground cursor-pointer select-none transition-colors">
+          Details
+        </summary>
+        <div className="mt-1.5 p-2 bg-muted/50 rounded text-[10px] font-mono text-muted-foreground break-words whitespace-pre-wrap leading-relaxed">
+          {userMessage || "No additional error details were reported."}
+          {debugDetail && (
+            <span className="block mt-1.5 pt-1.5 border-t border-border">
+              {debugDetail}
+            </span>
+          )}
+          {scanDetail && (
+            <span className="block mt-1 opacity-80">{scanDetail}</span>
+          )}
+          {session?.id != null && (
+            <span className="block mt-1 opacity-70">session #{session.id}</span>
+          )}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // TransferMonitor — Performance stats and progress (polling-based)
 // ---------------------------------------------------------------------------
 function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
@@ -659,8 +939,8 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
     isCancelled,
   ].some(Boolean);
 
-  // Failure reason
-  const sessionError = session?.error_message;
+  // Failure reason is rendered by TransferFailureCard (2-line summary +
+  // actions, technical detail behind a Details expander).
 
   // Follow SessionRow handleViewReport pattern in DashboardPage:
   // desktop opens the report path directly, browser opens the report endpoint.
@@ -816,43 +1096,15 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
           </div>
         )}
 
-        {/* Failed details — reason + report + recovery path */}
+        {/* Failed details — 2-line summary + actions, tech behind Details */}
         {isFailed && (
-          <div className="p-3 bg-red-500/5 border border-red-200/20 dark:border-red-900/20 rounded-md space-y-2">
-            <p className="text-xs font-semibold text-red-600 dark:text-red-400 flex items-center gap-1.5">
-              <AlertCircle className="w-3.5 h-3.5" />
-              Transfer failed
-            </p>
-            {sessionError ? (
-              <p className="text-[11px] text-foreground/80 break-words font-mono">
-                {sessionError}
-              </p>
-            ) : (
-              <p className="text-[11px] text-muted-foreground">
-                No additional error details were reported.
-              </p>
-            )}
-            <div className="flex items-center gap-2 pt-1">
-              {session?.session_report_path && (
-                <button
-                  onClick={handleViewReport}
-                  className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
-                  title="Open HTML report"
-                >
-                  <FileText className="w-3 h-3" />
-                  Open report
-                </button>
-              )}
-              <button
-                onClick={handleBackToSetup}
-                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded text-xs font-normal hover:bg-primary/90 transition-colors"
-                title="Return to setup with the same source and destination"
-              >
-                <ArrowLeft className="w-3 h-3" />
-                Back to setup
-              </button>
-            </div>
-          </div>
+          <TransferFailureCard
+            session={session}
+            sourceRoot={transfer.sourceRoot}
+            onBackToSetup={handleBackToSetup}
+            onViewReport={handleViewReport}
+            hasReport={Boolean(session?.session_report_path)}
+          />
         )}
 
         {/* Step Progress */}
@@ -1296,7 +1548,12 @@ export default function TransferPage() {
             </div>
             <div className="flex items-center gap-2 mt-0.5">
               <p className="text-xs text-muted-foreground">
-                {transfer.sourceRoot} {"->"} {transfer.destRoot}
+                {transfer.sourceRoot.startsWith("ios://")
+                  ? "iPhone"
+                  : transfer.sourceRoot.startsWith("wpd://")
+                    ? "Device"
+                    : transfer.sourceRoot}{" "}
+                {"->"} {transfer.destRoot}
               </p>
               <span
                 className={cn(

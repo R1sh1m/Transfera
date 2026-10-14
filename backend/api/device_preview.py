@@ -28,7 +28,7 @@ from fastapi.responses import Response
 
 from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.device_backend import DeviceLockedError, DeviceNotTrustedError, DeviceStatus, WpdDeviceAccessDenied
-from backend.ios_device import drop_afc_slots, ensure_afc_warm, read_device_file
+from backend.ios_device import drop_afc_slots, ensure_afc_warm
 from backend.tier2_manager import get_device_manager
 
 _PREVIEW_MAX_FILES = 5000
@@ -365,7 +365,17 @@ _VIDEO_PREFIX_BYTES = 4 * 1024 * 1024
 
 
 class _ListingCacheEntry:
-    __slots__ = ("items", "photos", "videos", "total_size", "snapshot", "cached_at", "scan_id")
+    __slots__ = (
+        "items",
+        "photos",
+        "videos",
+        "total_size",
+        "snapshot",
+        "cached_at",
+        "scan_id",
+        "likely_duplicate_paths",
+        "new_paths",
+    )
 
     def __init__(
         self,
@@ -376,6 +386,8 @@ class _ListingCacheEntry:
         snapshot: tuple | None,
         cached_at: float,
         scan_id: str | None = None,
+        likely_duplicate_paths: list[str] | None = None,
+        new_paths: list[str] | None = None,
     ) -> None:
         self.items = items
         self.photos = photos
@@ -384,6 +396,8 @@ class _ListingCacheEntry:
         self.snapshot = snapshot
         self.cached_at = cached_at
         self.scan_id = scan_id
+        self.likely_duplicate_paths = likely_duplicate_paths
+        self.new_paths = new_paths
 
 
 _listing_cache: OrderedDict[tuple, _ListingCacheEntry] = OrderedDict()
@@ -591,6 +605,36 @@ def find_listing_by_scan_id(scan_id: str) -> dict | None:
             }
     try:
         return _listing_l2_find_by_scan_id(scan_id)
+    except Exception:
+        pass
+    return None
+
+
+def get_listing_items_by_scan_id(scan_id: str) -> list[dict] | None:
+    """Look up the full items list for a cached preview walk by its scan ID."""
+    if not scan_id:
+        return None
+    with _listing_cache_lock:
+        for _key, ent in list(_listing_cache.items()):
+            if getattr(ent, "scan_id", None) == scan_id:
+                return list(ent.items)
+    try:
+        conn = _listing_l2_connect()
+        try:
+            cur = conn.execute(
+                "SELECT items_json FROM device_listings WHERE scan_id=? LIMIT 1",
+                (scan_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, list):
+                    return loaded
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
     except Exception:
         pass
     return None
@@ -1490,19 +1534,48 @@ def _generate_photo_thumbnail(path: str, size: int) -> bytes | None:
 
 
 def _extract_frame_from_bytes(data: bytes, size: int, suffix: str) -> bytes | None:
-    """Extract one JPEG frame from in-memory video bytes (single ffmpeg spawn).
+    """Extract one JPEG frame from in-memory video bytes (multi-strategy ffmpeg spawn).
 
-    Used for device video prefixes: fast input seek, no duration probe.
+    Used for device video prefixes: fast input seek, accurate seek, output seek.
     Returns None when the prefix lacks decodable frames (e.g. moov at EOF).
     """
     if not data or len(data) <= 100:
         return None
     tmp_path = ""
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=suffix or ".mp4", delete=False) as tmp:
             tmp.write(data)
             tmp_path = tmp.name
-        result = subprocess.run(
+
+        # Fast path 1: Check for embedded preview / poster frame in video container
+        if len(data) >= 4096:
+            try:
+                from backend.engines.metadata_extractor import extract_embedded_thumbnail_bytes
+
+                embedded = extract_embedded_thumbnail_bytes(Path(tmp_path))
+                if embedded and len(embedded) > 500:
+                    from PIL import Image as _Image
+                    from PIL import ImageOps as _ImageOps
+                    from PIL.Image import Resampling as _Resampling
+
+                    thumb = _Image.open(_io.BytesIO(embedded))
+                    try:
+                        thumb = _ImageOps.exif_transpose(thumb) or thumb
+                        thumb.thumbnail((size, size), _Resampling.BILINEAR)
+                        if thumb.mode not in ("RGB",):
+                            thumb = thumb.convert("RGB")
+                        buf = _io.BytesIO()
+                        thumb.save(buf, format="JPEG", quality=80)
+                        return buf.getvalue()
+                    finally:
+                        try:
+                            thumb.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        seek_commands = [
             [
                 "ffmpeg",
                 "-ss",
@@ -1519,12 +1592,54 @@ def _extract_frame_from_bytes(data: bytes, size: int, suffix: str) -> bytes | No
                 "mjpeg",
                 "pipe:1",
             ],
-            capture_output=True,
-            timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
-            return result.stdout
+            [
+                "ffmpeg",
+                "-ss",
+                "00:00:00",
+                "-accurate_seek",
+                "-i",
+                tmp_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "mjpeg",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            [
+                "ffmpeg",
+                "-i",
+                tmp_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "mjpeg",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+        ]
+
+        for cmd in seek_commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
+                    return result.stdout
+            except subprocess.TimeoutExpired:
+                raise
+            except (OSError, Exception) as exc:
+                logger.debug("ffmpeg frame extraction attempt failed: %s", exc)
+
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.debug("ffmpeg frame extraction failed: %s", exc)
     except Exception as exc:
@@ -1598,7 +1713,7 @@ def _generate_video_thumbnail(path: str, size: int) -> bytes | None:
     return None
 
 
-def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None:
+def _generate_photo_thumbnail_from_bytes(data: bytes, size: int, suffix: str = ".heic") -> bytes | None:
     """Generate thumbnail from raw bytes (for iOS/remote files).
 
     Tries an embedded-EXIF thumbnail first (fast path for JPEG/HEIC).
@@ -1623,7 +1738,7 @@ def _generate_photo_thumbnail_from_bytes(data: bytes, size: int) -> bytes | None
 
                 _tmp_path = ""
                 try:
-                    with _tempfile.NamedTemporaryFile(suffix=".heic", delete=False) as _tmp:
+                    with _tempfile.NamedTemporaryFile(suffix=suffix or ".heic", delete=False) as _tmp:
                         _tmp.write(data)
                         _tmp_path = _tmp.name
                     embedded = extract_embedded_thumbnail_bytes(_tmp_path)
@@ -1709,12 +1824,12 @@ async def _thumb_video_path_worker(path: str, size: int) -> bytes | None:
         return None
 
 
-async def _thumb_photo_bytes_worker(data: bytes, size: int) -> bytes | None:
+async def _thumb_photo_bytes_worker(data: bytes, size: int, suffix: str = ".heic") -> bytes | None:
     """iOS photo decode out-of-process; crash/timeout -> None (fall through)."""
     try:
         from backend.engines import thumb_worker as _tw
 
-        return await asyncio.to_thread(_tw.generate_photo_from_bytes, data, size)
+        return await asyncio.to_thread(_tw.generate_photo_from_bytes, data, size, suffix)
     except Exception as exc:
         logger.debug("thumb worker photo-bytes failed (%d bytes): %s", len(data) if data else 0, exc)
         return None
@@ -1879,6 +1994,25 @@ async def preview_directory(
     offset = (page - 1) * page_size
     page_items = items[offset : offset + page_size]
 
+    likely_dup_paths: list[str] = []
+    new_paths: list[str] = []
+    try:
+        from backend.engines.duplicate_detector import prescan_against_library
+
+        prescan_candidates = [
+            {
+                "abs_path": it.get("abs_path") or "",
+                "filename": it.get("filename") or "",
+                "size_bytes": it.get("size_bytes") or 0,
+            }
+            for it in items
+        ]
+        prescan_res = await prescan_against_library(prescan_candidates)
+        likely_dup_paths = prescan_res.get("likely_duplicate_paths") or []
+        new_paths = prescan_res.get("new_paths") or []
+    except Exception as p_err:
+        logger.debug("Inline preview duplicate prescan skipped: %s", p_err)
+
     return {
         "total": total,
         "photos": total_photos,
@@ -1888,6 +2022,10 @@ async def preview_directory(
         "page_size": page_size,
         "pages": pages,
         "items": page_items,
+        "likely_duplicate_paths": likely_dup_paths,
+        "likely_duplicate_count": len(likely_dup_paths),
+        "new_paths": new_paths,
+        "new_count": len(new_paths),
     }
 
 
@@ -2322,6 +2460,36 @@ async def ios_preview_directory(
     # Inline LQIP backfill for the sliced page only (local cache IO, no USB).
     _attach_lqip_to_page_items(device_id, page_items)
 
+    cached_ent = None
+    with _listing_cache_lock:
+        cached_ent = _listing_cache.get(cache_key)
+
+    likely_dup_paths: list[str] = []
+    new_paths: list[str] = []
+    if cached_ent and cached_ent.likely_duplicate_paths is not None and cached_ent.new_paths is not None:
+        likely_dup_paths = cached_ent.likely_duplicate_paths
+        new_paths = cached_ent.new_paths
+    else:
+        try:
+            from backend.engines.duplicate_detector import prescan_against_library
+
+            prescan_candidates = [
+                {
+                    "abs_path": it.get("abs_path") or "",
+                    "filename": it.get("filename") or "",
+                    "size_bytes": it.get("size_bytes") or 0,
+                }
+                for it in items
+            ]
+            prescan_res = await prescan_against_library(prescan_candidates)
+            likely_dup_paths = prescan_res.get("likely_duplicate_paths") or []
+            new_paths = prescan_res.get("new_paths") or []
+            if cached_ent:
+                cached_ent.likely_duplicate_paths = likely_dup_paths
+                cached_ent.new_paths = new_paths
+        except Exception as p_err:
+            logger.debug("Inline ios-preview duplicate prescan skipped: %s", p_err)
+
     return {
         "total": total,
         "photos": total_photos,
@@ -2333,6 +2501,10 @@ async def ios_preview_directory(
         "items": page_items,
         "scan_id": scan_id,
         "cache_status": cache_status,
+        "likely_duplicate_paths": likely_dup_paths,
+        "likely_duplicate_count": len(likely_dup_paths),
+        "new_paths": new_paths,
+        "new_count": len(new_paths),
     }
 
 
@@ -2421,7 +2593,7 @@ async def ios_thumbnail(
             # failure do we pay for Stage 2 (full read). Blocking Pillow
             # decodes run in the threadpool so the event loop never blocks.
             # ----------------------------------------------------------------
-            PARTIAL_READ_BYTES = 256 * 1024  # 256 KB
+            PARTIAL_READ_BYTES = 512 * 1024  # 512 KB
 
             partial_bytes: bytes | None = None
             partial_exc: BaseException | None = None
@@ -2437,7 +2609,7 @@ async def ios_thumbnail(
             if partial_bytes and len(partial_bytes) >= 4096:
                 # Out-of-process: EXIF-extract + Pillow decode run in the
                 # worker child, never on the event loop or its threads.
-                jpeg_bytes = await _thumb_photo_bytes_worker(partial_bytes, size)
+                jpeg_bytes = await _thumb_photo_bytes_worker(partial_bytes, size, ext)
                 if jpeg_bytes and len(jpeg_bytes) > 10:
                     logger.debug("iOS partial-read thumbnail hit for %s (%d bytes)", path, len(partial_bytes))
                 else:
@@ -2469,52 +2641,55 @@ async def ios_thumbnail(
             # Stage 2: full-read fallback before ever returning grey.
             if not jpeg_bytes or len(jpeg_bytes) <= 10:
                 jpeg_bytes = None
-                try:
-                    async with _IOS_THUMB_SEMAPHORE:
-                        file_bytes = await read_device_file(device_id, path)
-                    if file_bytes and len(file_bytes) > 100:
-                        jpeg_bytes = await _thumb_photo_bytes_worker(file_bytes, size)
-                        if jpeg_bytes and len(jpeg_bytes) > 10:
-                            logger.debug("iOS full-read thumbnail hit for %s (%d bytes)", path, len(file_bytes))
+                if file_size and file_size > 50 * 1024 * 1024:
+                    fail_reason = "file-too-large"
+                else:
+                    try:
+                        async with _IOS_THUMB_SEMAPHORE:
+                            file_bytes = await get_device_manager().read_device_file(device_id, path)
+                        if file_bytes and len(file_bytes) > 100:
+                            jpeg_bytes = await _thumb_photo_bytes_worker(file_bytes, size, ext)
+                            if jpeg_bytes and len(jpeg_bytes) > 10:
+                                logger.debug("iOS full-read thumbnail hit for %s (%d bytes)", path, len(file_bytes))
+                            else:
+                                logger.debug(
+                                    "iOS full-read decode failed for %s (%d bytes, ext=%s, "
+                                    "heif_available=%s) — truly undecodable",
+                                    path,
+                                    len(file_bytes),
+                                    ext,
+                                    _ensure_heif_opener(),
+                                )
+                                fail_reason = (
+                                    "no-pillow-heif"
+                                    if (ext in (".heic", ".heif") and not _ensure_heif_opener())
+                                    else "undecodable"
+                                )
                         else:
-                            logger.debug(
-                                "iOS full-read decode failed for %s (%d bytes, ext=%s, "
-                                "heif_available=%s) — truly undecodable",
-                                path,
-                                len(file_bytes),
-                                ext,
-                                _ensure_heif_opener(),
-                            )
-                            fail_reason = (
-                                "no-pillow-heif"
-                                if (ext in (".heic", ".heif") and not _ensure_heif_opener())
-                                else "undecodable"
-                            )
-                    else:
-                        logger.debug("iOS full read empty for %s — transient?", path)
-                        fail_reason = "full-read-empty"
-                except FileNotFoundError as exc:
-                    logger.debug("iOS thumbnail not-found for %s: %s", path, exc)
-                    return Response(
-                        content=b"",
-                        media_type="image/jpeg",
-                        status_code=404,
-                        headers={"X-Thumb-Status": "not-found"},
-                    )
-                except Exception as exc:
-                    logger.debug("iOS full-read thumbnail error for %s: %s (%s)", path, exc, fail_reason)
-                    if _is_transient_thumb_error(exc):
-                        transient_exc = exc
+                            logger.debug("iOS full read empty for %s — transient?", path)
+                            fail_reason = "full-read-empty"
+                    except FileNotFoundError as exc:
+                        logger.debug("iOS thumbnail not-found for %s: %s", path, exc)
                         return Response(
                             content=b"",
                             media_type="image/jpeg",
-                            status_code=503,
-                            headers={
-                                "Retry-After": "2",
-                                "X-Thumb-Status": "transient-read-failed",
-                            },
+                            status_code=404,
+                            headers={"X-Thumb-Status": "not-found"},
                         )
-                    fail_reason = f"full-read-failed: {exc}"
+                    except Exception as exc:
+                        logger.debug("iOS full-read thumbnail error for %s: %s (%s)", path, exc, fail_reason)
+                        if _is_transient_thumb_error(exc):
+                            transient_exc = exc
+                            return Response(
+                                content=b"",
+                                media_type="image/jpeg",
+                                status_code=503,
+                                headers={
+                                    "Retry-After": "2",
+                                    "X-Thumb-Status": "transient-read-failed",
+                                },
+                            )
+                        fail_reason = f"full-read-failed: {exc}"
 
         else:
             # Video fast path: read only the first 4 MB and extract one
@@ -2567,6 +2742,24 @@ async def ios_thumbnail(
                     len(prefix_bytes) if prefix_bytes else 0,
                 )
                 fail_reason = "prefix-read-failed"
+
+            # Stage 2 for video: If prefix extraction yields no frame (e.g. MOOV at EOF in Live Photos or
+            # non-faststart videos) and file size is <= 16 MB, perform full read fallback.
+            if not jpeg_bytes and file_size and file_size <= 16 * 1024 * 1024:
+                try:
+                    logger.debug(
+                        "iOS video prefix had no frame for %s (%d bytes) — attempting full read fallback",
+                        path,
+                        file_size,
+                    )
+                    async with _IOS_THUMB_SEMAPHORE:
+                        full_video_bytes = await get_device_manager().read_device_file(device_id, path)
+                    if full_video_bytes and len(full_video_bytes) > 4096:
+                        jpeg_bytes = await _thumb_frame_bytes_worker(full_video_bytes, size, ext or ".mp4")
+                        if jpeg_bytes and len(jpeg_bytes) > 10:
+                            fail_reason = "ok"
+                except Exception as v_err:
+                    logger.debug("iOS full video read thumbnail attempt failed for %s: %s", path, v_err)
 
     except HTTPException:
         raise

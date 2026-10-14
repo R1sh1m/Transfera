@@ -635,6 +635,51 @@ def test_conflict_exhaustion() -> None:
 
 
 # ======================================================================
+# 15. Organizer: dest_root trailing year is not duplicated (D:/t/2026 bug)
+# ======================================================================
+def test_dest_year_dedup() -> None:
+    """A dest_root already ending in the capture year must not gain a second one."""
+    print("\n=== Organizer: Dest Year Dedup ===")
+
+    from datetime import datetime
+
+    from backend.engines.organizer import build_folder, format_month_folder
+
+    dt = datetime(2026, 9, 14, tzinfo=UTC)
+    month = format_month_folder(dt)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # dest ends with the SAME year -> no doubling
+        dest = Path(tmp) / "transferred" / "2026"
+        folder = build_folder(dest, dt, "year/month")
+        f_str = str(folder).replace("\\", "/")
+        _check(
+            "No doubled year segment",
+            f_str.count("/2026/") <= 1 and not f_str.rstrip("/").endswith("/2026/2026"),
+            f"got: {f_str}",
+        )
+        _check("Month still appended", folder.name == month, f"got: {folder}")
+
+        # dest ends with year/month already -> idempotent
+        dest2 = Path(tmp) / "transferred" / "2026" / month
+        folder2 = build_folder(dest2, dt, "year/month")
+        _check("Year/month dest is idempotent", folder2 == dest2, f"got: {folder2}")
+
+        # dest ends with a DIFFERENT year -> year folder kept
+        dest3 = Path(tmp) / "transferred" / "2026"
+        dt_other = datetime(2025, 9, 14, tzinfo=UTC)
+        folder3 = build_folder(dest3, dt_other, "year/month")
+        f3 = str(folder3).replace("\\", "/")
+        _check("Different year still appended", "/2025/" in f3, f"got: {f3}")
+
+        # plain dest unaffected
+        dest4 = Path(tmp) / "transferred"
+        folder4 = build_folder(dest4, dt, "year/month")
+        f4 = str(folder4).replace("\\", "/")
+        _check("Plain dest gains year/month", f4.endswith(f"2026/{month}"), f"got: {f4}")
+
+
+# ======================================================================
 # Runner
 # ======================================================================
 async def main() -> None:
@@ -652,6 +697,7 @@ async def main() -> None:
     test_live_photo_folder()
     test_organizer_flat()
     test_conflict_exhaustion()
+    test_dest_year_dedup()
 
     # DB-backed tests
     await _reset_db()

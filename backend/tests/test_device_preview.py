@@ -236,3 +236,39 @@ def test_thumbnail_cache_only_miss_and_hit(test_client, tmp_path):
     assert res_hit.status_code == 200
     assert res_hit.headers.get("X-Thumb-Status") == "hit"
 
+
+def test_extract_frame_short_clip(tmp_path):
+    """Ensure short video clips (e.g. 0.2s Live Photos) decode via accurate/output seek."""
+    import io
+    import subprocess
+
+    from PIL import Image
+
+    from backend.engines import thumb_worker
+
+    clip_path = tmp_path / "short.mp4"
+    res = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x64:d=0.2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip_path),
+        ],
+        capture_output=True,
+    )
+    if res.returncode == 0 and clip_path.is_file():
+        data = clip_path.read_bytes()
+        thumb = thumb_worker.extract_frame_from_bytes(data, 64, suffix=".mp4")
+        assert thumb is not None
+        assert len(thumb) > 100
+        img = Image.open(io.BytesIO(thumb))
+        assert img.format == "JPEG"
+
+

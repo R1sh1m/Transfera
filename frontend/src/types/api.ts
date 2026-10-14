@@ -166,6 +166,14 @@ export interface SessionInfo {
   total_bytes_volume?: number;
   session_report_path?: string;
   error_message?: string | null;
+  /** Short machine detail for the Details expander (optional, backward-compat). */
+  error_debug_detail?: string | null;
+  /** Scan diagnostics persisted even on FAILED 0-match sessions. */
+  scan_scanned_total?: number;
+  scan_skipped_by_cutoff?: number;
+  scan_walk_total?: number;
+  scan_cutoff_iso?: string | null;
+  scan_serial_verdict?: string | null;
 }
 
 export interface SessionList {
@@ -324,6 +332,9 @@ export interface Person {
   cover_face_id?: number | null;
   cover_media_id?: number | null;
   cover_thumbnail_url?: string | null;
+  /** Face-crop bounding box [x, y, w, h] for the cover face (added by
+   *  backend lane; absent until then — callers must degrade gracefully). */
+  cover_bbox?: number[] | null;
   hidden: boolean;
 }
 
@@ -393,10 +404,19 @@ export interface PrescanCandidate {
   size_bytes: number;
 }
 
+export interface PrescanRequest {
+  candidates?: PrescanCandidate[];
+  scan_id?: string;
+  path?: string;
+  recursive?: boolean;
+}
+
 export interface PrescanResponse {
   checked: number;
   likely_duplicate_count: number;
   likely_duplicate_paths: string[];
+  new_count?: number;
+  new_paths?: string[];
 }
 
 export interface DuplicateCheckRequest {

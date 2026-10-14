@@ -357,10 +357,21 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
+    async def _drain_thread_runner() -> None:
+        # Bounded sentinel drain + deadline join (audit item 5): the shared
+        # DB bridge loop is a daemon, but in-flight writes get 2 s to land.
+        try:
+            from backend.engines import thread_runner as _tr
+
+            await asyncio.to_thread(_tr.shutdown, 2.0)
+        except Exception:
+            pass
+
     await asyncio.gather(
         _drain_transfer_tasks(),
         _close_exiftool_session(),
         _flush_thumbnail_queue(),
+        _drain_thread_runner(),
         return_exceptions=True,
     )
 

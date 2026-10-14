@@ -286,6 +286,17 @@ const _notifiedSessions = new Set<number>();
 // Notification queue helpers (phone-like push stack, cap ~4, drop oldest)
 // ---------------------------------------------------------------------------
 const MAX_NOTIFICATIONS = 4;
+
+/** How long each toast stays on screen before auto-dismiss. Success and
+    info vanish quickly (~4s); warnings and errors get a beat longer (~6s)
+    so they can be read, but never linger. Single source of truth — the
+    toast timer and its progress bar both read this map. */
+export const TOAST_AUTO_DISMISS_MS: Record<NotificationItem["type"], number> = {
+  success: 4_000,
+  info: 4_000,
+  warning: 6_000,
+  error: 6_000,
+};
 let _notifSeq = 0;
 
 function nextNotifId(): string {

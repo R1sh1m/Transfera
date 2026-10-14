@@ -108,7 +108,7 @@ def _ensure_pillow_heif() -> bool:
         return False
 
 
-def _decode_photo_bytes(data: bytes, size: int) -> bytes | None:
+def _decode_photo_bytes(data: bytes, size: int, suffix: str = ".heic") -> bytes | None:
     """Pillow decode of raw image bytes (embedded-EXIF attempt first)."""
     import io as _io
 
@@ -123,7 +123,7 @@ def _decode_photo_bytes(data: bytes, size: int) -> bytes | None:
         if len(data) >= 4096:
             _tmp = ""
             try:
-                with tempfile.NamedTemporaryFile(suffix=".heic", delete=False) as fh:
+                with tempfile.NamedTemporaryFile(suffix=suffix or ".heic", delete=False) as fh:
                     fh.write(data)
                     _tmp = fh.name
                 embedded = extract_embedded_thumbnail_bytes(Path(_tmp))
@@ -187,12 +187,47 @@ def _decode_frame_bytes(data: bytes, size: int, suffix: str) -> bytes | None:
     """
     if not data or len(data) <= 100:
         return None
+    import io as _io
+
     tmp_path = ""
     try:
         with tempfile.NamedTemporaryFile(suffix=suffix or ".mp4", delete=False) as tmp:
             tmp.write(data)
             tmp_path = tmp.name
-        result = subprocess.run(
+
+        # Fast path 1: Check for embedded preview / poster frame in video container (QuickTime/MP4)
+        if len(data) >= 4096:
+            try:
+                from backend.engines.metadata_extractor import extract_embedded_thumbnail_bytes
+
+                embedded = extract_embedded_thumbnail_bytes(Path(tmp_path))
+                if embedded and len(embedded) > 500:
+                    from PIL import Image as _Image
+                    from PIL import ImageOps as _ImageOps
+                    from PIL.Image import Resampling as _Resampling
+
+                    thumb = _Image.open(_io.BytesIO(embedded))
+                    try:
+                        thumb = _ImageOps.exif_transpose(thumb) or thumb
+                        thumb.thumbnail((size, size), _Resampling.BILINEAR)
+                        if thumb.mode not in ("RGB",):
+                            thumb = thumb.convert("RGB")
+                        buf = _io.BytesIO()
+                        thumb.save(buf, format="JPEG", quality=80)
+                        return buf.getvalue()
+                    finally:
+                        try:
+                            thumb.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Fast path 2: ffmpeg frame extraction with multi-strategy seeking:
+        # 1. Fast seek to 0.5s (skips blank opening frames in normal videos)
+        # 2. Accurate seek to t=0 (handles short clips, Live Photos, or bursts under 0.5s)
+        # 3. Output seek t=0 (first decodable frame in truncated or fragmented streams)
+        seek_commands = [
             [
                 "ffmpeg",
                 "-ss",
@@ -209,12 +244,54 @@ def _decode_frame_bytes(data: bytes, size: int, suffix: str) -> bytes | None:
                 "mjpeg",
                 "pipe:1",
             ],
-            capture_output=True,
-            timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
-            return result.stdout
+            [
+                "ffmpeg",
+                "-ss",
+                "00:00:00",
+                "-accurate_seek",
+                "-i",
+                tmp_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "mjpeg",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            [
+                "ffmpeg",
+                "-i",
+                tmp_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "mjpeg",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+        ]
+
+        for cmd in seek_commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
+                    return result.stdout
+            except subprocess.TimeoutExpired:
+                raise
+            except (OSError, Exception) as exc:
+                logger.debug("thumb worker frame extraction attempt failed: %s", exc)
+
     except subprocess.TimeoutExpired:
         raise
     except (OSError, Exception) as exc:
@@ -295,7 +372,7 @@ def _decode_photo_path(path: str, size: int) -> bytes | None:
 
 
 def _decode_video_path(path: str, size: int) -> bytes | None:
-    """ffmpeg frame extraction from a video file (fast seek, then t=0 retry)."""
+    """ffmpeg frame extraction from a video file (fast seek, t=0 retry, then output seek)."""
     for seek in ("00:00:01", "00:00:00"):
         try:
             result = subprocess.run(
@@ -326,6 +403,30 @@ def _decode_video_path(path: str, size: int) -> bytes | None:
             logger.debug("thumb worker video decode failed for %s: %s", path, exc)
         except Exception as exc:
             logger.debug("thumb worker video error for %s: %s", path, exc)
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-i",
+                path,
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0 and result.stdout and len(result.stdout) > 100:
+            return result.stdout
+    except Exception as exc:
+        logger.debug("thumb worker video output-seek failed for %s: %s", path, exc)
     return None
 
 
@@ -333,7 +434,7 @@ def _decode_in_process(kind: str, payload: bytes | str, size: int, suffix: str) 
     """Run the decode for *kind* in this process (child body / fallback)."""
     if kind == "photo_bytes":
         assert isinstance(payload, bytes)
-        return _decode_photo_bytes(payload, size)
+        return _decode_photo_bytes(payload, size, suffix)
     if kind == "frame_bytes":
         assert isinstance(payload, bytes)
         return _decode_frame_bytes(payload, size, suffix)
@@ -466,9 +567,11 @@ def _run_or_fallback(kind: str, payload: bytes | str, size: int, suffix: str, ti
 # ---------------------------------------------------------------------------
 
 
-def generate_photo_from_bytes(data: bytes, size: int, *, timeout: float = PHOTO_BYTES_TIMEOUT_S) -> bytes | None:
+def generate_photo_from_bytes(
+    data: bytes, size: int, suffix: str = ".heic", *, timeout: float = PHOTO_BYTES_TIMEOUT_S
+) -> bytes | None:
     """Decode image *data* to JPEG bytes out-of-process. None = undecodable."""
-    return _run_or_fallback("photo_bytes", data, size, ".heic", timeout)
+    return _run_or_fallback("photo_bytes", data, size, suffix or ".heic", timeout)
 
 
 def extract_frame_from_bytes(

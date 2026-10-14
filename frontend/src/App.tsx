@@ -3,7 +3,7 @@
 // Zustand-driven page routing, providers, notification toast, duplicate modal.
 // ---------------------------------------------------------------------------
 
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import {
   QueryClientProvider,
   focusManager,
@@ -27,7 +27,7 @@ import {
   RefreshCw,
   Loader2,
 } from "lucide-react";
-import { useTransferStore } from "@/store/transfer";
+import { useTransferStore, TOAST_AUTO_DISMISS_MS } from "@/store/transfer";
 import { cn } from "@/lib/utils";
 import {
   isTauri,
@@ -105,14 +105,14 @@ function Sidebar() {
       : "Backend: Connected";
 
   return (
-    <div className="w-14 flex flex-col items-center py-3 gap-1 border-r border-border bg-card/50">
+    <div className="w-12 flex flex-col items-center py-3 gap-1 border-r border-border bg-card/50">
       {/* Nav items */}
       {navItems.map((item) => (
         <button
           key={item.id}
           onClick={() => setCurrentPage(item.id)}
           className={cn(
-            "no-drag w-10 h-10 rounded-lg flex items-center justify-center transition-colors relative",
+            "no-drag w-9 h-9 rounded-lg flex items-center justify-center transition-colors relative",
             currentPage === item.id
               ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -177,17 +177,78 @@ function NotificationCard({
 }) {
   const dismissNotification = useTransferStore((s) => s.dismissNotification);
   const [expanded, setExpanded] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const barRef = useRef<HTMLDivElement>(null);
+  const barAnimRef = useRef<Animation | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const remainingRef = useRef<number>(TOAST_AUTO_DISMISS_MS[notification.type]);
+  const startedAtRef = useRef<number>(0);
+
+  const delay = TOAST_AUTO_DISMISS_MS[notification.type] ?? 4_000;
+  // Hovering (or expanding a long toast to read it) pauses the countdown
+  // so the toast never vanishes mid-read.
+  const paused = hovered || expanded;
+
+  // Reset the countdown when a new toast arrives.
+  useEffect(() => {
+    remainingRef.current = TOAST_AUTO_DISMISS_MS[notification.type] ?? 4_000;
+  }, [notification.id, notification.type]);
 
   // Each toast owns its timer: a new arrival never resets or kills others.
-  // Success/info auto-dismiss quickly; errors/warnings linger.
+  // Hover / expand pauses; leaving resumes with the time left.
   useEffect(() => {
-    const delay =
-      notification.type === "success" || notification.type === "info"
-        ? 8_000
-        : 15_000;
-    const t = setTimeout(() => dismissNotification(notification.id), delay);
-    return () => clearTimeout(t);
-  }, [notification.id, notification.type, dismissNotification]);
+    if (paused) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+        remainingRef.current = Math.max(
+          0,
+          remainingRef.current - (Date.now() - startedAtRef.current),
+        );
+      }
+      barAnimRef.current?.pause();
+      return;
+    }
+    startedAtRef.current = Date.now();
+    barAnimRef.current?.play();
+    timerRef.current = setTimeout(
+      () => dismissNotification(notification.id),
+      remainingRef.current,
+    );
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [paused, notification.id, dismissNotification]);
+
+  // Subtle bottom progress bar: shrinks 1 → 0 over the toast lifetime via
+  // the Web Animations API (no CSS file changes, no layout shift). Pauses
+  // in lockstep with the dismiss timer above.
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    if (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      el.style.opacity = "0";
+      return;
+    }
+    const anim = el.animate(
+      [{ transform: "scaleX(1)" }, { transform: "scaleX(0)" }],
+      { duration: delay, easing: "linear", fill: "forwards" },
+    );
+    barAnimRef.current = anim;
+    if (paused) anim.pause();
+    return () => {
+      anim.cancel();
+      if (barAnimRef.current === anim) barAnimRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notification.id, delay]);
 
   const message = notification.message;
   const long = message.length > 180;
@@ -202,11 +263,15 @@ function NotificationCard({
       onClick={() => {
         if (long) setExpanded((e) => !e);
       }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setHovered(true)}
+      onBlur={() => setHovered(false)}
       title={
         long ? (expanded ? "Click to collapse" : "Click to expand") : undefined
       }
       className={cn(
-        "pointer-events-auto glass rounded-lg p-3 flex items-center gap-3 w-[min(28rem,calc(100vw-2rem))]",
+        "group pointer-events-auto relative overflow-hidden glass rounded-lg p-3 flex items-center gap-3 w-[min(28rem,calc(100vw-2rem))]",
         long && "cursor-pointer",
       )}
     >
@@ -260,10 +325,28 @@ function NotificationCard({
           e.stopPropagation();
           dismissNotification(notification.id);
         }}
+        aria-label="Dismiss notification"
         className="p-1 rounded hover:bg-muted text-muted-foreground shrink-0"
       >
         <X className="w-3 h-3" />
       </button>
+      {/* Auto-dismiss progress: 2px bottom bar, type-tinted, shrinks to zero.
+          Absolute + aria-hidden so layout and hierarchy are untouched. */}
+      <div
+        aria-hidden
+        className="absolute bottom-0 left-0 right-0 h-[2px] bg-transparent"
+      >
+        <div
+          ref={barRef}
+          className={cn(
+            "h-full w-full origin-left",
+            notification.type === "success" && "bg-green-500/70",
+            notification.type === "info" && "bg-blue-500/70",
+            notification.type === "warning" && "bg-amber-500/70",
+            notification.type === "error" && "bg-red-500/70",
+          )}
+        />
+      </div>
     </motion.div>
   );
 }

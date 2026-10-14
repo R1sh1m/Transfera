@@ -44,6 +44,9 @@ _BROWSE_TIMEOUT = 15
 # A stalled MTP stream must fail the file, never hang the batch: bound each
 # stdout chunk read (large files stream many chunks; a wedged chunk aborts).
 _WPD_CHUNK_TIMEOUT_SECONDS = 120.0
+# Streaming reads are capped (audit item 5): a wedged helper must fail the
+# file, never buffer an unbounded pipe into memory.
+_WPD_MAX_READ_BYTES = 512 * 1024 * 1024
 
 
 class WpdError(RuntimeError):
@@ -114,21 +117,26 @@ class _WpdFileReader:
             return b""
 
         if n == -1:
-            # Stream all remaining data in chunks.
+            # Stream all remaining data in chunks (capped — audit item 5).
             chunks: list[bytes] = []
-            while True:
+            total = 0
+            while total < _WPD_MAX_READ_BYTES:
                 chunk = await asyncio.wait_for(
-                    self._proc.stdout.read(self._chunk_size),
+                    self._proc.stdout.read(min(self._chunk_size, _WPD_MAX_READ_BYTES - total)),
                     timeout=_WPD_CHUNK_TIMEOUT_SECONDS,
                 )
                 if not chunk:
                     break
                 chunks.append(chunk)
+                total += len(chunk)
                 self._pos += len(chunk)
             return b"".join(chunks)
 
         if n <= 0:
             return b""
+
+        # Read exactly n bytes, buffering intermediate chunks (capped).
+        n = min(n, _WPD_MAX_READ_BYTES)
 
         # Read exactly n bytes, buffering intermediate chunks.
         result = bytearray()

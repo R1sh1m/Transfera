@@ -108,6 +108,12 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (46, "CREATE INDEX IF NOT EXISTS ix_media_items_session_hop1 ON media_items (session_id, hop1_status)"),
     (47, "CREATE INDEX IF NOT EXISTS ix_media_items_session_hop2 ON media_items (session_id, hop2_status)"),
     (48, "ALTER TABLE transfer_sessions ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 100"),
+    (49, "ALTER TABLE transfer_sessions ADD COLUMN error_debug_detail TEXT DEFAULT NULL"),
+    (50, "ALTER TABLE transfer_sessions ADD COLUMN scan_scanned_total INTEGER NOT NULL DEFAULT 0"),
+    (51, "ALTER TABLE transfer_sessions ADD COLUMN scan_skipped_by_cutoff INTEGER NOT NULL DEFAULT 0"),
+    (52, "ALTER TABLE transfer_sessions ADD COLUMN scan_walk_total INTEGER NOT NULL DEFAULT 0"),
+    (53, "ALTER TABLE transfer_sessions ADD COLUMN scan_cutoff_iso VARCHAR(64) DEFAULT NULL"),
+    (54, "ALTER TABLE transfer_sessions ADD COLUMN scan_serial_verdict VARCHAR(128) DEFAULT NULL"),
 ]
 
 

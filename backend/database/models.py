@@ -222,8 +222,20 @@ class TransferSession(Base):
     # --- Report path ---
     session_report_path: Mapped[str | None] = mapped_column(String(4096), nullable=True, default=None)
 
-    # --- Error tracking ---
+    # --- Error tracking (session-level) ---
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Short user-facing message lives in error_message; machine detail
+    # (samples/serials/cutoff/counts) lives here so reports stay debuggable
+    # without bloating the UI toast.
+    error_debug_detail: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+    # --- Scan diagnostics (persisted even on FAILED 0-match) ---
+    # scanned_total: queued item count (0 on 0-match failure).
+    scan_scanned_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scan_skipped_by_cutoff: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scan_walk_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scan_cutoff_iso: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    scan_serial_verdict: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
 
     # --- Folder layout ---
     folder_layout: Mapped[str] = mapped_column(String(32), nullable=False, default="year/month")

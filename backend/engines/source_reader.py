@@ -369,29 +369,59 @@ class DeviceSourceReader(SourceReader):
             self._disconnected = True
             raise
 
+    # Cap + fan-out for concurrent walks (patchable in tests). Each
+    # concurrent browse holds its own pooled AFC slot (or an ephemeral
+    # connection past pool size), so per-connection AFC use stays
+    # sequential and thread-safe.
+    _WALK_CONCURRENCY = 8
+    _WALK_MAX_ENTRIES = 2_000_000
+
     async def walk(self, root: str) -> AsyncIterator[dict[str, Any]]:
         from backend.tier2_manager import get_device_manager
 
         manager = get_device_manager()
-        try:
-            entries = await manager.browse_device(self._device_id, root)
-        except Exception as exc:
-            self._disconnected = True
-            logger.error("Device disconnected during walk at %s: %s", root, exc)
-            return
+        sem = asyncio.Semaphore(self._WALK_CONCURRENCY)
+        yielded = 0
 
-        for entry in entries:
-            yield {
-                "name": entry.name,
-                "path": entry.path,
-                "is_dir": entry.is_dir,
-                "size": entry.size,
-                "mtime": entry.mtime,
-            }
-            if entry.is_dir and entry.name not in (".", ".."):
-                sub_path = f"{root.rstrip('/')}/{entry.name}"
-                async for sub_entry in self.walk(sub_path):
-                    yield sub_entry
+        from backend.device_backend import DeviceLockedError, DeviceNotTrustedError
+
+        async def _browse_one(path: str):
+            async with sem:
+                try:
+                    return path, await manager.browse_device(self._device_id, path)
+                except (DeviceLockedError, DeviceNotTrustedError):
+                    # Terminal lock/trust must propagate (audit item 4) so
+                    # callers map to 423/403 — never mask as an empty walk.
+                    raise
+                except Exception as exc:
+                    # Only genuinely transient/unknown errors degrade to [].
+                    self._disconnected = True
+                    logger.error("Device disconnected during walk at %s: %s", path, exc)
+                    return path, []
+
+        queue: list[str] = [root]
+        while queue:
+            level = await asyncio.gather(*[_browse_one(p) for p in queue])
+            queue = []
+            for _parent, entries in level:
+                for entry in entries:
+                    yield {
+                        "name": entry.name,
+                        "path": entry.path,
+                        "is_dir": entry.is_dir,
+                        "size": entry.size,
+                        "mtime": entry.mtime,
+                    }
+                    yielded += 1
+                    if entry.is_dir and entry.name not in (".", ".."):
+                        queue.append(entry.path)
+                    if yielded >= self._WALK_MAX_ENTRIES:
+                        logger.warning(
+                            "Device walk hit entry cap (%d) at %s — truncating",
+                            self._WALK_MAX_ENTRIES,
+                            root,
+                        )
+                        return
 
     async def list_directory(self, path: str) -> list[dict[str, Any]]:
         from backend.tier2_manager import get_device_manager

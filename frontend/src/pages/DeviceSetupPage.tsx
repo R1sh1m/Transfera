@@ -95,6 +95,17 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
+/** Debounce a fast-changing value (e.g. dest path keystrokes) so
+ *  expensive queries (preflight walk) fire once the user pauses. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 // ---------------------------------------------------------------------------
 // Per-device driver picker (TierSelect)
 // ---------------------------------------------------------------------------
@@ -2863,6 +2874,11 @@ export default function DeviceSetupPage() {
     queryClient.invalidateQueries({ queryKey: ["device-preview"] });
   }, []);
 
+  // Debounced dest path for the two preflight subscribers below (widget
+  // + page gate). Typing fires zero walks until a 500 ms pause, and both
+  // hooks share one debounced value → one query key → one request.
+  const debouncedDestPath = useDebouncedValue(destPath, 500);
+
   // Preflight validation
   const transferActive = useTransferStore((s) =>
     ["running", "paused"].includes(s.transfer.status),
@@ -2871,7 +2887,7 @@ export default function DeviceSetupPage() {
     sourceRef?.type === "local_folder" ? sourceRef.path : null;
   const { data: preflight } = usePreflightValidate(
     sourcePathForPreflight,
-    destPath || null,
+    debouncedDestPath || null,
     sourceRef?.type === "device" ? sourceRef : null,
     { enabled: !transferActive },
   );
@@ -3570,7 +3586,7 @@ export default function DeviceSetupPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.05 }}
       >
-        <PreflightMetrics sourceRef={sourceRef} destPath={destPath} />
+        <PreflightMetrics sourceRef={sourceRef} destPath={debouncedDestPath} />
       </motion.div>
 
       {/* Transfer Mode Selection */}

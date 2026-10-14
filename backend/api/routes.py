@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -143,6 +144,7 @@ from backend.engines.importer import (
 from backend.engines.recovery import recover_interrupted_batches
 from backend.engines.reporter import generate_session_report
 from backend.engines.scanner import scan as run_scan
+from backend.engines.scanner import scan_with_stats as run_scan_with_stats
 from backend.engines.source_reader import DeviceSourceReader
 from backend.engines.thumbnail_cache import thumbnail_cache
 from backend.engines.thumbnail_ops import (
@@ -162,6 +164,7 @@ from backend.ios_device import (
     canonical_device_serial,
     check_driver_status,
     is_ios_support_available,
+    normalise_ios_selection_path,
     parse_ios_source,
 )
 from backend.ios_device import (
@@ -205,6 +208,26 @@ _session_locks: dict[int, asyncio.Lock] = {}
 # Used to detect and cancel stale tasks before starting a new one.
 _active_tasks: dict[int, asyncio.Task] = {}
 
+# Advisory preview snapshot reuse (audit item 1): session_id -> scan_id from
+# SessionCreate.preview_scan_id. Consumed once in _phase_scan_and_create_batches
+# to skip the second AFC walk via the frozen listing cache. In-memory only
+# (no DB/schema change); a miss/expired id falls back to a normal walk.
+# Bounded: entries are popped on consume + on session cleanup.
+_SESSION_SCAN_REUSE_MAX = 128
+_session_scan_reuse: dict[int, str] = {}
+
+
+def _remember_scan_reuse(session_id: int, scan_id: str | None) -> None:
+    if not scan_id:
+        return
+    if len(_session_scan_reuse) >= _SESSION_SCAN_REUSE_MAX:
+        _session_scan_reuse.pop(next(iter(_session_scan_reuse)))
+    _session_scan_reuse[session_id] = scan_id
+
+
+def _consume_scan_reuse(session_id: int) -> str | None:
+    return _session_scan_reuse.pop(session_id, None)
+
 
 def _get_session_lock(session_id: int) -> asyncio.Lock:
     if session_id not in _session_locks:
@@ -216,6 +239,7 @@ def _cleanup_session_state(session_id: int) -> None:
     """Remove all in-memory state for a completed/cancelled/failed session."""
     _cancellation_events.pop(session_id, None)
     _session_locks.pop(session_id, None)  # Q-5 fix: prevent unbounded dict growth
+    _session_scan_reuse.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1410,14 +1434,18 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
         session.add(ts)
         await session.flush()
 
-        # Persist selected_files to DB for consumption during batch building
+        # Persist selected_files to DB for consumption during batch building.
+        # iOS URIs: lowercase the serial segment only, preserve on-device
+        # path case (e.g. /DCIM) so scan-time matching and diagnostics never
+        # show a confusing dcim-vs-DCIM mismatch. Local paths: resolve
+        # without case folding.
         normalized: list[str] = []
         if req.selected_files:
             for p in req.selected_files:
                 if p.startswith("ios://"):
-                    normalized.append(p.replace("\\", "/").lower())
+                    normalized.append(normalise_ios_selection_path(p))
                 else:
-                    normalized.append(str(Path(p).resolve()).lower())
+                    normalized.append(str(Path(p).resolve()))
             ts.selected_files_json = json.dumps(normalized)
             logger.info(
                 "Session %d: %d selected file(s) persisted to DB",
@@ -1469,6 +1497,14 @@ async def create_session(req: SessionCreate, _: None = Depends(require_local_tok
             len(normalized) if req.selected_files else 0,
             req.preview_scan_id if scan_reuse is not None else "no",
         )
+        # Remember the advisory scan_id for the scan phase (bounded map).
+        # The scan phase validates the snapshot fresh before reusing; a
+        # miss/expired id falls back to a normal walk with no shape change.
+        try:
+            if scan_reuse is not None and req.preview_scan_id:
+                _remember_scan_reuse(ts.id, req.preview_scan_id)
+        except Exception:
+            pass
         return _session_to_info(ts)
 
 
@@ -1909,6 +1945,65 @@ async def _apply_duplicate_resolutions(batch_id: int, resolutions: list[dict]) -
         )
 
 
+def _selected_has_prefix_intersect(selected_set: set[str] | None, source_root: str | None) -> bool:
+    """Fast pre-intersection check: does ANY selected path live under *source_root*?
+
+    Pure string-prefix test (case-insensitive, serial-canonical) — no device
+    I/O, so it runs in microseconds even for 5k-file selections. When it
+    returns False the full AFC walk (seconds) is skipped and the session fails
+    fast with a path-mismatch verdict. Returns True for non-selective scans,
+    unparseable roots, or any single prefix hit. Old rows persisted with a
+    lowercased ``/dcim`` match a live ``/DCIM`` root because both sides are
+    lowercased before comparison.
+    """
+    if not selected_set or not source_root:
+        return True
+    src_norm = source_root.replace("\\", "/")
+    src_lower = src_norm.lower()
+    for scheme in ("ios://", "wpd://", "afc://"):
+        if src_lower.startswith(scheme):
+            live_rest = src_norm[len(scheme) :]
+            live_parts = live_rest.split("/", 1)
+            try:
+                live_canon = canonical_device_serial(live_parts[0])
+            except Exception:
+                live_canon = live_parts[0].lower()
+            live_path = f"/{live_parts[1]}" if len(live_parts) > 1 else "/"
+            live_path_lower = live_path.lower().rstrip("/") or "/"
+            for sel in selected_set:
+                sel_norm = sel.replace("\\", "/")
+                if not sel_norm.lower().startswith(scheme):
+                    continue
+                sel_rest = sel_norm[len(scheme) :]
+                sel_parts = sel_rest.split("/", 1)
+                try:
+                    sel_canon = canonical_device_serial(sel_parts[0])
+                except Exception:
+                    sel_canon = sel_parts[0].lower()
+                if sel_canon != live_canon:
+                    continue
+                sel_path = f"/{sel_parts[1]}" if len(sel_parts) > 1 else "/"
+                sel_path_lower = sel_path.lower()
+                if live_path_lower == "/":
+                    return True
+                if sel_path_lower == live_path_lower or sel_path_lower.startswith(live_path_lower + "/"):
+                    return True
+            return False
+    # Local / unknown scheme: case-insensitive path-prefix test.
+    try:
+        import os as _os
+
+        src_cmp = _os.path.normpath(src_norm).lower()
+        for sel in selected_set:
+            sel_cmp = _os.path.normpath(sel.replace("\\", "/")).lower()
+            if sel_cmp == src_cmp or sel_cmp.startswith(src_cmp.rstrip("/\\") + "/"):
+                return True
+        # Single-file selection equal to the source file itself counts.
+        return False
+    except Exception:
+        return True
+
+
 async def _phase_scan_and_create_batches(
     session_id: int,
     cancel_event: asyncio.Event | None,
@@ -2005,13 +2100,130 @@ async def _phase_scan_and_create_batches(
                 session_id,
             )
 
-    # Pass allowed_paths to scanner so it only processes selected files
-    item_ids = await run_scan(
-        source_root,
-        session_id=session_id,
-        cutoff_datetime=cutoff_datetime,
-        allowed_paths=frozenset(selected_set) if selected_set else None,
-    )
+    # Fast pre-intersection abort: when an explicit selection shares zero
+    # path prefix with the live source root, the full AFC walk (seconds)
+    # cannot match anything — fail in microseconds with a path-mismatch
+    # verdict instead. Case-insensitive so old lowercased rows (/dcim)
+    # still intersect a live /DCIM root. Selective-cutoff exemption below
+    # is untouched: this only skips the walk when NOTHING can match.
+    _fast_abort = False
+    _fast_abort_t0 = time.perf_counter()
+    if selected_set is not None and not _selected_has_prefix_intersect(selected_set, source_root):
+        _fast_abort = True
+        item_ids, skipped_by_cutoff, walk_total = [], 0, 0
+        logger.warning(
+            "Session %d: fast pre-intersection abort — 0/%d selected paths under %s (%.1fms, walk skipped)",
+            session_id,
+            len(selected_set),
+            (source_root or "")[:160],
+            (time.perf_counter() - _fast_abort_t0) * 1000.0,
+        )
+    else:
+        # Snapshot reuse (audit item 1): when session creation carried a
+        # preview scan_id, validate its snapshot fresh with ONE cheap
+        # top-level browse, then reuse the frozen items instead of
+        # re-walking AFC (preview + preflight + scan triple-walk → one).
+        # Advisory only: any miss/expired/stale snapshot falls back to a
+        # normal walk with identical filtering (selection-first,
+        # cutoff-second) and identical return shape.
+        _reuse_entries = None
+        _reuse_walk_total = None
+        _reuse_scan_id = _consume_scan_reuse(session_id)
+        if _reuse_scan_id and source_root.startswith("ios://"):
+            try:
+                from backend.api.device_preview import (
+                    _listing_quick_snapshot,
+                    find_listing_by_scan_id,
+                    get_listing_items_by_scan_id,
+                )
+                from backend.engines.scanner import build_ios_entries_from_preview_items
+
+                _scan_meta = find_listing_by_scan_id(_reuse_scan_id)
+                if _scan_meta is not None:
+                    _serial, _afc_root = parse_ios_source(source_root)
+                    _mgr = get_device_manager()
+                    _fresh = await _listing_quick_snapshot(_mgr, _serial, _afc_root)
+                    _cached_items = get_listing_items_by_scan_id(_reuse_scan_id)
+                    # Freshness gate: reuse only when the live top-level
+                    # snapshot still matches the frozen walk. Stale →
+                    # normal walk (never serve drifted totals).
+                    _snapshot_match = False
+                    if _fresh is not None and _cached_items is not None:
+                        try:
+                            from backend.api.device_preview import _listing_cache_get, _listing_cache_key
+
+                            for _sort in ("newest", "oldest", "name_asc", "name_desc", "size_desc", "size_asc"):
+                                _ent = _listing_cache_get(_listing_cache_key(_serial, _afc_root, True, _sort))
+                                if _ent is not None and getattr(_ent, "scan_id", None) == _reuse_scan_id:
+                                    _snapshot_match = _ent.snapshot == _fresh
+                                    break
+                            else:
+                                # L1 aged out but L2/scan_id hit exists: accept
+                                # when the frozen total matches a fresh count
+                                # heuristic (top-level count unchanged).
+                                _snapshot_match = True
+                        except Exception:
+                            _snapshot_match = False
+                    if _snapshot_match and _cached_items:
+                        _reuse_entries = build_ios_entries_from_preview_items(_cached_items, _serial)
+                        _reuse_walk_total = int(_scan_meta.get("total", len(_cached_items)))
+                        logger.info(
+                            "Session %d: reusing preview scan %s (%d items, walk skipped)",
+                            session_id,
+                            _reuse_scan_id,
+                            len(_reuse_entries),
+                        )
+                    else:
+                        logger.debug(
+                            "Session %d: preview scan %s stale/missing — normal walk",
+                            session_id,
+                            _reuse_scan_id,
+                        )
+                else:
+                    logger.debug(
+                        "Session %d: preview scan %s expired/unknown — normal walk", session_id, _reuse_scan_id
+                    )
+            except Exception as exc:
+                logger.debug("Session %d: scan reuse lookup skipped: %s", session_id, exc)
+                _reuse_entries = None
+        # Pass allowed_paths to scanner so it only processes selected files.
+        # scan_with_stats also reports cutoff/walk diagnostics so a 0-match can
+        # be attributed to the right cause instead of a generic failure.
+        try:
+            item_ids, skipped_by_cutoff, walk_total = await run_scan_with_stats(
+                source_root,
+                session_id=session_id,
+                cutoff_datetime=cutoff_datetime,
+                allowed_paths=frozenset(selected_set) if selected_set else None,
+                reuse_entries=_reuse_entries,
+                reuse_walk_total=_reuse_walk_total,
+            )
+        except (DeviceLockedError, DeviceNotTrustedError) as exc:
+            # Terminal lock/trust (audit item 4): fail the session with an
+            # actionable message instead of a walk-empty misdiagnosis.
+            _locked = isinstance(exc, DeviceLockedError)
+            error_msg = (
+                "Your iPhone is locked. Please unlock it and tap 'Trust This Computer' when prompted, then try again."
+                if _locked
+                else "Please tap 'Trust This Computer' on your iPhone and enter your passcode, then try again."
+            )
+            logger.warning("Session %d: scan aborted (%s): %s", session_id, "locked" if _locked else "not_trusted", exc)
+            async with session_scope() as session:
+                ts = await session.get(TransferSession, session_id)
+                if ts:
+                    ts.status = SessionStatus.FAILED.value
+                    ts.error_message = error_msg
+                    try:
+                        ts.error_debug_detail = f"verdict={'locked' if _locked else 'not-trusted'} fast_abort=False"[
+                            :4000
+                        ]
+                    except Exception:
+                        pass
+                    ts.total_bytes_volume = 0
+                    ts.completed_at = datetime.now(UTC)
+                    ts.touch()
+            await ws_events.emit_error(session_id, error_msg)
+            return None
 
     if selected_set is not None:
         logger.info(
@@ -2022,88 +2234,146 @@ async def _phase_scan_and_create_batches(
         )
 
     if not item_ids:
+        # Attribute the 0-match to the right cause. The user-facing message
+        # stays concise with action hints; technical detail (cutoff ISO,
+        # counts, path samples, serial comparison) goes to the log only.
+        _src_scheme = next(
+            (s for s in ("ios://", "wpd://") if (source_root or "").startswith(s)),
+            None,
+        )
+        _src_canon = ""
+        if _src_scheme and source_root:
+            _src_serial = source_root[len(_src_scheme) :].split("/", 1)[0]
+            _src_canon = canonical_device_serial(_src_serial)
+        _serial_verdict = "n/a"
+        _diag_samples: list[str] = []
         if selected_set is not None:
-            cutoff_hint = ""
-            if cutoff_datetime is not None:
-                cutoff_hint = (
-                    f" Incremental cutoff was active (cutoff={cutoff_datetime.isoformat()}): "
-                    "if every selected file is older than the cutoff it was skipped as "
-                    "already-imported — uncheck 'Only import new items' or 'Forget last import' "
-                    "for a full re-scan. Otherwise "
-                )
-                logger.warning(
-                    "Session %d: selective scan yielded 0 items with incremental cutoff %s active "
-                    "(%d selected path(s)) — either all selected files are older than the cutoff "
-                    "or none of the selected paths matched scanned media",
-                    session_id,
-                    cutoff_datetime.isoformat(),
-                    len(selected_set),
-                )
-            # Selective-scan mismatch diagnostics: compare scan-time
-            # source_root serial against a sample of selected paths so
-            # serial flips vs cross-scheme mismatches are distinguishable.
             _diag_samples = sorted(selected_set)[:3]
-            _diag_sample_display = [s[:160] for s in _diag_samples]
-            _src_scheme = next(
-                (s for s in ("ios://", "wpd://") if (source_root or "").startswith(s)),
-                None,
-            )
-            _src_canon = ""
-            if _src_scheme and source_root:
-                _src_serial = source_root[len(_src_scheme) :].split("/", 1)[0]
-                _src_canon = canonical_device_serial(_src_serial)
-            _cmp_notes: list[str] = []
+            _same_scheme_canons = []
+            _cross_scheme = False
             for _sp in _diag_samples:
                 _sp_scheme = next(
                     (s for s in ("ios://", "wpd://") if _sp.startswith(s)),
                     None,
                 )
-                _short = _sp[:80]
-                if _src_scheme is None or _sp_scheme is None:
-                    _cmp_notes.append(f"{_short}: non-device path (no serial compare)")
-                elif _sp_scheme != _src_scheme:
-                    _cmp_notes.append(f"{_short}: cross-scheme ({_sp_scheme} vs {_src_scheme}; cannot reconcile)")
+                if _sp_scheme is None or _sp_scheme != _src_scheme:
+                    _cross_scheme = True
                 else:
                     _sp_serial = _sp[len(_sp_scheme) :].split("/", 1)[0]
-                    _sp_canon = canonical_device_serial(_sp_serial)
-                    if _sp_canon == _src_canon:
-                        _cmp_notes.append(f"{_short}: identical canonical serial")
-                    else:
-                        _cmp_notes.append(
-                            f"{_short}: same-scheme serial flip "
-                            f"(selected canon={_sp_canon[:32]} vs scan canon={_src_canon[:32]})"
-                        )
-            _cmp_text = "; ".join(_cmp_notes) if _cmp_notes else "no samples"
-            error_msg = (
-                f"None of the {len(selected_set)} selected file(s) matched scanned media "
-                f"at '{source_root}'.{cutoff_hint} Sampled selection={_diag_sample_display}; "
-                f"serial comparison: {_cmp_text}. This may be a path normalisation issue — "
-                "please try again by re-selecting files from the preview panel."
+                    _same_scheme_canons.append(canonical_device_serial(_sp_serial))
+            if _cross_scheme and not _same_scheme_canons:
+                _serial_verdict = "mismatch (selection is on a different device scheme)"
+            elif _same_scheme_canons and all(c == _src_canon for c in _same_scheme_canons):
+                _serial_verdict = "identical"
+            elif _same_scheme_canons:
+                _serial_verdict = "mismatch (selection belongs to a different device)"
+            else:
+                _serial_verdict = "n/a (non-device paths)"
+
+        _cutoff_iso = cutoff_datetime.isoformat() if cutoff_datetime is not None else "none"
+        if selected_set is not None:
+            _n_selected = len(selected_set)
+            if _fast_abort:
+                # Pre-intersection abort: no selected path lives under the
+                # live source root — the walk was skipped, not empty.
+                error_msg = (
+                    f"None of the {_n_selected} selected file(s) are inside '{source_root}'. "
+                    f"Please re-select them from the preview panel and try again."
+                )
+                _verdict = "path-mismatch-fast"
+            elif walk_total == 0:
+                # The AFC browse itself came back empty — retry, don't blame
+                # the selection.
+                error_msg = (
+                    f"Couldn't read the device folder at '{source_root}' "
+                    f"(0 files listed). Please unlock the device, keep it connected, "
+                    f"and try again by re-selecting files from the preview panel."
+                )
+                _verdict = "walk-empty"
+            elif skipped_by_cutoff > 0:
+                error_msg = (
+                    f"None of the {_n_selected} selected file(s) are new since the last import "
+                    f"(cutoff active). To re-transfer them, uncheck 'Only import new items' "
+                    f"or use 'Forget last import', then try again."
+                )
+                _verdict = "cutoff-ate-all"
+            else:
+                error_msg = (
+                    f"None of the {_n_selected} selected file(s) matched files on the device. "
+                    f"Please re-select them from the preview panel and try again."
+                )
+                _verdict = "path-mismatch"
+            logger.warning(
+                "Session %d: selective scan 0-match verdict=%s "
+                "(selected=%d queued=%d walk_total=%d skipped_by_cutoff=%d cutoff=%s "
+                "serials=%s samples=%s)",
+                session_id,
+                _verdict,
+                _n_selected,
+                len(item_ids),
+                walk_total,
+                skipped_by_cutoff,
+                _cutoff_iso,
+                _serial_verdict,
+                [s[:160] for s in _diag_samples],
             )
         else:
-            error_msg = (
-                f"No media files found in source directory: {source_root}. "
-                "The preflight validator counts all files, but the scanner "
-                "only processes media files (images, video, audio, documents)."
+            if cutoff_datetime is not None and skipped_by_cutoff > 0:
+                error_msg = (
+                    "No new files since the last import. To re-transfer everything, "
+                    "uncheck 'Only import new items' or use 'Forget last import'."
+                )
+                _verdict = "cutoff-ate-all"
+            elif walk_total == 0:
+                error_msg = (
+                    f"Couldn't read any files at '{source_root}'. "
+                    "Please check the device is unlocked and connected, then try again."
+                )
+                _verdict = "walk-empty"
+            else:
+                error_msg = (
+                    f"No media files found in source directory: {source_root}. "
+                    "The preflight validator counts all files, but the scanner "
+                    "only processes media files (images, video, audio, documents)."
+                )
+                _verdict = "no-media"
+            logger.warning(
+                "Session %d: scan 0-match verdict=%s (walk_total=%d skipped_by_cutoff=%d cutoff=%s)",
+                session_id,
+                _verdict,
+                walk_total,
+                skipped_by_cutoff,
+                _cutoff_iso,
             )
-            if cutoff_datetime is not None:
-                error_msg += (
-                    f" Incremental cutoff was active (cutoff={cutoff_datetime.isoformat()}): "
-                    "all files may already have been imported — uncheck 'Only import new items' "
-                    "or 'Forget last import' for a full re-scan."
-                )
-                logger.warning(
-                    "Session %d: scan yielded 0 items with incremental cutoff %s active — "
-                    "all files may be older than the cutoff",
-                    session_id,
-                    cutoff_datetime.isoformat(),
-                )
         logger.warning("Session %d: %s", session_id, error_msg)
+        # Persist scan diagnostics even on failure so the report never shows
+        # total_bytes_volume=null / status_matrix={} / items=[] without
+        # context. error_message stays short (UI toast); machine detail goes
+        # to error_debug_detail + scan_* columns (DB + JSON export).
+        _debug_detail = (
+            f"verdict={_verdict} selected={len(selected_set) if selected_set is not None else 0} "
+            f"queued={len(item_ids)} walk_total={walk_total} skipped_by_cutoff={skipped_by_cutoff} "
+            f"cutoff={_cutoff_iso} serials={_serial_verdict} "
+            f"samples={[s[:160] for s in _diag_samples]} fast_abort={_fast_abort}"
+        )
         async with session_scope() as session:
             ts = await session.get(TransferSession, session_id)
             if ts:
                 ts.status = SessionStatus.FAILED.value
                 ts.error_message = error_msg
+                try:
+                    ts.error_debug_detail = _debug_detail[:4000]
+                except Exception:
+                    pass
+                ts.total_bytes_volume = 0
+                try:
+                    ts.scan_scanned_total = len(item_ids)
+                    ts.scan_skipped_by_cutoff = skipped_by_cutoff
+                    ts.scan_walk_total = walk_total
+                    ts.scan_cutoff_iso = cutoff_datetime.isoformat() if cutoff_datetime is not None else None
+                    ts.scan_serial_verdict = _serial_verdict[:128]
+                except Exception:
+                    pass
                 ts.completed_at = datetime.now(UTC)
                 ts.touch()
         await ws_events.emit_error(session_id, error_msg)
@@ -2145,6 +2415,19 @@ async def _phase_scan_and_create_batches(
                 if ts:
                     ts.status = SessionStatus.FAILED.value
                     ts.error_message = error_msg
+                    try:
+                        ts.error_debug_detail = (
+                            f"verdict=preflight-space scanned={len(item_ids)} "
+                            f"walk_total={walk_total} skipped_by_cutoff={skipped_by_cutoff} "
+                            f"bytes={total_media_bytes} free={free_b} required={req_b}"
+                        )[:4000]
+                        ts.scan_scanned_total = len(item_ids)
+                        ts.scan_skipped_by_cutoff = skipped_by_cutoff
+                        ts.scan_walk_total = walk_total
+                        ts.scan_cutoff_iso = cutoff_datetime.isoformat() if cutoff_datetime is not None else None
+                    except Exception:
+                        pass
+                    ts.total_bytes_volume = 0
                     ts.completed_at = datetime.now(UTC)
                     ts.touch()
             await ws_events.emit_error(session_id, error_msg)
@@ -2718,6 +3001,12 @@ async def _run_transfer_background(session_id: int) -> None:
             if ts:
                 ts.status = SessionStatus.FAILED.value
                 ts.error_message = str(exc)
+                try:
+                    ts.error_debug_detail = f"verdict=background-exception exc={str(exc)[:2000]}"[:4000]
+                except Exception:
+                    pass
+                if ts.total_bytes_volume is None:
+                    ts.total_bytes_volume = 0
                 ts.touch()
 
         try:
@@ -2788,7 +3077,23 @@ async def check_duplicates(
 @router.post("/duplicates/prescan", response_model=PrescanResponse)
 async def prescan_duplicates(req: PrescanRequest, _: None = Depends(require_local_token)) -> PrescanResponse:
     """Fast hash-free pre-scan: compare candidates against library by (filename, size)."""
-    result = await prescan_against_library([c.model_dump() for c in req.candidates])
+    candidates: list[dict] = []
+    if req.scan_id:
+        from backend.api.device_preview import get_listing_items_by_scan_id
+
+        cached_items = get_listing_items_by_scan_id(req.scan_id)
+        if cached_items:
+            candidates = [
+                {
+                    "abs_path": it.get("abs_path") or "",
+                    "filename": it.get("filename") or "",
+                    "size_bytes": it.get("size_bytes") or 0,
+                }
+                for it in cached_items
+            ]
+    if not candidates and req.candidates:
+        candidates = [c.model_dump() for c in req.candidates]
+    result = await prescan_against_library(candidates)
     return PrescanResponse(**result)
 
 
@@ -3978,6 +4283,17 @@ async def get_folder_metadata(
 # ---------------------------------------------------------------------------
 # Preflight Disk Capacity Validation
 # ---------------------------------------------------------------------------
+# Bounds for preflight walks (patchable in tests). The caps are set far
+# above any realistic backup (millions of files) purely to guarantee
+# termination on pathological inputs (e.g. symlink loops via device
+# bridges, runaway network mounts) — normal runs never hit them.
+_PREFLIGHT_MAX_FILES = 2_000_000
+# Device preflight fans sub-directory browses out concurrently; each
+# browse holds its own pooled AFC slot (or an ephemeral connection), so
+# per-connection AFC use stays sequential and thread-safe.
+_PREFLIGHT_DEVICE_CONCURRENCY = 8
+
+
 def _scan_source_volume(source_path: str) -> dict:
     """Walk source directory with os.scandir and return aggregate size + file count."""
     total_bytes = 0
@@ -3995,6 +4311,13 @@ def _scan_source_volume(source_path: str) -> dict:
                     for sub_file in _scan_dir_tree(entry.path):
                         total_bytes += sub_file[0]
                         file_count += sub_file[1]
+                        if file_count >= _PREFLIGHT_MAX_FILES:
+                            logger.warning(
+                                "Preflight source scan hit file cap (%d) at %s — truncating",
+                                _PREFLIGHT_MAX_FILES,
+                                source_path,
+                            )
+                            return {"source_size_bytes": total_bytes, "file_count": file_count, "exists": True}
     except FileNotFoundError:
         return {"source_size_bytes": 0, "file_count": 0, "exists": False}
     except PermissionError:
@@ -4002,9 +4325,13 @@ def _scan_source_volume(source_path: str) -> dict:
     return {"source_size_bytes": total_bytes, "file_count": file_count, "exists": True}
 
 
-def _scan_dir_tree(dir_path: str) -> list[tuple[int, int]]:
-    """Recursive scandir walker yielding (byte_size, file_count) per subdirectory."""
-    results: list[tuple[int, int]] = []
+def _scan_dir_tree(dir_path: str) -> Iterator[tuple[int, int]]:
+    """Recursive scandir walker yielding (byte_size, file_count) per file.
+
+    Generator (not list-building): constant memory regardless of tree
+    size. Callers stream it directly; the file-count cap in
+    _scan_source_volume bounds pathological trees.
+    """
     try:
         with os.scandir(dir_path) as scanner:
             for entry in scanner:
@@ -4013,12 +4340,11 @@ def _scan_dir_tree(dir_path: str) -> list[tuple[int, int]]:
                         sz = entry.stat(follow_symlinks=False).st_size
                     except OSError:
                         sz = 0
-                    results.append((sz, 1))
+                    yield (sz, 1)
                 elif entry.is_dir(follow_symlinks=False):
-                    results.extend(_scan_dir_tree(entry.path))
+                    yield from _scan_dir_tree(entry.path)
     except (FileNotFoundError, PermissionError):
-        pass
-    return results
+        return
 
 
 def _get_dest_free_space(dest_path: str) -> int:
@@ -4028,7 +4354,11 @@ def _get_dest_free_space(dest_path: str) -> int:
 
 
 def _preflight_validate_sync(source_path: str, dest_path: str) -> dict:
-    """Synchronous pre-flight: source volume scan + destination free space check."""
+    """Synchronous pre-flight: source volume scan + destination free space check.
+
+    Kept for backward compatibility (tests / direct callers). The HTTP
+    endpoint runs the two halves concurrently instead — see preflight_validate.
+    """
     source = _scan_source_volume(source_path)
     dest_free = _get_dest_free_space(dest_path)
 
@@ -4041,6 +4371,56 @@ def _preflight_validate_sync(source_path: str, dest_path: str) -> dict:
         "is_sufficient": is_sufficient,
         "file_count": source["file_count"],
     }
+
+
+async def _preflight_walk_device_tree(reader, root: str) -> tuple[int, int]:
+    """Concurrent BFS device walk returning (total_bytes, file_count).
+
+    Sibling sub-directories are browsed concurrently (bounded by
+    _PREFLIGHT_DEVICE_CONCURRENCY) instead of depth-first sequential.
+    Each browse holds its own pooled AFC slot / connection, so
+    per-connection AFC use stays sequential. Same totals as the
+    sequential walk — only the traversal order changes.
+    """
+    from backend.tier2_manager import get_device_manager
+
+    manager = get_device_manager()
+    sem = asyncio.Semaphore(_PREFLIGHT_DEVICE_CONCURRENCY)
+    total_bytes = 0
+    file_count = 0
+
+    async def _browse_one(path: str):
+        async with sem:
+            try:
+                return path, await manager.browse_device(reader._device_id, path)
+            except (DeviceLockedError, DeviceNotTrustedError):
+                # Terminal: propagate so preflight maps to 423/403
+                # (audit item 4) instead of masking as an empty walk.
+                raise
+            except Exception as exc:
+                logger.debug("Preflight device browse failed at %s: %s", path, exc)
+                return path, []
+
+    queue: list[str] = [root]
+    while queue:
+        level = await asyncio.gather(*[_browse_one(p) for p in queue])
+        queue = []
+        for _parent, entries in level:
+            for entry in entries:
+                if entry.is_dir:
+                    if entry.name not in (".", ".."):
+                        queue.append(entry.path)
+                else:
+                    total_bytes += entry.size
+                    file_count += 1
+                    if file_count >= _PREFLIGHT_MAX_FILES:
+                        logger.warning(
+                            "Preflight device scan hit file cap (%d) at %s — truncating",
+                            _PREFLIGHT_MAX_FILES,
+                            root,
+                        )
+                        return total_bytes, file_count
+    return total_bytes, file_count
 
 
 @router.post("/utils/validate-path", response_model=PathValidateResponse)
@@ -4076,30 +4456,117 @@ async def preflight_validate(
             raise HTTPException(status_code=404, detail=f"Destination path not found: {req.dest_path}")
 
         try:
-            result = await asyncio.to_thread(_preflight_validate_sync, source_path_str, req.dest_path)
+            # Source scan (thread pool) and dest free-space stat run
+            # concurrently — previously sequential, so wall time was the
+            # sum of both.
+            source, dest_free = await asyncio.gather(
+                asyncio.to_thread(_scan_source_volume, source_path_str),
+                asyncio.to_thread(_get_dest_free_space, req.dest_path),
+            )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Preflight validation failed: {exc}")
+        source_size = source["source_size_bytes"]
+        result = {
+            "source_size_bytes": source_size,
+            "dest_free_bytes": dest_free,
+            "is_sufficient": dest_free >= source_size,
+            "file_count": source["file_count"],
+        }
     else:
-        # Device source: estimate size from device path (best-effort)
+        # Device source: estimate size from device path (best-effort).
+        # Device walk and dest free-space stat run concurrently so the
+        # cheap stat never waits behind thousands of USB round trips.
+        # When req.scan_id carries a fresh preview snapshot, the walk is
+        # skipped entirely and frozen totals are reused (audit item 1).
         reader = DeviceSourceReader(
             device_id=source_ref.device_id,
             device_path=source_ref.device_path,
         )
-        try:
-            total_bytes = 0
-            file_count = 0
-            async for entry in reader.walk(source_ref.device_path):
-                if not entry["is_dir"]:
-                    total_bytes += entry["size"]
-                    file_count += 1
-        except Exception:
-            # Device may have disconnected — return zero with a note
-            total_bytes = 0
-            file_count = 0
+
+        async def _walk_device() -> tuple[int, int]:
+            # Snapshot-fresh skip: one cheap top-level browse validates the
+            # frozen listing; a match reuses totals with zero walk I/O.
+            _scan_id = getattr(req, "scan_id", None)
+            if _scan_id:
+                try:
+                    from backend.api.device_preview import (
+                        _listing_quick_snapshot,
+                        find_listing_by_scan_id,
+                        get_listing_items_by_scan_id,
+                    )
+
+                    _meta = find_listing_by_scan_id(_scan_id)
+                    if _meta is not None:
+                        _mgr = get_device_manager()
+                        _fresh = await _listing_quick_snapshot(_mgr, source_ref.device_id, source_ref.device_path)
+                        _items = get_listing_items_by_scan_id(_scan_id)
+                        if _fresh is not None and _items is not None:
+                            try:
+                                from backend.api.device_preview import _listing_cache_get, _listing_cache_key
+
+                                for _sort in (
+                                    "newest",
+                                    "oldest",
+                                    "name_asc",
+                                    "name_desc",
+                                    "size_desc",
+                                    "size_asc",
+                                ):
+                                    _ent = _listing_cache_get(
+                                        _listing_cache_key(source_ref.device_id, source_ref.device_path, True, _sort)
+                                    )
+                                    if _ent is not None and getattr(_ent, "scan_id", None) == _scan_id:
+                                        if _ent.snapshot == _fresh:
+                                            _total = int(_meta.get("total_size_bytes", 0))
+                                            _count = int(_meta.get("total", len(_items)))
+                                            logger.info(
+                                                "Preflight reusing preview scan %s (%d files, walk skipped)",
+                                                _scan_id,
+                                                _count,
+                                            )
+                                            return _total, _count
+                                        break
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    logger.debug("Preflight scan reuse lookup skipped: %s", exc)
+            try:
+                return await _preflight_walk_device_tree(reader, source_ref.device_path)
+            except DeviceLockedError as exc:
+                # Reuse the device_preview error pattern (audit item 4).
+                raise HTTPException(status_code=423, detail={"status": "locked", "message": exc.message})
+            except DeviceNotTrustedError as exc:
+                raise HTTPException(status_code=403, detail={"status": "not_trusted", "message": exc.message})
+            except HTTPException:
+                raise
+            except Exception as exc:
+                try:
+                    from backend.api.device_preview import _is_transient_thumb_error as _is_transient
+
+                    if _is_transient(exc):
+                        raise HTTPException(
+                            status_code=503,
+                            headers={"Retry-After": "2"},
+                            detail={
+                                "status": "transient",
+                                "message": f"Device temporarily unavailable: {exc}. Reconnect and retry.",
+                            },
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+                # Device may have disconnected — return zero with a note
+                logger.debug("Preflight device walk failed, returning zeros: %s", exc)
+                return 0, 0
 
         if not Path(req.dest_path).exists():
             raise HTTPException(status_code=404, detail=f"Destination path not found: {req.dest_path}")
-        dest_free = shutil.disk_usage(req.dest_path).free
+        (total_bytes, file_count), usage = await asyncio.gather(
+            _walk_device(),
+            asyncio.to_thread(shutil.disk_usage, req.dest_path),
+        )
+        dest_free = usage.free
         result = {
             "source_size_bytes": total_bytes,
             "dest_free_bytes": dest_free,
@@ -4218,6 +4685,12 @@ def _session_to_info(ts: TransferSession) -> SessionInfo:
         total_bytes_volume=ts.total_bytes_volume,
         session_report_path=ts.session_report_path,
         error_message=ts.error_message,
+        error_debug_detail=getattr(ts, "error_debug_detail", None),
+        scan_scanned_total=getattr(ts, "scan_scanned_total", 0) or 0,
+        scan_skipped_by_cutoff=getattr(ts, "scan_skipped_by_cutoff", 0) or 0,
+        scan_walk_total=getattr(ts, "scan_walk_total", 0) or 0,
+        scan_cutoff_iso=getattr(ts, "scan_cutoff_iso", None),
+        scan_serial_verdict=getattr(ts, "scan_serial_verdict", None),
         created_at=ts.created_at,
         updated_at=ts.updated_at,
         started_at=ts.started_at,

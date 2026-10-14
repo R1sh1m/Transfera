@@ -112,10 +112,22 @@ def _build_json_payload(session: TransferSession, items: list[MediaItem]) -> dic
             "completed_items": session.completed_items,
             "failed_items": session.failed_items,
             "total_bytes_volume": session.total_bytes_volume,
+            # user_message duplicates error_message (short, UI-safe); debug_detail
+            # carries samples/serials/cutoff/counts for triage.
             "error_message": session.error_message,
+            "user_message": session.error_message,
+            "debug_detail": getattr(session, "error_debug_detail", None),
+            "error_debug_detail": getattr(session, "error_debug_detail", None),
             "created_at": session.created_at.isoformat() if session.created_at else None,
             "started_at": session.started_at.isoformat() if session.started_at else None,
             "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+        },
+        "scan": {
+            "scanned_total": getattr(session, "scan_scanned_total", 0) or 0,
+            "skipped_by_cutoff": getattr(session, "scan_skipped_by_cutoff", 0) or 0,
+            "walk_total": getattr(session, "scan_walk_total", 0) or 0,
+            "cutoff_iso": getattr(session, "scan_cutoff_iso", None),
+            "serial_match": getattr(session, "scan_serial_verdict", None),
         },
         "throughput": throughput,
         "status_matrix": status_matrix,
@@ -471,6 +483,9 @@ def _build_error_section_html(session: dict[str, Any], items: list[dict[str, Any
     errors: list[str] = []
     if session.get("error_message"):
         errors.append(f"[SESSION] {session['error_message']}")
+    debug_detail = session.get("debug_detail") or session.get("error_debug_detail")
+    if debug_detail:
+        errors.append(f"[DEBUG] {debug_detail}")
     for item in items:
         if item.get("error_message"):
             errors.append(f"[{item['file_name']}] {item['error_message']}")

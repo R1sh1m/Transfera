@@ -81,6 +81,19 @@ def _tags_of(mi: MediaItem) -> list[str]:
         return []
 
 
+def _parse_face_bbox(face: Face | None) -> list[float] | None:
+    """Parse ``Face.bbox_json`` into [x1, y1, x2, y2] floats (None when absent)."""
+    try:
+        if face is None or not face.bbox_json:
+            return None
+        vals = json.loads(face.bbox_json)
+        if isinstance(vals, (list, tuple)) and len(vals) == 4:
+            return [float(v) for v in vals]
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return None
+
+
 def _to_near_item(mi: MediaItem) -> NearDuplicateItemSchema:
     return NearDuplicateItemSchema(
         id=mi.id,
@@ -335,33 +348,57 @@ async def list_people(_: None = Depends(require_local_token)) -> PeopleListRespo
         result = await session.execute(select(Person).order_by(Person.face_count.desc()))
         people = list(result.scalars().all())
         out: list[PersonSchema] = []
+        used_media_ids: set[int] = set()
         for p in people:
-            cover_media_id: int | None = None
+            cover_face: Face | None = None
             if p.cover_face_id is not None:
-                cf = await session.get(Face, p.cover_face_id)
-                if cf is not None:
-                    cover_media_id = cf.media_id
+                try:
+                    cover_face = await session.get(Face, p.cover_face_id)
+                except Exception:
+                    cover_face = None
+            cover_media_id: int | None = cover_face.media_id if cover_face is not None else None
+            eff_cover_face_id: int | None = cover_face.id if cover_face is not None else None
+            cover_bbox = _parse_face_bbox(cover_face)
+            if cover_media_id is not None and cover_media_id in used_media_ids:
+                # Duplicate cover: fall through to distinct re-choice below.
+                cover_face = None
+                cover_media_id = None
+                eff_cover_face_id = None
+                cover_bbox = None
             if cover_media_id is None:
-                # Fallback: highest-confidence face's media
-                fres = await session.execute(
-                    select(Face.media_id)
-                    .where(Face.person_id == p.id)
-                    .order_by(Face.confidence.desc().nullslast())
-                    .limit(1)
-                )
-                row = fres.first()
-                if row is not None:
-                    cover_media_id = row[0]
+                # Fallback: highest-confidence face whose media is unused by
+                # another person; same-media fallback only if no alternative.
+                try:
+                    fres = await session.execute(
+                        select(Face).where(Face.person_id == p.id).order_by(Face.confidence.desc().nullslast())
+                    )
+                    faces = list(fres.scalars().all())
+                except Exception:
+                    faces = []
+                chosen: Face | None = None
+                for f in faces:
+                    if f.media_id not in used_media_ids:
+                        chosen = f
+                        break
+                if chosen is None and faces:
+                    chosen = faces[0]
+                if chosen is not None:
+                    eff_cover_face_id = chosen.id
+                    cover_media_id = chosen.media_id
+                    cover_bbox = _parse_face_bbox(chosen)
+            if cover_media_id is not None:
+                used_media_ids.add(cover_media_id)
             out.append(
                 PersonSchema(
                     id=p.id,
                     name=p.name,
                     face_count=p.face_count,
-                    cover_face_id=p.cover_face_id,
+                    cover_face_id=eff_cover_face_id if eff_cover_face_id is not None else p.cover_face_id,
                     cover_media_id=cover_media_id,
                     cover_thumbnail_url=(
                         f"/api/media/{cover_media_id}/thumbnail" if cover_media_id is not None else None
                     ),
+                    cover_bbox=cover_bbox,
                     hidden=p.hidden,
                 )
             )
@@ -418,10 +455,12 @@ async def rename_person(
         # Person has no touch(); bump manually
         p.updated_at = datetime.now(UTC)
         cover_media_id: int | None = None
+        cover_bbox: list[float] | None = None
         if p.cover_face_id is not None:
             cf = await session.get(Face, p.cover_face_id)
             if cf is not None:
                 cover_media_id = cf.media_id
+                cover_bbox = _parse_face_bbox(cf)
         if cover_media_id is None:
             fres = await session.execute(
                 select(Face.media_id)
@@ -440,6 +479,7 @@ async def rename_person(
         cover_face_id=pcover,
         cover_media_id=cover_media_id,
         cover_thumbnail_url=(f"/api/media/{cover_media_id}/thumbnail" if cover_media_id is not None else None),
+        cover_bbox=cover_bbox,
         hidden=phidden,
     )
 
@@ -581,6 +621,30 @@ async def _cluster_and_sync_people(session) -> int:
     # Lowered threshold from 0.55 to 0.50 for more inclusive clustering with ArcFace embeddings
     clusters = cluster_faces_greedy(face_payload, threshold=0.50)
     logger.info("Face clustering: formed %d clusters from %d faces (threshold=0.50)", len(clusters), len(face_payload))
+    # Distinct-cover bookkeeping: media_id -> owning person_id for covers
+    # already assigned (best effort; never fail clustering on this).
+    cover_owner: dict[int, int] = {}
+    try:
+        pres = await session.execute(select(Person.id, Person.cover_face_id).where(Person.cover_face_id.isnot(None)))
+        _cover_ids = [(r[0], r[1]) for r in pres.all() if r[1] is not None]
+        if _cover_ids:
+            _cres = await session.execute(
+                select(Face.id, Face.media_id).where(Face.id.in_([cid for _, cid in _cover_ids]))
+            )
+            _media_by_face = {fid: mid for fid, mid in _cres.all()}
+            for pid, cid in _cover_ids:
+                _mid = _media_by_face.get(cid)
+                if _mid is not None and _mid not in cover_owner:
+                    cover_owner[_mid] = pid
+    except Exception:
+        cover_owner = {}
+
+    def _ranked(faces_list: list) -> list:
+        return sorted(
+            faces_list,
+            key=lambda f: (-(f.confidence if f.confidence is not None else -1.0), f.id),
+        )
+
     for cl in clusters:
         cl_faces = [face_map[fid] for fid in cl if fid in face_map]
         if not cl_faces:
@@ -591,21 +655,54 @@ async def _cluster_and_sync_people(session) -> int:
             person = await session.get(Person, pid)
             if person is not None:
                 break
+        ranked = _ranked(cl_faces)
         if person is None:
+            chosen = next((f for f in ranked if f.media_id not in cover_owner), ranked[0] if ranked else None)
             person = Person(
                 face_count=len(cl_faces),
-                cover_face_id=cl_faces[0].id,
+                cover_face_id=chosen.id if chosen is not None else None,
                 hidden=False,
             )
             session.add(person)
             await session.flush()
+            if chosen is not None and chosen.media_id is not None:
+                cover_owner.setdefault(chosen.media_id, person.id)
+        else:
+            # Keep the existing cover when it is still distinct; otherwise
+            # re-choose the highest-confidence face on an unused media.
+            keep_ok = False
+            if person.cover_face_id is not None:
+                try:
+                    cur = await session.get(Face, person.cover_face_id)
+                except Exception:
+                    cur = None
+                if cur is not None and cur.media_id is not None:
+                    owner = cover_owner.get(cur.media_id)
+                    if owner is None or owner == person.id:
+                        keep_ok = True
+                        cover_owner.setdefault(cur.media_id, person.id)
+            if not keep_ok:
+                chosen = next(
+                    (f for f in ranked if f.media_id not in cover_owner or cover_owner.get(f.media_id) == person.id),
+                    ranked[0] if ranked else None,
+                )
+                if chosen is not None:
+                    person.cover_face_id = chosen.id
+                    if chosen.media_id is not None:
+                        cover_owner[chosen.media_id] = person.id
 
         for f in cl_faces:
             f.person_id = person.id
 
         person.face_count = len(cl_faces)
-        if person.cover_face_id is None and cl_faces:
-            person.cover_face_id = cl_faces[0].id
+        if person.cover_face_id is None and ranked:
+            fallback = next(
+                (f for f in ranked if f.media_id not in cover_owner or cover_owner.get(f.media_id) == person.id),
+                ranked[0],
+            )
+            person.cover_face_id = fallback.id
+            if fallback.media_id is not None:
+                cover_owner[fallback.media_id] = person.id
         person.updated_at = datetime.now(UTC)
 
     return len(clusters)
@@ -1284,4 +1381,135 @@ async def face_crop(
     except Exception as exc:
         logger.debug("face crop failed for face %s: %s", face_id, exc)
         raise HTTPException(status_code=404, detail="Could not render face crop")
+    return _Response(content=data, media_type="image/jpeg")
+
+
+@faces_router.get("/{face_id}/thumbnail")
+async def face_thumbnail(
+    face_id: int,
+    _: None = Depends(require_local_token),
+):
+    """Face-cropped thumbnail: 256px square JPEG for People covers.
+
+    Loads the parent media source via the thumbnail source-path helpers
+    (:func:`resolve_thumbnail_source_path` with source-path fallback),
+    crops ``Face.bbox_json`` [x1, y1, x2, y2] with ~30% margin,
+    square-crops, and resizes to 256px. 404 when the face, bbox, or
+    source file is missing. Never requires ML models (pure Pillow).
+    """
+    import asyncio as _asyncio
+    import io as _io
+    from pathlib import Path as _Path
+
+    from fastapi.responses import Response as _Response
+
+    from backend.engines.thumbnail_ops import resolve_thumbnail_source_path as _resolve_src
+
+    async with session_scope() as session:
+        try:
+            face = await session.get(Face, face_id)
+        except Exception:
+            face = None
+        if face is None:
+            raise HTTPException(status_code=404, detail="Face not found")
+        try:
+            bbox = json.loads(face.bbox_json) if face.bbox_json else None
+        except (json.JSONDecodeError, TypeError):
+            bbox = None
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise HTTPException(status_code=404, detail="Face bbox not available")
+        try:
+            bbox_vals = [float(v) for v in bbox]
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=404, detail="Face bbox not available")
+        media_id = face.media_id
+        try:
+            mi = await session.get(MediaItem, media_id)
+        except Exception:
+            mi = None
+        if mi is None:
+            raise HTTPException(status_code=404, detail="Media item not found")
+        try:
+            sess = await session.get(TransferSession, mi.session_id) if mi.session_id is not None else None
+        except Exception:
+            sess = None
+        entry = {
+            "source_path": mi.source_path,
+            "file_name": mi.file_name,
+            "date_taken": mi.date_taken,
+            "original_capture_time": mi.original_capture_time,
+            "created_at": mi.created_at,
+            "file_size": mi.file_size,
+            "folder_layout": getattr(sess, "folder_layout", "year/month") if sess is not None else "year/month",
+        }
+        try:
+            dest_root = _Path(sess.dest_root) if sess is not None and getattr(sess, "dest_root", None) else None
+        except Exception:
+            dest_root = None
+        try:
+            src_path = _resolve_src(entry, dest_root)
+        except Exception:
+            src_path = None
+        if src_path is None and mi.source_path:
+            try:
+                sp = _Path(mi.source_path)
+                if sp.is_file():
+                    src_path = sp
+            except Exception:
+                src_path = None
+        try:
+            src_ok = src_path is not None and src_path.is_file()
+        except Exception:
+            src_ok = False
+        if not src_ok:
+            raise HTTPException(status_code=404, detail="Source file not found")
+        assert src_path is not None
+        src_str = str(src_path)
+
+    def _render() -> bytes:
+        from PIL import Image, ImageOps
+
+        with Image.open(src_str) as raw:
+            img = ImageOps.exif_transpose(raw) or raw
+            img = img.convert("RGB")
+            w, h = img.size
+            x1, y1, x2, y2 = bbox_vals
+            x1 = max(0.0, min(x1, float(w)))
+            y1 = max(0.0, min(y1, float(h)))
+            x2 = max(0.0, min(x2, float(w)))
+            y2 = max(0.0, min(y2, float(h)))
+            if x2 <= x1 or y2 <= y1:
+                raise ValueError("empty bbox")
+            bw, bh = x2 - x1, y2 - y1
+            pad = 0.30 * max(bw, bh)
+            x1 = max(0.0, x1 - pad)
+            y1 = max(0.0, y1 - pad)
+            x2 = min(float(w), x2 + pad)
+            y2 = min(float(h), y2 + pad)
+            # Square the box around its center
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            side = max(x2 - x1, y2 - y1)
+            # Clamp square inside the image, shrinking if larger than frame
+            side = min(side, float(min(w, h)))
+            cx = min(max(cx, side / 2.0), float(w) - side / 2.0)
+            cy = min(max(cy, side / 2.0), float(h) - side / 2.0)
+            x1, y1 = int(round(cx - side / 2.0)), int(round(cy - side / 2.0))
+            x2, y2 = int(round(x1 + side)), int(round(y1 + side))
+            x1 = max(0, min(x1, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            x2 = max(x1 + 1, min(x2, w))
+            y2 = max(y1 + 1, min(y2, h))
+            img = img.crop((x1, y1, x2, y2))
+            img = img.resize((256, 256), Image.LANCZOS)
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            return buf.getvalue()
+
+    try:
+        data = await _asyncio.to_thread(_render)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.debug("face thumbnail failed for face %s: %s", face_id, exc)
+        raise HTTPException(status_code=404, detail="Could not render face thumbnail")
     return _Response(content=data, media_type="image/jpeg")
