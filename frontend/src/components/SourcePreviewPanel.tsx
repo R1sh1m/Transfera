@@ -7,7 +7,6 @@ import {
   Upload,
   Image,
   Film,
-  SlidersHorizontal,
   CheckCircle,
   AlertTriangle,
   RefreshCw,
@@ -1737,6 +1736,25 @@ function SourcePreviewPanelInner({
     onSelectionConfirm,
   ]);
 
+  const handleSelectPage = useCallback(() => {
+    const next = new Set(selectedRef.current);
+    if (allVisibleSelected) {
+      for (const item of visibleItems) next.delete(item.abs_path);
+    } else {
+      for (const item of visibleItems) next.add(item.abs_path);
+    }
+    setKnownSizes((prev) => {
+      const nextMap = new Map(prev);
+      for (const it of visibleItems) {
+        if (it?.abs_path != null) nextMap.set(it.abs_path, it.size_bytes || 0);
+      }
+      return nextMap;
+    });
+    selectedRef.current = next;
+    setSelected(next);
+    onSelectionConfirm?.(Array.from(next));
+  }, [visibleItems, allVisibleSelected, onSelectionConfirm]);
+
   const handleSelectOnlyNew = useCallback(() => {
     let targets: string[] = [];
     if (allNewPathsRef.current !== null) {
@@ -2040,26 +2058,36 @@ function SourcePreviewPanelInner({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={handleSelectAll}
-                disabled={isSelectingAll}
+                onClick={handleSelectPage}
                 title={
-                  isGloballySelected
-                    ? "Clear the whole cross-page selection"
-                    : metadata.total > 0
-                      ? `Select all ${metadata.total} files across pages`
-                      : "Select the current page"
+                  allVisibleSelected
+                    ? "Deselect items on the current page"
+                    : `Select all ${visibleItems.length} items on the current page`
                 }
-                className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 inline-flex items-center gap-1"
+                className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1"
               >
-                {isSelectingAll && <Loader2 className="w-3 h-3 animate-spin" />}
-                {isGloballySelected
-                  ? "Deselect all"
-                  : metadata.total > 0
-                    ? `Select all (${metadata.total})`
-                    : allVisibleSelected
-                      ? "Deselect page"
-                      : `Select page (${visibleItems.length})`}
+                {allVisibleSelected
+                  ? (metadata.total > visibleItems.length ? "Deselect page" : "Deselect all")
+                  : (metadata.total > visibleItems.length ? `Select page (${visibleItems.length})` : `Select all (${visibleItems.length})`)}
               </button>
+              {metadata.total > visibleItems.length && (
+                <button
+                  type="button"
+                  onClick={handleSelectAll}
+                  disabled={isSelectingAll}
+                  title={
+                    isGloballySelected
+                      ? "Clear the whole cross-page selection"
+                      : `Select all ${metadata.total} files across pages`
+                  }
+                  className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 inline-flex items-center gap-1"
+                >
+                  {isSelectingAll && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {isGloballySelected
+                    ? "Deselect all"
+                    : `Select all (${metadata.total})`}
+                </button>
+              )}
               {selectedCount > 0 && (
                 <button
                   type="button"
@@ -2128,7 +2156,6 @@ function SourcePreviewPanelInner({
               ))}
             </div>
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
-              <SlidersHorizontal className="w-3 h-3 shrink-0" />
               <PillSelect
                 value={String(pageSize)}
                 onChange={(val) => {

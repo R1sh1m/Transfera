@@ -644,8 +644,8 @@ The inline media preview panel on the Setup page that appears when a source dire
 
 | Zone | Content |
 |---|---|
-| Header bar | Left: "Source preview" label in `text-xs font-medium` + `text-xs text-muted-foreground` file count/size metadata. Right: "Select all" / "Deselect all" text button in `text-primary` with "(Ctrl+A)" hint |
-| Filter + sort row | Left: three filter pills (All / Photos with Image icon / Videos with Film icon), active pill `bg-primary text-primary-foreground`, inactive `bg-muted text-muted-foreground`. Right: sort dropdown (6 options) with SlidersHorizontal icon |
+| Header bar | Left: "Source preview" label in `text-xs font-semibold` + `text-xs text-muted-foreground` file count/size metadata. Right: both "Select page" (toggles current page files) AND "Select all" (cross-page selection over all scanned files) must always be present when multi-page (`metadata.total > visibleItems.length`), collapsing to a single "Select all" for single-page sources. Also includes "Transfer selected" (when >0 selected) and "Import all" buttons. |
+| Filter + sort row | Left: three filter pills (All / Photos with Image icon / Videos with Film icon), active pill `bg-action text-white`, inactive `bg-muted text-muted-foreground`. Right: page size dropdown (25/50/100) and sort dropdown (6 options). Note: no decorative settings/sliders icon before the dropdowns. |
 | Pre-scan banner | Conditional — blue-tinted bar (`bg-blue-50 dark:bg-blue-950/40`) when prescan finds likely duplicates. Text: "X files already appear to be in your library." Right: "Select only new files" button (`bg-blue-600`) |
 | Thumbnail grid | 4-column grid, `gap-0.5`, each cell `aspect-square rounded-lg overflow-hidden cursor-pointer`. Contains `component.media-thumb-cell` instances |
 | Pagination | Prev / windowed numbers / Next + per-page selector (25/50/100) instead of grow-forever — pages replace items (bounded DOM + bounded concurrent thumbnails); selection and byte totals span pages |
@@ -667,8 +667,10 @@ The inline media preview panel on the Setup page that appears when a source dire
 - Selection belongs to the current folder — navigating to another folder
   clears it silently (no toast), so "N selected / 0 B" staleness and
   sessions built from another folder's paths cannot happen
-- "Select all" / Ctrl+A toggles only the currently visible (filtered) items;
-  Load-more appends to `items`, so multi-page selection within one folder accumulates
+- Both "Select page" and "Select all" options must always be preserved:
+  - "Select page (N)" / "Deselect page": scoped strictly to the visible items on the current page.
+  - "Select all (N)" / "Deselect all": global selection across all pages in the source.
+  - Ctrl+A triggers Select all / Deselect all globally.
 
 ### `component.media-thumb-cell`
 
