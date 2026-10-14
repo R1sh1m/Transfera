@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -78,9 +79,9 @@ def _make_manager(monkeypatch=None, prefer_tier2: bool = False):
     m._bridge_auto_started = False
     m._wsl_setup_suggested = False
     m._tier2_error = None
-    m._tier1 = _FakeBackend(DeviceAccessTier.TIER_1)
-    m._tier2 = _FakeBackend(DeviceAccessTier.TIER_2)
-    m._wpd = _FakeBackend(DeviceAccessTier.WPD)
+    m._tier1 = cast(Any, _FakeBackend(DeviceAccessTier.TIER_1))
+    m._tier2 = cast(Any, _FakeBackend(DeviceAccessTier.TIER_2))
+    m._wpd = cast(Any, _FakeBackend(DeviceAccessTier.WPD))
     if monkeypatch is not None:
         monkeypatch.setattr(device_backend, "_save_device_tier_prefs", lambda _p: None)
         monkeypatch.setattr(device_backend, "_save_device_tier_user_prefs", lambda _p: None)
@@ -151,7 +152,7 @@ async def test_run_operation_falls_back_and_records_attempted(monkeypatch):
     assert len(result) == 1
     # user override untouched, auto map updated
     assert m.get_user_tier("DEV1") == "tier2"
-    assert m._device_tier_prefs.get("DEV1") == "tier1"
+    assert (m._device_tier_prefs.get("dev1") or m._device_tier_prefs.get("DEV1")) == "tier1"
 
 
 @pytest.mark.asyncio

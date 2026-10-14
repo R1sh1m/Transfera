@@ -240,29 +240,37 @@ def test_thumbnail_cache_only_miss_and_hit(test_client, tmp_path):
 def test_extract_frame_short_clip(tmp_path):
     """Ensure short video clips (e.g. 0.2s Live Photos) decode via accurate/output seek."""
     import io
+    import shutil
     import subprocess
 
+    import pytest
     from PIL import Image
 
     from backend.engines import thumb_worker
 
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available on PATH")
+
     clip_path = tmp_path / "short.mp4"
-    res = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=blue:s=64x64:d=0.2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            str(clip_path),
-        ],
-        capture_output=True,
-    )
+    try:
+        res = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=64x64:d=0.2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(clip_path),
+            ],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("ffmpeg not available on PATH")
     if res.returncode == 0 and clip_path.is_file():
         data = clip_path.read_bytes()
         thumb = thumb_worker.extract_frame_from_bytes(data, 64, suffix=".mp4")

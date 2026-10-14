@@ -1121,7 +1121,7 @@ def extract_metadata_batched(
     _ensure_heif_opener()
     if not file_paths:
         return {}
-    chunk_size = max(1, min(int(chunk_size), 50))
+    chunk_size = max(1, min(chunk_size, 50))
     results: dict[str, FileMetadata] = {}
     for start in range(0, len(file_paths), chunk_size):
         chunk = file_paths[start : start + chunk_size]

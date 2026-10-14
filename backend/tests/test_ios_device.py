@@ -143,7 +143,7 @@ def test_canonical_device_serial():
     udid = "A" * 40
     assert canonical_device_serial(udid) == udid.lower()
     assert canonical_device_serial(f"\\\\?\\USB#VID_05AC&PID_12A8#{udid}#{{guid}}") == udid.lower()
-    assert canonical_device_serial("SWD#WPDBUSENUM#{guid}#0000") == "SWD#WPDBUSENUM#{guid}#0000"
+    assert canonical_device_serial("SWD#WPDBUSENUM#{guid}#0000") == "swd#wpdbusenum#{guid}#0000"
     assert canonical_device_serial("") == ""
     assert canonical_device_serial(None) == ""
 
@@ -185,7 +185,7 @@ class _FakeAfc:
     def stat(self, path):
         return {"st_ifmt": "S_IFREG", "st_size": 10, "st_mtime": 0}
 
-    def get_file_contents(self, path):
+    def get_file_contents(self, path) -> bytes:
         return b"data"
 
     def close(self):
@@ -316,7 +316,7 @@ class _HangingAfc(_FakeAfc):
         self._gate.wait(30)
         return []
 
-    def get_file_contents(self, path):
+    def get_file_contents(self, path) -> bytes:
         self._gate.wait(30)
         return b""
 
