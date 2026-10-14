@@ -3557,47 +3557,43 @@ async def get_media_thumbnail(item_id: int, request: Request):
             },
         )
 
-    # ---- On cache miss: try to locate the file ----
-    # Priority 1: organised archive destination (authoritative for
-    # transferred items; source may be ios:// or a disconnected drive).
+    # ---- On cache miss: resolve via the shared thumbnail source helper ----
+    # Same path the regen worker and backfill use (archive destination first,
+    # then Hop 1 cache, then original source), so the grid, the regen pass,
+    # and the detail modal always resolve the same file. API shape unchanged.
     file_path: Path | None = None
+    dest_root: Path | None = None
+    folder_layout = "year/month"
     if db_item.session_id is not None:
         async with session_scope() as session:
             session_obj = await session.get(TransferSession, db_item.session_id)
         if session_obj and session_obj.dest_root:
-            from backend.engines.organizer import locate_archive_file
-
-            layout = getattr(session_obj, "folder_layout", "year/month")
-            try:
-                candidate = locate_archive_file(Path(session_obj.dest_root), db_item, layout=layout)
-                if candidate is not None:
-                    file_path = candidate
-            except Exception:
-                pass
-
-    # Priority 2: check Hop 1 local cache directory
-    if file_path is None:
-        from backend.engines.cache_manager import get_cache_path
-
-        try:
-            candidate = get_cache_path(CACHE_DIR, db_item.source_path, db_item.file_name)
-            if candidate.is_file():
-                file_path = candidate
-        except Exception:
-            pass
-
-    # Priority 3: original source path (copy-mode local transfers where
-    # the source file still exists on disk; never for ios://).
-    if file_path is None and not db_item.source_path.startswith("ios://"):
-        try:
-            source = Path(db_item.source_path)
-            if source.is_file():
-                file_path = source
-        except Exception:
-            pass
+            dest_root = Path(session_obj.dest_root)
+            folder_layout = getattr(session_obj, "folder_layout", "year/month") or "year/month"
+    try:
+        file_path = resolve_thumbnail_source_path(
+            {
+                "source_path": db_item.source_path,
+                "file_name": db_item.file_name,
+                "date_taken": db_item.date_taken,
+                "original_capture_time": db_item.original_capture_time,
+                "created_at": db_item.created_at,
+                "file_size": db_item.file_size,
+                "extension": db_item.extension,
+                "source_hash": db_item.source_hash,
+                "folder_layout": folder_layout,
+            },
+            dest_root,
+        )
+    except Exception:
+        file_path = None
 
     if file_path is not None:
-        data = await asyncio.to_thread(generate_thumbnail_bytes, file_path)
+        try:
+            data = await asyncio.to_thread(generate_thumbnail_bytes, file_path)
+        except Exception as exc:
+            logger.warning("Thumbnail on-demand decode failed for item %d: %s", item_id, exc)
+            data = None
         if data:
             thumbnail_cache.put(item_id, data)
             async with session_scope() as session:
@@ -3615,6 +3611,23 @@ async def get_media_thumbnail(item_id: int, request: Request):
                     "X-Thumbnail-Status": "ready",
                 },
             )
+        # File exists but decode truly failed -> terminal "failed" (never
+        # "not_found": the file is there, so a missing-file retry would not
+        # help; regen resets failed->pending when codecs improve).
+        async with session_scope() as session:
+            upd = await session.get(MediaItem, item_id)
+            if upd and upd.thumbnail_status != "failed":
+                upd.thumbnail_status = "failed"
+                upd.touch()
+        return Response(
+            content=_get_placeholder_jpeg(),
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": cache_control,
+                "ETag": etag,
+                "X-Thumbnail-Status": "failed",
+            },
+        )
 
     # File not found anywhere — return placeholder but do NOT permanently mark as failed
     # (the file may be on a disconnected external drive; marking failed prevents future regen)

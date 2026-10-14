@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   CalendarDays,
   Sparkles,
@@ -572,8 +573,71 @@ export function PeoplePanel({
   const [name, setName] = useState("");
   const [navigating, setNavigating] = useState<number | null>(null);
   const facesAvailable = capabilities?.faces_available ?? false;
+  const qc = useQueryClient();
+  const [mergeMode, setMergeMode] = useState(false);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [targetId, setTargetId] = useState<number | null>(null);
+  const [merging, setMerging] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
+
+  const toggleSelect = (personId: number) => {
+    setMergeError(null);
+    setSelected((prev) => {
+      const next = prev.includes(personId)
+        ? prev.filter((id) => id !== personId)
+        : [...prev, personId];
+      // Keep the explicit target if still selected; otherwise fall back to
+      // the smallest id (default target) on next render.
+      setTargetId((t) =>
+        t !== null && next.includes(t)
+          ? t
+          : next.length > 0
+            ? Math.min(...next)
+            : null,
+      );
+      return next;
+    });
+  };
+  const effectiveTarget =
+    targetId !== null && selected.includes(targetId)
+      ? targetId
+      : selected.length > 0
+        ? Math.min(...selected)
+        : null;
+  const canMerge = selected.length >= 2 && effectiveTarget !== null && !merging;
+
+  const handleMerge = async () => {
+    if (!canMerge || effectiveTarget === null) return;
+    const source_ids = selected.filter((id) => id !== effectiveTarget);
+    if (source_ids.length === 0) return;
+    setMerging(true);
+    setMergeError(null);
+    try {
+      await apiClient.post("/intelligence/people/merge", {
+        target_id: effectiveTarget,
+        source_ids,
+      });
+      await qc.invalidateQueries({ queryKey: ["people"] });
+      setSelected([]);
+      setTargetId(null);
+      setMergeMode(false);
+      useTransferStore.getState().showNotification("success", "People merged");
+    } catch (e) {
+      setMergeError(
+        e instanceof Error ? e.message : "Merge failed — try again",
+      );
+    } finally {
+      setMerging(false);
+    }
+  };
 
   const handlePersonClick = async (personId: number) => {
+    if (mergeMode) {
+      // Merge mode hijacks card clicks into select-toggles; the controlled
+      // onSelect path below stays untouched for normal mode.
+      toggleSelect(personId);
+      return;
+    }
     if (onSelect) {
       // Controlled mode: let the owner resolve faces if it wants.
       // Fetch here so the detail always carries media_ids.
@@ -677,15 +741,118 @@ export function PeoplePanel({
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-sm font-semibold">
         <Users className="w-4 h-4 text-action" /> People · {data.total}
+        <button
+          type="button"
+          onClick={() => {
+            setMergeMode((m) => !m);
+            setSelected([]);
+            setTargetId(null);
+            setMergeError(null);
+          }}
+          aria-pressed={mergeMode}
+          title={
+            mergeMode
+              ? "Exit merge mode"
+              : "Select two or more clusters of the same person to merge"
+          }
+          className={cn(
+            "ml-auto px-3 py-1 rounded-pill border text-xs font-medium active:scale-[0.95] transition",
+            mergeMode
+              ? "bg-action text-white border-action hover:bg-action/90"
+              : "border-border text-muted-foreground hover:text-foreground hover:bg-muted",
+          )}
+        >
+          {mergeMode ? "Done" : "Merge…"}
+        </button>
       </div>
+      {mergeMode && (
+        <div className="rounded-lg border border-border bg-card p-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted-foreground">
+            {selected.length === 0
+              ? "Tap cards to select clusters of the same person"
+              : `${selected.length} selected`}
+          </span>
+          {selected.length > 0 && (
+            <label className="flex items-center gap-1.5 text-muted-foreground">
+              Keep as
+              <select
+                value={effectiveTarget ?? ""}
+                onChange={(e) => setTargetId(Number(e.target.value))}
+                aria-label="Merge target person"
+                className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground"
+              >
+                {selected
+                  .slice()
+                  .sort((a, b) => a - b)
+                  .map((id) => {
+                    const person = data.people.find((pp) => pp.id === id);
+                    return (
+                      <option key={id} value={id}>
+                        {person?.name ?? `Person ${id}`}
+                      </option>
+                    );
+                  })}
+              </select>
+            </label>
+          )}
+          <button
+            type="button"
+            onClick={handleMerge}
+            disabled={!canMerge}
+            title={
+              selected.length < 2
+                ? "Select at least 2 clusters to merge"
+                : `Merge into ${effectiveTarget !== null ? (data.people.find((pp) => pp.id === effectiveTarget)?.name ?? `Person ${effectiveTarget}`) : ""}`
+            }
+            className="px-3 py-1.5 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40 flex items-center gap-1"
+          >
+            {merging ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" /> Merging…
+              </>
+            ) : (
+              "Merge selected"
+            )}
+          </button>
+          {mergeError && (
+            <span role="alert" className="text-xs text-red-600">
+              {mergeError}
+            </span>
+          )}
+        </div>
+      )}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {data.people.map((p) => {
           const displayName = p.name ?? `Person ${p.id}`;
+          const isSelected = selected.includes(p.id);
           return (
             <div
               key={p.id}
-              className="rounded-lg border border-border bg-card p-3"
+              className={cn(
+                "rounded-lg border bg-card p-3 relative",
+                mergeMode && isSelected
+                  ? "border-action ring-2 ring-action/30"
+                  : "border-border",
+              )}
             >
+              {mergeMode && (
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={isSelected}
+                  aria-label={`Select ${displayName} for merge`}
+                  title={`Select ${displayName} for merge`}
+                  onClick={() => toggleSelect(p.id)}
+                  className={cn(
+                    "absolute left-2 top-2 z-10 w-5 h-5 rounded-md border flex items-center justify-center active:scale-[0.95] transition",
+                    isSelected
+                      ? "bg-action border-action text-white"
+                      : "bg-card border-border text-transparent hover:border-action",
+                  )}
+                >
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => handlePersonClick(p.id)}

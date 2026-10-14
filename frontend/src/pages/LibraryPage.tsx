@@ -254,13 +254,19 @@ const LibraryCard = memo(function LibraryCard({
     );
   const isFailed = item.thumbnail_status === "failed";
 
-  // Only observe visibility / fetch when a thumbnail can exist.
-  // One delayed retry: a transient failure (DB lock, restart mid-view)
-  // latches noThumb forever per mount — re-arm once after 20 s so backend
-  // healing actually heals open views.
+  // Thumbnail fetch runs on visibility regardless of thumbnail_status —
+  // the X-Thumbnail-Status response header (see thumbnail-fetch.ts) is the
+  // source of truth, since list-row status can be stale vs. the modal path.
+  // Null results latch noThumb only for terminal `failed` status; transient
+  // pending/not_found schedule a capped backoff retry instead. One delayed
+  // 20 s re-arm still heals a latched failure if the backend recovers.
   const retriedRef = useRef(false);
+  const retryCountRef = useRef(0);
+  const [retryTick, setRetryTick] = useState(0);
   useEffect(() => {
     retriedRef.current = false;
+    retryCountRef.current = 0;
+    setRetryTick(0);
   }, [item.id]);
   useEffect(() => {
     if (!noThumb || retriedRef.current) return;
@@ -270,12 +276,7 @@ const LibraryCard = memo(function LibraryCard({
   }, [noThumb]);
   useEffect(() => {
     const el = cellRef.current;
-    if (!el || isFailed || noThumb) return;
-    if (
-      item.thumbnail_status !== "ready" &&
-      item.thumbnail_status !== "pending"
-    )
-      return;
+    if (!el || noThumb) return;
     const obs = new IntersectionObserver(
       ([entry]) => {
         if (entry?.isIntersecting) {
@@ -287,19 +288,15 @@ const LibraryCard = memo(function LibraryCard({
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [item.id, item.thumbnail_status, isFailed, noThumb]);
+  }, [item.id, noThumb]);
 
   useEffect(() => {
-    if (!visible || isFailed || noThumb) return;
-    if (
-      item.thumbnail_status !== "ready" &&
-      item.thumbnail_status !== "pending"
-    )
-      return;
+    if (!visible || noThumb) return;
 
     const controller = new AbortController();
     let cancelled = false;
     let slotHeld = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     libraryThumbQueue.request(async () => {
       if (cancelled) {
@@ -315,7 +312,19 @@ const LibraryCard = memo(function LibraryCard({
         );
         if (cancelled) return;
         if (url) {
+          retryCountRef.current = 0;
           setThumbUrl(url);
+        } else if (item.thumbnail_status === "failed") {
+          // Terminal: show the type icon; hover badge explains the state.
+          setNoThumb(true);
+        } else if (retryCountRef.current < 4) {
+          // Transient (pending/not_found): retry with backoff instead of
+          // latching the placeholder.
+          const delay = Math.min(3000 * 2 ** retryCountRef.current, 24000);
+          retryCountRef.current += 1;
+          retryTimer = setTimeout(() => {
+            if (!cancelled) setRetryTick((t) => t + 1);
+          }, delay);
         } else {
           setNoThumb(true);
         }
@@ -332,6 +341,7 @@ const LibraryCard = memo(function LibraryCard({
     return () => {
       cancelled = true;
       controller.abort();
+      if (retryTimer) clearTimeout(retryTimer);
       if (slotHeld) {
         slotHeld = false;
         libraryThumbQueue.release();
@@ -339,10 +349,10 @@ const LibraryCard = memo(function LibraryCard({
     };
   }, [
     visible,
+    retryTick,
     item.id,
     item.thumbnail_status,
     item.updated_at,
-    isFailed,
     noThumb,
   ]);
 
@@ -1269,59 +1279,58 @@ export default function LibraryPage() {
             >
               ★ Favorites
             </button>
+            {/* Document filing helper — inline icon-button; tooltip is
+                absolute so hover never shifts layout. */}
+            <div className="relative flex items-center">
+              <button
+                type="button"
+                onClick={handleMigrateDocuments}
+                disabled={migrateRunning}
+                onMouseEnter={() => setDocsIconHovered(true)}
+                onMouseLeave={() => setDocsIconHovered(false)}
+                className={cn(
+                  "relative flex items-center justify-center w-6 h-6 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
+                  migrateRunning && "opacity-60 cursor-not-allowed",
+                )}
+                aria-label="Document filing"
+              >
+                {migrateRunning ? (
+                  <Loader2 className="w-3 h-3 animate-spin text-primary" />
+                ) : (
+                  <FileText className="w-3 h-3" />
+                )}
+                {migratePreview && migratePreview.total > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-0.5 flex items-center justify-center rounded-full bg-action text-white text-[9px] font-medium leading-none">
+                    {migratePreview.total > 99 ? "99+" : migratePreview.total}
+                  </span>
+                )}
+              </button>
+              <AnimatePresence>
+                {docsIconHovered && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute right-0 top-7 z-30 pointer-events-none"
+                  >
+                    <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
+                      <FileText className="w-3 h-3 text-action" />
+                      <span>
+                        {migrateResult
+                          ? migrateResult
+                          : migratePreview && migratePreview.total > 0
+                            ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
+                            : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
+                      </span>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         )}
       </div>
-
-      {/* Document filing helper (vault only) — own right-aligned row ABOVE
-          search so the search bar sits flush below. Fixed h-8 row reserves
-          space: tooltip is absolute, so hover never shifts layout. */}
-      {section === "vault" && (
-        <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
-          <div className="relative flex items-center h-8">
-            <button
-              type="button"
-              onClick={handleMigrateDocuments}
-              disabled={migrateRunning}
-              onMouseEnter={() => setDocsIconHovered(true)}
-              onMouseLeave={() => setDocsIconHovered(false)}
-              className={cn(
-                "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
-                migrateRunning && "opacity-60 cursor-not-allowed",
-              )}
-              aria-label="Document filing"
-            >
-              {migrateRunning ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-              ) : (
-                <FileText className="w-3.5 h-3.5" />
-              )}
-            </button>
-            <AnimatePresence>
-              {docsIconHovered && (
-                <motion.div
-                  initial={{ opacity: 0, y: 4, scale: 0.96 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 4, scale: 0.96 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute right-0 top-10 z-30 pointer-events-none"
-                >
-                  <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
-                    <FileText className="w-3 h-3 text-action" />
-                    <span>
-                      {migrateResult
-                        ? migrateResult
-                        : migratePreview && migratePreview.total > 0
-                          ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
-                          : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
-                    </span>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
-      )}
 
       {/* Unified search (offline keyword today, CLIP when models installed).
           Single input driving both filename + semantic results, merged below. */}

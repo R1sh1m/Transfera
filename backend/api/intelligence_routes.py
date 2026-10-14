@@ -593,7 +593,15 @@ async def semantic_search(
     )
 
 
-async def _cluster_and_sync_people(session) -> int:
+async def _cluster_and_sync_people(session, threshold: float = 0.50) -> int:
+    """Cluster faces into Person rows.
+
+    ``threshold`` is the cosine-similarity cut for greedy clustering
+    (default 0.50, lowered from 0.55 for more inclusive ArcFace grouping);
+    the backfill endpoint exposes it as a query param. Cover selection is
+    threshold-independent (highest confidence on distinct media) and
+    unchanged.
+    """
     from backend.database.models import Face, Person
     from backend.engines.intelligence import cluster_faces_greedy
 
@@ -618,9 +626,14 @@ async def _cluster_and_sync_people(session) -> int:
         logger.debug("Face clustering: no valid face embeddings after parsing")
         return 0
 
-    # Lowered threshold from 0.55 to 0.50 for more inclusive clustering with ArcFace embeddings
-    clusters = cluster_faces_greedy(face_payload, threshold=0.50)
-    logger.info("Face clustering: formed %d clusters from %d faces (threshold=0.50)", len(clusters), len(face_payload))
+    # Default 0.50 (lowered from 0.55) for more inclusive clustering with ArcFace embeddings
+    clusters = cluster_faces_greedy(face_payload, threshold=threshold)
+    logger.info(
+        "Face clustering: formed %d clusters from %d faces (threshold=%.2f)",
+        len(clusters),
+        len(face_payload),
+        threshold,
+    )
     # Distinct-cover bookkeeping: media_id -> owning person_id for covers
     # already assigned (best effort; never fail clustering on this).
     cover_owner: dict[int, int] = {}
@@ -711,12 +724,16 @@ async def _cluster_and_sync_people(session) -> int:
 @router.post("/backfill", response_model=BackfillResponse)
 async def backfill_intelligence(
     limit: int = Query(2000, ge=1, le=10000),
+    threshold: float = Query(0.50, ge=0.0, le=1.0),
     _: None = Depends(require_local_token),
 ) -> BackfillResponse:
     """Fill missing phash / dimensions / tags / embeddings / faces for completed items.
 
     Bounded (``limit``) so it is safe to call repeatedly; idempotent —
     only touches rows with NULL fields. Pure-Pillow and on-board ONNX.
+
+    ``threshold`` is the face-clustering cosine-similarity cut passed to
+    :func:`_cluster_and_sync_people` (default 0.50; omit for prior behavior).
     """
     import asyncio
     import io
@@ -805,6 +822,7 @@ async def backfill_intelligence(
             needs_camera = mi.camera_make is None or mi.camera_model is None or mi.width is None or mi.height is None
             p: Path | None = None
             thumb: bytes | None = None
+            dims_from_thumb = False
 
             if needs_visual or needs_camera or clip_ready or faces_ready:
                 try:
@@ -827,6 +845,10 @@ async def backfill_intelligence(
                                 with Image.open(io.BytesIO(thumb)) as im:
                                     mi.width, mi.height = im.size[0], im.size[1]
                                     dims_filled += 1
+                                    # Thumbnail dims are reduced-size: the EXIF
+                                    # block below overwrites them when real
+                                    # metadata is available.
+                                    dims_from_thumb = True
                                     touched = True
                             except Exception:
                                 pass
@@ -855,10 +877,16 @@ async def backfill_intelligence(
                         if mi.camera_model is None and meta.camera_model:
                             mi.camera_model = meta.camera_model
                             touched = True
-                        if mi.width is None and meta.width is not None:
+                        if meta.width is not None and (mi.width is None or dims_from_thumb):
+                            # Prefer authoritative EXIF dims over reduced-size
+                            # thumbnail dims (e.g. 400x300 sticking on a
+                            # full-res photo). Only counts as newly filled
+                            # when the row had no dims before.
+                            if mi.width is None:
+                                dims_filled += 1
                             mi.width = meta.width
                             mi.height = meta.height
-                            dims_filled += 1
+                            dims_from_thumb = False
                             touched = True
                         elif mi.height is None and meta.height is not None:
                             mi.height = meta.height
@@ -945,7 +973,7 @@ async def backfill_intelligence(
         # Cluster all faces into persons
         if faces_ready:
             try:
-                await _cluster_and_sync_people(session)
+                await _cluster_and_sync_people(session, threshold=threshold)
             except Exception as exc:
                 logger.warning("Face clustering sync failed: %s", exc)
         else:

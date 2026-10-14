@@ -514,14 +514,13 @@ def cluster_faces_greedy(face_items: list[dict], threshold: float = 0.55) -> lis
                 best_cluster_idx = c_idx
 
         if best_sim >= threshold and best_cluster_idx >= 0:
-            clusters[best_cluster_idx].append(fid)
-            # Update centroid
-            cluster_centroids[best_cluster_idx] = (
-                cluster_centroids[best_cluster_idx] * len(clusters[best_cluster_idx]) + vec
-            )
-            c_norm = np.linalg.norm(cluster_centroids[best_cluster_idx])
+            n = len(clusters[best_cluster_idx])
+            new_centroid = (cluster_centroids[best_cluster_idx] * n + vec) / (n + 1)
+            c_norm = np.linalg.norm(new_centroid)
             if c_norm > 1e-6:
-                cluster_centroids[best_cluster_idx] /= c_norm
+                new_centroid = new_centroid / c_norm
+            cluster_centroids[best_cluster_idx] = new_centroid
+            clusters[best_cluster_idx].append(fid)
         else:
             clusters.append([fid])
             cluster_centroids.append(vec.copy())

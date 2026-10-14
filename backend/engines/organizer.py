@@ -167,6 +167,42 @@ def resolve_archive_path(
     return _safe_path(base)
 
 
+def _legacy_year_dup_variants(folder: Path, dt: datetime | None) -> list[Path]:
+    """Year-stacked variants of *folder* for pre-guard archives.
+
+    Before the trailing-year dedup guard (:func:`_strip_duplicate_date_suffix`),
+    transferring into a ``dest_root`` that already ended with the capture year
+    nested extra ``YYYY`` folders (e.g. ``.../2026/2026/09-September`` when the
+    destination itself was ``.../2026``). Probe those legacy locations — one
+    and two extra year levels — so old rows keep resolving to the exact file
+    the detail modal displays, without depending on the recursive-filename
+    fallback below (which is capped and traversal-order dependent). Pure
+    probes (no filesystem writes); bounded to two variants.
+    """
+    if dt is None:
+        return []
+    year = f"{dt.year}"
+    try:
+        parts = folder.parts
+    except Exception:
+        return []
+    if year not in parts:
+        return []
+    idx = parts.index(year)
+    head = Path(*parts[: idx + 1])
+    tail = Path(*parts[idx + 1 :]) if len(parts) > idx + 1 else None
+    variants: list[Path] = []
+    for extra in (1, 2):
+        stacked = head
+        for _ in range(extra):
+            stacked = stacked / year
+        if tail is not None:
+            stacked = stacked / tail
+        if stacked != folder:
+            variants.append(stacked)
+    return variants
+
+
 def locate_archive_file(
     dest_root: Path,
     item: MediaItem,
@@ -182,6 +218,11 @@ def locate_archive_file(
     When ``verify_hash`` is True and ``item.source_hash`` is set, candidates
     with matching size are hash-verified to avoid size-collision false hits.
     Size-only fast path is kept for hot loops; recovery passes verify_hash=True.
+
+    Also probes legacy year-stacked folders (``YYYY/YYYY/...`` left by
+    transfers that predated the trailing-year dedup guard) before the
+    recursive-filename last resort, so every caller — detail modal,
+    thumbnails, backfill, trash — resolves the same file.
     """
     from backend.utils.durability import sanitize_filename
     from backend.utils.hashing import verify_hash as _verify_hash_fn
@@ -231,6 +272,16 @@ def locate_archive_file(
     if found is not None:
         return found
 
+    # 1b. Legacy year-stacked locations (pre-dedup-guard archives where the
+    # destination already ended with the capture year). Deterministic stat
+    # probes so backfill, thumbnails, and the detail modal all resolve the
+    # same file even in vaults too large for the recursive fallback below.
+    for _variant in _legacy_year_dup_variants(base, dt):
+        found = _search(_variant)
+        if found is not None:
+            logger.debug("Located year-stacked file %s at %s", item.file_name, found)
+            return found
+
     # 2. Legacy fallback: documents imported before the split live in the
     # unified media tree. Probe it so old rows stay resolvable during and
     # after the manual migration.
@@ -241,6 +292,11 @@ def locate_archive_file(
         if found is not None:
             logger.debug("Located legacy-tree document %s at %s", item.file_name, found)
             return found
+        for _variant in _legacy_year_dup_variants(legacy_base, dt):
+            found = _search(_variant)
+            if found is not None:
+                logger.debug("Located year-stacked legacy document %s at %s", item.file_name, found)
+                return found
 
     # 3. Layout / timestamp drift fallback. The stored folder_layout may not
     # match the layout used at transfer time (user changed it afterwards),
