@@ -1,6 +1,6 @@
 [project]
 name = "transfera"
-version = "1.1.4"
+version = "1.1.5"
 description = "Desktop application for transferring and organizing photos and videos"
 requires-python = ">=3.12"
 dependencies = []

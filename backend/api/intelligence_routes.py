@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 
-from backend.api.auth import require_local_token
+from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.api.schemas import (
     BackfillResponse,
     CapabilitiesResponse,
@@ -775,6 +775,8 @@ async def backfill_intelligence(
                     "original_capture_time": mi.original_capture_time,
                     "created_at": mi.created_at,
                     "file_size": mi.file_size,
+                    "extension": mi.extension,
+                    "source_hash": mi.source_hash,
                     "folder_layout": getattr(sess, "folder_layout", "year/month"),
                 }
                 found = resolve_thumbnail_source_path(entry, Path(sess.dest_root))
@@ -838,6 +840,9 @@ async def backfill_intelligence(
 
             # Camera + dimensions re-extract via ExifTool (fixes legacy rows
             # scanned before structured_from_tags wiring, e.g. HEIC batches).
+            # Resolves from the dest archive so ios:// / missing-source rows
+            # still backfill. date_taken is filled too when ExifTool (incl.
+            # MOV CreationDate tags) yields one.
             if needs_camera and p is not None and p.is_file():
                 try:
                     from backend.engines.metadata_extractor import extract_metadata as _extract_meta
@@ -865,6 +870,21 @@ async def backfill_intelligence(
                         if getattr(mi, "duration_s", None) is None and meta.duration_s is not None:
                             mi.duration_s = meta.duration_s
                             touched = True
+                        if mi.date_taken is None and meta.date_taken is not None:
+                            mi.date_taken = meta.date_taken
+                            touched = True
+                        if (
+                            mi.camera_make is None
+                            and mi.camera_model is None
+                            and mi.width is None
+                            and mi.date_taken is None
+                        ):
+                            logger.debug(
+                                "backfill exif empty %s (%s): no camera/dims/date in %s",
+                                mi.id,
+                                mi.file_name,
+                                p,
+                            )
                 except Exception as exc:
                     logger.debug("backfill exif skipped %s: %s", mi.id, exc)
 
@@ -1281,7 +1301,7 @@ faces_router = APIRouter(prefix="/api/faces", tags=["faces"])
 @faces_router.get("/{face_id}/crop")
 async def face_crop(
     face_id: int,
-    _: None = Depends(require_local_token),
+    _: None = Depends(require_local_token_or_query),
 ):
     """Server-side face crop: Pillow crop of the source/vault image.
 
@@ -1317,6 +1337,8 @@ async def face_crop(
             "original_capture_time": mi.original_capture_time,
             "created_at": mi.created_at,
             "file_size": mi.file_size,
+            "extension": mi.extension,
+            "source_hash": mi.source_hash,
             "folder_layout": getattr(sess, "folder_layout", "year/month") if sess is not None else "year/month",
         }
         dest_root = _Path(sess.dest_root) if sess is not None and getattr(sess, "dest_root", None) else None
@@ -1387,7 +1409,7 @@ async def face_crop(
 @faces_router.get("/{face_id}/thumbnail")
 async def face_thumbnail(
     face_id: int,
-    _: None = Depends(require_local_token),
+    _: None = Depends(require_local_token_or_query),
 ):
     """Face-cropped thumbnail: 256px square JPEG for People covers.
 
@@ -1440,6 +1462,8 @@ async def face_thumbnail(
             "original_capture_time": mi.original_capture_time,
             "created_at": mi.created_at,
             "file_size": mi.file_size,
+            "extension": mi.extension,
+            "source_hash": mi.source_hash,
             "folder_layout": getattr(sess, "folder_layout", "year/month") if sess is not None else "year/month",
         }
         try:

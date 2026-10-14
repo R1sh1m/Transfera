@@ -204,7 +204,14 @@ function DirMetricsCard({
     return d.serial.toLowerCase() !== curSerial;
   });
 
-  const { data: metrics, isLoading } = useFolderMetadata(path);
+  const {
+    data: metrics,
+    isLoading,
+    isFetching,
+    isError,
+    refetch,
+  } = useFolderMetadata(path);
+  const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(path ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -508,6 +515,27 @@ function DirMetricsCard({
           <span className="text-xs text-muted-foreground">
             Calculating folder size…
           </span>
+        </div>
+      ) : isError && path && !isDevice ? (
+        <div className="flex items-center gap-2 py-2 mt-2 pt-2 border-t border-border">
+          <span className="text-xs text-muted-foreground">
+            Size unavailable
+          </span>
+          <button
+            onClick={() => {
+              queryClient.invalidateQueries({
+                queryKey: ["folder-metadata", path],
+              });
+              refetch();
+            }}
+            disabled={isFetching}
+            className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw
+              className={cn("w-3 h-3", isFetching && "animate-spin")}
+            />
+            Retry
+          </button>
         </div>
       ) : metrics ? (
         <div className="space-y-2 mt-2 pt-2 border-t border-border">
@@ -1208,17 +1236,17 @@ function SessionRow({ session }: { session: SessionInfo }) {
                   —
                 </span>
               )}
-            {["completed", "completed_with_errors", "failed"].includes(
-              session.status,
-            ) && (
-              <button
-                onClick={handleResume}
-                className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
-              >
-                <ArrowRight className="w-3 h-3" />
-                View
-              </button>
-            )}
+            {["completed", "completed_with_errors"].includes(session.status) &&
+              session.total_items > 0 &&
+              session.completed_items > 0 && (
+                <button
+                  onClick={handleResume}
+                  className="no-drag inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded text-xs font-normal hover:bg-secondary/80 transition-colors"
+                >
+                  <ArrowRight className="w-3 h-3" />
+                  View
+                </button>
+              )}
             <button
               onClick={handleDeleteClick}
               disabled={!backendReady}

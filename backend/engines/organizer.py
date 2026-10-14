@@ -196,8 +196,11 @@ def locate_archive_file(
         try:
             if not p.is_file():
                 return False
-            if p.stat().st_size != item.file_size:
-                return False
+            # file_size of 0/None means "unknown" — accept name matches so
+            # rows with stale sizes stay resolvable (size is a hint, not a key).
+            if item.file_size:
+                if p.stat().st_size != item.file_size:
+                    return False
             if verify_hash and item.source_hash:
                 try:
                     return _verify_hash_fn(p, item.source_hash)
@@ -238,6 +241,94 @@ def locate_archive_file(
         if found is not None:
             logger.debug("Located legacy-tree document %s at %s", item.file_name, found)
             return found
+
+    # 3. Layout / timestamp drift fallback. The stored folder_layout may not
+    # match the layout used at transfer time (user changed it afterwards),
+    # and date_taken may have been backfilled after the file landed in
+    # _unsorted/. Probe every plausible (datetime x layout) combination in
+    # both the Documents and legacy trees before giving up on math.
+    seen_layouts: list[str] = []
+    for cand in (layout, "year/month/day", "year/month", "flat"):
+        key = (cand or "").lower()
+        if key and key not in seen_layouts:
+            seen_layouts.append(cand)
+    seen_dts: list = []
+    for cand_dt in (dt, getattr(item, "original_capture_time", None), getattr(item, "date_taken", None), None):
+        if cand_dt not in seen_dts:
+            seen_dts.append(cand_dt)
+    base_combo = (dt, (layout or "").lower(), doc_kind is not None)
+    for cand_dt in seen_dts:
+        for cand_layout in seen_layouts:
+            if (cand_dt, (cand_layout or "").lower(), True) == (base_combo[0], base_combo[1], True):
+                continue  # already probed above (doc tree)
+            if doc_kind is not None:
+                try:
+                    folder = build_folder(dest_root, cand_dt, cand_layout, doc_kind=doc_kind)
+                    found = _search(folder / safe_name)
+                    if found is not None:
+                        logger.debug(
+                            "Located drifted document %s at %s (layout=%s)", item.file_name, found, cand_layout
+                        )
+                        return found
+                except Exception:
+                    pass
+            if (cand_dt, (cand_layout or "").lower(), False) == (base_combo[0], base_combo[1], False) and (
+                doc_kind is None
+            ):
+                continue  # already probed above (unified tree)
+            try:
+                folder = build_folder(dest_root, cand_dt, cand_layout)
+                found = _search(folder / safe_name)
+                if found is not None:
+                    logger.debug("Located drifted file %s at %s (layout=%s)", item.file_name, found, cand_layout)
+                    return found
+            except Exception:
+                pass
+
+    # 4. Last resort: recursive filename search under dest_root. Covers
+    # moved dest_roots, manual renames of parent folders, and migrated
+    # files whose date folder no longer derives from current columns.
+    # Size-gated when file_size is known; pure name match otherwise.
+    try:
+        if dest_root.is_dir():
+            stem = Path(safe_name).stem
+            suffix = Path(safe_name).suffix
+            patterns = [safe_name]
+            if stem and suffix:
+                # Conflict siblings (stem_001.ext ...) share the stem.
+                patterns.append(f"{stem}_*{suffix}" if suffix else f"{stem}_*")
+            seen: set[str] = set()
+            for pat in patterns:
+                try:
+                    it = dest_root.rglob(pat)
+                except Exception:
+                    continue
+                for cand in it:
+                    try:
+                        key = str(cand.resolve())
+                    except Exception:
+                        key = str(cand)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        _is_file = cand.is_file()
+                    except OSError:
+                        continue
+                    if not _is_file:
+                        continue
+                    name_hit = cand.name == safe_name
+                    conflict_hit = bool(stem and suffix and cand.suffix == suffix and cand.stem.startswith(f"{stem}_"))
+                    if name_hit or conflict_hit:
+                        if _matches(cand):
+                            logger.debug("Located migrated file %s at %s (rglob)", item.file_name, cand)
+                            return cand
+                    if len(seen) > 5000:
+                        break
+                if len(seen) > 5000:
+                    break
+    except Exception as exc:
+        logger.debug("Archive rglob fallback failed for %s: %s", item.file_name, exc)
 
     return None
 

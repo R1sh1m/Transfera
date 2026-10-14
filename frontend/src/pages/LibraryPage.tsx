@@ -1073,7 +1073,7 @@ export default function LibraryPage() {
   };
 
   return (
-    <div className="h-full flex flex-col space-y-4">
+    <div className="h-full flex flex-col space-y-2">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -1273,53 +1273,61 @@ export default function LibraryPage() {
         )}
       </div>
 
+      {/* Document filing helper (vault only) — own right-aligned row ABOVE
+          search so the search bar sits flush below. Fixed h-8 row reserves
+          space: tooltip is absolute, so hover never shifts layout. */}
+      {section === "vault" && (
+        <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
+          <div className="relative flex items-center h-8">
+            <button
+              type="button"
+              onClick={handleMigrateDocuments}
+              disabled={migrateRunning}
+              onMouseEnter={() => setDocsIconHovered(true)}
+              onMouseLeave={() => setDocsIconHovered(false)}
+              className={cn(
+                "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
+                migrateRunning && "opacity-60 cursor-not-allowed",
+              )}
+              aria-label="Document filing"
+            >
+              {migrateRunning ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+              ) : (
+                <FileText className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <AnimatePresence>
+              {docsIconHovered && (
+                <motion.div
+                  initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-10 z-30 pointer-events-none"
+                >
+                  <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
+                    <FileText className="w-3 h-3 text-action" />
+                    <span>
+                      {migrateResult
+                        ? migrateResult
+                        : migratePreview && migratePreview.total > 0
+                          ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
+                          : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
+                    </span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
+      )}
+
       {/* Unified search (offline keyword today, CLIP when models installed).
           Single input driving both filename + semantic results, merged below. */}
-      {section === "vault" && <SemanticSearchBar value={q} onChange={setQ} />}
-
-      {/* Document filing helper (vault only, icon w/ hover tooltip) */}
       {section === "vault" && (
-        <div className="relative flex items-center self-end">
-          <button
-            type="button"
-            onClick={handleMigrateDocuments}
-            disabled={migrateRunning}
-            onMouseEnter={() => setDocsIconHovered(true)}
-            onMouseLeave={() => setDocsIconHovered(false)}
-            className={cn(
-              "flex items-center justify-center w-8 h-8 rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-all active:scale-[0.95]",
-              migrateRunning && "opacity-60 cursor-not-allowed",
-            )}
-            aria-label="Document filing"
-          >
-            {migrateRunning ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
-            ) : (
-              <FileText className="w-3.5 h-3.5" />
-            )}
-          </button>
-          <AnimatePresence>
-            {docsIconHovered && (
-              <motion.div
-                initial={{ opacity: 0, y: 4, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 4, scale: 0.96 }}
-                transition={{ duration: 0.15 }}
-                className="absolute right-0 top-10 z-30 pointer-events-none"
-              >
-                <div className="bg-foreground text-background text-xs px-3.5 py-1.5 rounded-full whitespace-nowrap shadow-lg flex items-center gap-1.5">
-                  <FileText className="w-3 h-3 text-action" />
-                  <span>
-                    {migrateResult
-                      ? migrateResult
-                      : migratePreview && migratePreview.total > 0
-                        ? `${migratePreview.total} document(s) to organize — click to file into Documents/<Kind>/`
-                        : "Document Filing: click to file documents into Documents/<Kind>/ date folders"}
-                  </span>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+        <div className="mb-0">
+          <SemanticSearchBar value={q} onChange={setQ} />
         </div>
       )}
 
@@ -1429,7 +1437,7 @@ export default function LibraryPage() {
       )}
 
       {/* Content */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto">
+      <div ref={containerRef} className="flex-1 overflow-y-auto mt-1">
         {section !== "vault" ? null : viewMode === "history" ? (
           <TransferHistoryTable />
         ) : isLoading && libraryItems.length === 0 ? (

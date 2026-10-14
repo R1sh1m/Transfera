@@ -77,7 +77,9 @@ import type {
 } from "@/types/api";
 import { IOS_SOURCE_PREFIX, sourceRefToString } from "@/types/api";
 import { DeviceFolderBrowser } from "@/components/DeviceFolderBrowser";
-import SourcePreviewPanel from "@/components/SourcePreviewPanel";
+import SourcePreviewPanel, {
+  clearAllThumbFailed,
+} from "@/components/SourcePreviewPanel";
 import {
   useBackendReady,
   ENGINE_WAITING_LABEL,
@@ -513,6 +515,11 @@ function canonicalSerial(serial: string | null | undefined): string | null {
   return serial;
 }
 
+// Keep-awake popup throttle: once per app launch per device. Module-level
+// Set survives remounts/page revisits within the same JS runtime and resets
+// automatically when the app is closed/reloaded (fresh runtime = empty Set).
+const keepAwakeNotifiedSerials = new Set<string>();
+
 // ---------------------------------------------------------------------------
 // SourcePicker — Two distinct entry points
 // ---------------------------------------------------------------------------
@@ -527,6 +534,9 @@ interface SourcePickerProps {
     >,
   ) => void;
   deviceLocked?: boolean;
+  isIOSDevice?: boolean;
+  showIPhoneTips?: boolean;
+  onToggleIPhoneTips?: () => void;
 }
 
 function SourcePicker({
@@ -534,6 +544,9 @@ function SourcePicker({
   onSourceChange,
   onRecovered,
   deviceLocked = false,
+  isIOSDevice = false,
+  showIPhoneTips = false,
+  onToggleIPhoneTips,
 }: SourcePickerProps) {
   const [mode, setMode] = useState<SourceMode>(
     sourceRef?.type === "device"
@@ -610,6 +623,7 @@ function SourcePicker({
   const recoverBusy = recoverMutation.isPending || recoverCooldown;
   const setPreferredTier = useSetPreferredTier();
   const retryDevice = useRetryDevice();
+  const sourcePickerQueryClient = useQueryClient();
 
   // Per-device retry: 10 s cooldown scoped to each serial (mirrors the
   // global recoverCooldown pattern, but one device retrying never blocks
@@ -639,6 +653,17 @@ function SourcePicker({
             "success",
             `Device reconnected via ${tierLabel(res.serving_tier)}`,
           );
+        // Backend escalation (service restart / re-enumeration) changes
+        // what the preview + device list should show — force both to
+        // refetch so recovery is visible. Same toast, same button labels.
+        if (res.escalated === true) {
+          sourcePickerQueryClient.invalidateQueries({
+            queryKey: ["device-preview"],
+          });
+          sourcePickerQueryClient.invalidateQueries({
+            queryKey: ["ios-devices"],
+          });
+        }
       } catch {
         // Error toast is already shown by the mutation's onError.
       } finally {
@@ -660,7 +685,7 @@ function SourcePicker({
         }, 10000);
       }
     },
-    [retryDevice, retryingMap, retryCooldownMap],
+    [retryDevice, retryingMap, retryCooldownMap, sourcePickerQueryClient],
   );
 
   const handleTierChange = useCallback(
@@ -1021,9 +1046,26 @@ function SourcePicker({
               )}
             </div>
             <div
-              className="flex items-center gap-1"
+              className="flex items-center gap-1.5"
               onClick={(e) => e.stopPropagation()}
             >
+              {isIOS && isIOSDevice && !deviceLocked && onToggleIPhoneTips && (
+                <button
+                  type="button"
+                  onClick={onToggleIPhoneTips}
+                  className={cn(
+                    "w-8 h-8 rounded-lg flex items-center justify-center transition-all active:scale-[0.95]",
+                    showIPhoneTips
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "bg-blue-100/70 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300 border border-blue-200/80 dark:border-blue-700/60 hover:bg-blue-200/70 dark:hover:bg-blue-800/60",
+                  )}
+                  title="Keep your iPhone awake during preview & transfer (click to toggle tips)"
+                  aria-label="Toggle keep iPhone awake guidance"
+                  aria-expanded={showIPhoneTips}
+                >
+                  <Smartphone className="w-4 h-4" />
+                </button>
+              )}
               {isIOS && (
                 <button
                   type="button"
@@ -2729,6 +2771,7 @@ export default function DeviceSetupPage() {
   const [previewNonce, setPreviewNonce] = useState(0);
   const [deviceLocked, setDeviceLocked] = useState(false);
   const [scanId, setScanId] = useState<string | null>(null);
+  const [showIPhoneTips, setShowIPhoneTips] = useState(false);
 
   // Lane 3: after a successful recovery, migrate the preview source onto
   // the live Tier-1 READY serial whose canonical id matches the current
@@ -2794,10 +2837,17 @@ export default function DeviceSetupPage() {
             "success",
             `Device reconnected via ${tierLabel(res.serving_tier)}`,
           );
+          // Escalated recovery restarts the service / re-enumerates, so
+          // previously-failed thumbs may now succeed: drop the negative
+          // cache and refetch the preview. Same Retry button + spinner.
+          if (res.escalated === true) {
+            clearAllThumbFailed();
+            queryClient.invalidateQueries({ queryKey: ["device-preview"] });
+          }
         },
       },
     );
-  }, [sourceRef, retryDevicePreview, showNotification]);
+  }, [sourceRef, retryDevicePreview, showNotification, queryClient]);
   const hasDeviceState = !!deviceImportState?.last_successful_cutoff;
 
   const { data: pageIosDevices, isLoading: pageIosLoading } = useIOSDevices(
@@ -2847,13 +2897,15 @@ export default function DeviceSetupPage() {
     ) {
       const canonicalId =
         canonicalSerial(sourceRef.device_id) ?? sourceRef.device_id;
-      if (keepAwakeNotifiedRef.current !== canonicalId) {
-        keepAwakeNotifiedRef.current = canonicalId;
-        showNotification(
-          "warning",
-          "Keep your iPhone unlocked — preview and transfer pause if it locks. Your phone's auto-lock can't be turned off from this PC, so tap the screen now and then to keep it awake.",
-        );
-      }
+      const seenKey = canonicalId.toLowerCase();
+      if (keepAwakeNotifiedRef.current === canonicalId) return;
+      keepAwakeNotifiedRef.current = canonicalId;
+      if (keepAwakeNotifiedSerials.has(seenKey)) return;
+      keepAwakeNotifiedSerials.add(seenKey);
+      showNotification(
+        "warning",
+        "Keep your iPhone unlocked — preview and transfer pause if it locks. Your phone's auto-lock can't be turned off from this PC, so tap the screen now and then to keep it awake.",
+      );
     } else if (!isDeviceConnected || sourceRef?.type !== "device") {
       keepAwakeNotifiedRef.current = null;
     }
@@ -3208,6 +3260,9 @@ export default function DeviceSetupPage() {
           onSourceChange={setSourceRef}
           onRecovered={handleRecovered}
           deviceLocked={deviceLocked}
+          isIOSDevice={isIOSDevice}
+          showIPhoneTips={showIPhoneTips}
+          onToggleIPhoneTips={() => setShowIPhoneTips((prev) => !prev)}
         />
         {sourcePathStale && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-300">
@@ -3251,28 +3306,41 @@ export default function DeviceSetupPage() {
           isIOSDevice &&
           isDeviceConnected &&
           !deviceLocked && (
-            <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-3.5">
-              <Smartphone className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-blue-700 dark:text-blue-300">
-                  Keep your iPhone awake during preview &amp; transfer
-                </p>
-                <ul className="text-[11px] text-blue-600 dark:text-blue-400 mt-1 space-y-0.5 leading-snug list-disc list-inside">
-                  <li>Tap the screen now and then to keep it awake</li>
-                  <li>
-                    iPhone Settings &gt; Display &gt; Auto-Lock &gt; Never
-                    (while transferring)
-                  </li>
-                  <li>Use a good cable + rear USB port</li>
-                  <li>Tap Trust once when asked</li>
-                </ul>
-                <p className="text-[10px] text-blue-600/70 dark:text-blue-400/70 mt-1.5 leading-snug">
-                  Brief hiccups retry on their own. If a preview takes longer
-                  than 15 seconds we keep this page so you can retry without
-                  losing your place.
-                </p>
-              </div>
-            </div>
+            <AnimatePresence>
+              {showIPhoneTips && (
+                <motion.div
+                  key="tips-expanded"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="overflow-hidden"
+                >
+                  <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl p-3.5">
+                    <Smartphone className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-semibold text-blue-700 dark:text-blue-300">
+                        Keep your iPhone awake during preview &amp; transfer
+                      </p>
+                      <ul className="text-[11px] text-blue-600 dark:text-blue-400 mt-1 space-y-0.5 leading-snug list-disc list-inside">
+                        <li>Tap the screen now and then to keep it awake</li>
+                        <li>
+                          iPhone Settings &gt; Display &gt; Auto-Lock &gt; Never
+                          (while transferring)
+                        </li>
+                        <li>Use a good cable + rear USB port</li>
+                        <li>Tap Trust once when asked</li>
+                      </ul>
+                      <p className="text-[10px] text-blue-600/70 dark:text-blue-400/70 mt-1.5 leading-snug">
+                        Brief hiccups retry on their own. If a preview takes
+                        longer than 15 seconds we keep this page so you can
+                        retry without losing your place.
+                      </p>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           )}
 
         {sourceRef?.type === "device" &&

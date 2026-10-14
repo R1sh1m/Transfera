@@ -801,6 +801,11 @@ class DeviceRetryResponse(BaseModel):
     preferred_tier: str = Field(description="'auto' when no user override is set")
     attempted: list[DeviceRetryAttempt] = Field(default_factory=list)
     devices: list[dict] | None = Field(None, description="Re-enumerated device rows")
+    escalated: bool = Field(
+        default=False,
+        description="True only when this call took the 3rd-consecutive-failure "
+        "escalated soft-reset path; False otherwise (backward-compatible)",
+    )
 
 
 # ---------------------------------------------------------------------------

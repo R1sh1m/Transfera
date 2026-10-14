@@ -603,6 +603,7 @@ export function useFolderMetadata(path: string | null) {
       const { data } = await apiClient.post<FolderMetadataResponse>(
         "/utils/folder-metadata",
         { path },
+        { timeout: 15000 },
       );
       return data;
     },
@@ -611,8 +612,11 @@ export function useFolderMetadata(path: string | null) {
       path.trim().length > 0 &&
       !path.startsWith("ios://") &&
       !path.startsWith("wpd://"),
-    refetchInterval: 30000,
-    retry: 1,
+    // Poll every 30 s only after a successful fetch — never while
+    // pending/error so a stuck request can't spin forever.
+    refetchInterval: (query) => (query.state.data ? 30000 : false),
+    refetchOnWindowFocus: false,
+    retry: false,
     staleTime: 15000,
   });
 }
@@ -1471,6 +1475,9 @@ export function useBackfill() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ["media"] });
       qc.invalidateQueries({ queryKey: ["duplicate-groups"] });
+      qc.invalidateQueries({ queryKey: ["people"] });
+      qc.invalidateQueries({ queryKey: ["person-faces"] });
+      qc.invalidateQueries({ queryKey: ["intelligence-capabilities"] });
       useTransferStore.getState().showNotification("success", data.message);
     },
     onError: (error) => {

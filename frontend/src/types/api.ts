@@ -834,6 +834,11 @@ export interface DeviceRetryResponse {
   preferred_tier: string;
   attempted: DeviceRetryAttempt[];
   devices?: Record<string, unknown>[] | null;
+  /** True when the backend escalated after repeated failures (e.g. service
+   *  restart / re-enumeration). Frontend uses it to force a visible
+   *  recovery refresh (preview + device list + thumb fast-lane re-entry).
+   *  Optional for backward compat with older backends. */
+  escalated?: boolean;
 }
 
 // --- Auto-Activation Status -------------------------------------------------

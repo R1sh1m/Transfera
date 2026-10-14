@@ -5,7 +5,7 @@
 // (rounded-pill), press state active:scale-[0.95], 17px body pace.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CalendarDays,
   Sparkles,
@@ -24,6 +24,7 @@ import {
   useCapabilities,
   useDownloadModels,
   useDuplicateGroups,
+  useMediaItem,
   useModelStatus,
   useMoments,
   usePeople,
@@ -34,13 +35,14 @@ import {
   useTimeline,
 } from "@/lib/queries";
 import { fetchThumbnail, revokeThumbnail } from "@/lib/thumbnail-fetch";
-import apiClient, { API_BASE_URL } from "@/lib/api-client";
+import apiClient, { API_BASE_URL, getLocalToken } from "@/lib/api-client";
 import { useTransferStore } from "@/store/transfer";
+import MediaDetailModal from "@/components/MediaDetailModal";
 import {
   useBackendReady,
   ENGINE_WAITING_LABEL,
 } from "@/hooks/use-backend-ready";
-import type { Moment, Person } from "@/types/api";
+import type { MediaItemInfo, Moment, Person } from "@/types/api";
 
 function Thumb({
   id,
@@ -133,7 +135,10 @@ export function FaceThumb({
   }
   return (
     <img
-      src={`${API_BASE_URL}/api/faces/${faceId}/thumbnail`}
+      src={`${API_BASE_URL}/api/faces/${faceId}/thumbnail${(() => {
+        const token = getLocalToken();
+        return token ? `?token=${encodeURIComponent(token)}` : "";
+      })()}`}
       alt={label}
       loading="lazy"
       onError={() => setFaceFailed(true)}
@@ -676,12 +681,6 @@ export function PeoplePanel({
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {data.people.map((p) => {
           const displayName = p.name ?? `Person ${p.id}`;
-          const initials = displayName
-            .split(/\s+/)
-            .map((w) => w[0])
-            .join("")
-            .slice(0, 2)
-            .toUpperCase();
           return (
             <div
               key={p.id}
@@ -700,7 +699,7 @@ export function PeoplePanel({
                   mediaId={p.cover_media_id}
                   mediaUrl={p.cover_thumbnail_url}
                   bbox={p.cover_bbox}
-                  label={initials}
+                  label={displayName}
                 />
               </button>
               {editing === p.id ? (
@@ -755,6 +754,16 @@ export function PersonDetail({
   const person: Person | undefined = people?.people.find(
     (p) => p.id === personId,
   );
+  // Full-detail modal for a clicked photo (internal state — the modal fetches
+  // the rest via useMediaItem; the stub below only covers the fetch window).
+  const [selectedMediaId, setSelectedMediaId] = useState<number | null>(null);
+  const { data: selectedDetail } = useMediaItem(selectedMediaId);
+  // Clicking a face mounts/retargets this panel below the fold — bring it
+  // into view so its photos are reliably seen (controlled onSelect mode).
+  const detailRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    detailRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [personId]);
   const displayName = person?.name ?? `Person ${personId}`;
   const faces = facesQuery.data?.faces ?? [];
   // Dedupe media_ids — one card per photo, fetched directly via Thumb
@@ -766,8 +775,30 @@ export function PersonDetail({
     seen.add(f.media_id);
     mediaCards.push({ media_id: f.media_id, thumbnail_url: f.thumbnail_url });
   }
+  const selectedCard =
+    mediaCards.find((m) => m.media_id === selectedMediaId) ?? null;
+  const modalItem: MediaItemInfo | null =
+    selectedDetail ??
+    (selectedCard
+      ? {
+          id: selectedCard.media_id,
+          source_path: "",
+          file_name: `Photo #${selectedCard.media_id}`,
+          file_size: 0,
+          hop1_status: "completed",
+          hop2_status: "completed",
+          final_status: "completed",
+          thumbnail_status: "ready",
+          thumbnail_url: selectedCard.thumbnail_url ?? undefined,
+          created_at: "",
+          updated_at: "",
+        }
+      : null);
   return (
-    <div className="rounded-lg border border-border bg-card p-3 space-y-3">
+    <div
+      ref={detailRef}
+      className="rounded-lg border border-border bg-card p-3 space-y-3"
+    >
       <div className="flex items-center gap-3">
         <div className="w-16 h-16 shrink-0 overflow-hidden">
           <FaceThumb
@@ -812,15 +843,27 @@ export function PersonDetail({
       ) : (
         <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
           {mediaCards.map((m) => (
-            <Thumb
+            <button
               key={m.media_id}
-              id={m.media_id}
-              url={m.thumbnail_url}
-              label={`#${m.media_id}`}
-            />
+              type="button"
+              onClick={() => setSelectedMediaId(m.media_id)}
+              aria-label={`Open photo number ${m.media_id} full details`}
+              title={`Open photo #${m.media_id}`}
+              className="rounded-lg text-left cursor-pointer transition-transform active:scale-[0.97] focus:outline-none focus-visible:ring-2 focus-visible:ring-action"
+            >
+              <Thumb
+                id={m.media_id}
+                url={m.thumbnail_url}
+                label={`#${m.media_id}`}
+              />
+            </button>
           ))}
         </div>
       )}
+      <MediaDetailModal
+        item={modalItem}
+        onClose={() => setSelectedMediaId(null)}
+      />
     </div>
   );
 }

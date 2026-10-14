@@ -158,6 +158,28 @@ def _ts_to_datetime(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, tz=UTC)
 
 
+# Capture-date candidates in priority order. DateTimeOriginal is the still-photo
+# gold standard; CreationDate / MediaCreateDate / TrackCreateDate cover MOV/MP4
+# (including com.apple.quicktime creation tags); CreateDate is the generic
+# fallback. Files with none of these keep date_taken=None (frontend: Unknown).
+_CAPTURE_DATE_KEYS: tuple[str, ...] = (
+    "DateTimeOriginal",
+    "CreationDate",
+    "MediaCreateDate",
+    "TrackCreateDate",
+    "CreateDate",
+)
+
+
+def _pick_capture_date(tags: dict) -> datetime | None:
+    """Return the first parseable capture date from *tags*, or None."""
+    for key in _CAPTURE_DATE_KEYS:
+        dt = _parse_exif_datetime(tags.get(key))
+        if dt is not None:
+            return dt
+    return None
+
+
 # ---------------------------------------------------------------------------
 # ExifTool Bootstrapper
 # ---------------------------------------------------------------------------
@@ -631,9 +653,11 @@ def _extract_via_exiftool(file_path: Path) -> FileMetadata:
 
         tags = data[0] if isinstance(data, list) else data
 
-        # Extract timestamps -- ExifTool returns ISO-ish strings with -time:all
-        date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal")) or _parse_exif_datetime(tags.get("CreateDate"))
-        date_created = _parse_exif_datetime(tags.get("CreateDate"))
+        # Extract timestamps -- ExifTool returns ISO-ish strings with -time:all.
+        # _pick_capture_date covers stills (DateTimeOriginal) and MOV/MP4
+        # creation tags (CreationDate / MediaCreateDate / TrackCreateDate).
+        date_taken = _pick_capture_date(tags)
+        date_created = _parse_exif_datetime(tags.get("CreateDate")) or _parse_exif_datetime(tags.get("CreationDate"))
         date_modified = _parse_exif_datetime(tags.get("ModifyDate"))
 
         stat = file_path.stat()
@@ -859,10 +883,10 @@ class _ExifToolSession:
                 continue
             try:
                 stat = path.stat()
-                date_taken = _parse_exif_datetime(tags.get("DateTimeOriginal")) or _parse_exif_datetime(
-                    tags.get("CreateDate")
+                date_taken = _pick_capture_date(tags)
+                date_created = _parse_exif_datetime(tags.get("CreateDate")) or _parse_exif_datetime(
+                    tags.get("CreationDate")
                 )
-                date_created = _parse_exif_datetime(tags.get("CreateDate"))
                 date_modified_tag = _parse_exif_datetime(tags.get("ModifyDate"))
                 fs_mtime = _ts_to_datetime(stat.st_mtime)
                 exif_tags = {k: str(v) for k, v in tags.items() if v}

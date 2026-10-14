@@ -149,6 +149,7 @@ from backend.engines.source_reader import DeviceSourceReader
 from backend.engines.thumbnail_cache import thumbnail_cache
 from backend.engines.thumbnail_ops import (
     mark_thumbnail_failed,
+    mark_thumbnail_not_found,
     mark_thumbnail_ready,
     resolve_thumbnail_source_path,
 )
@@ -1051,6 +1052,14 @@ async def set_preferred_tier(
     )
 
 
+# Consecutive probe-failure counts for POST /ios-devices/retry, keyed by
+# canonical serial. Value is ``(count, monotonic_timestamp)``. Entries older
+# than ``_RETRY_FAIL_WINDOW_S`` are treated as stale (sliding window).
+# Terminal Locked/NotTrusted outcomes never touch this map.
+_retry_fail_counts: dict[str, tuple[int, float]] = {}
+_RETRY_FAIL_WINDOW_S = 300.0
+
+
 @router.post("/ios-devices/retry", response_model=DeviceRetryResponse)
 async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_local_token)) -> DeviceRetryResponse:
     """Retry reaching a device after clearing stale per-device caches.
@@ -1067,7 +1076,15 @@ async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_lo
          collecting the per-tier ``attempted`` trail.
 
     Terminal Locked/NotTrusted errors abort without further fallback and
-    are surfaced with their HTTP status preserved.
+    are surfaced with their HTTP status preserved. They never increment the
+    consecutive-failure counter.
+
+    Consecutive total-probe failures are counted per canonical serial
+    (5-minute sliding window). The 1st/2nd failures return the normal scoped
+    result; the 3rd consecutive failure runs an escalated layered soft reset
+    inline (all AFC slots, Apple tier prefs, all Apple listing-cache keys,
+    best-effort Apple service ensure, re-enumerate + tier-rotated re-probe),
+    resets the counter, and returns ``escalated=True``.
     """
 
     mgr = get_device_backend_manager()
@@ -1176,31 +1193,190 @@ async def retry_ios_device(req: DeviceRetryRequest, _: None = Depends(require_lo
     try:
         devices, attempted_raw = await _probe_with_order()
     except DeviceLockedError as exc:
+        # Terminal: abort without touching the failure counter.
         raise HTTPException(status_code=423, detail={"status": "locked", "message": exc.message})
     except DeviceNotTrustedError as exc:
+        # Terminal: abort without touching the failure counter.
         raise HTTPException(status_code=403, detail={"status": "not_trusted", "message": exc.message})
+
+    def _build_response(
+        _devices: list,
+        _attempted: list[dict],
+        _serving: str,
+        _preferred: str,
+        _escalated: bool,
+    ) -> DeviceRetryResponse:
+        return DeviceRetryResponse(
+            serial=req.serial,
+            serving_tier=_serving,
+            preferred_tier=_preferred,
+            attempted=[
+                {"tier": a.get("tier", "unknown"), "ok": bool(a.get("ok")), "error": a.get("error")} for a in _attempted
+            ],
+            devices=[
+                {
+                    "serial": d.serial,
+                    "name": d.name,
+                    "model": d.model,
+                    "status": d.status.value,
+                    "active_tier": (tier.value if (tier := mgr.get_device_tier(d.serial)) is not None else _serving),
+                }
+                for d in _devices
+            ],
+            escalated=_escalated,
+        )
 
     serving_tier_obj = mgr.get_device_tier(req.serial)
     serving = serving_tier_obj.value if serving_tier_obj is not None else "none"
     preferred = mgr.get_user_tier(req.serial) or "auto"
-    return DeviceRetryResponse(
-        serial=req.serial,
-        serving_tier=serving,
-        preferred_tier=preferred,
-        attempted=[
-            {"tier": a.get("tier", "unknown"), "ok": bool(a.get("ok")), "error": a.get("error")} for a in attempted_raw
-        ],
-        devices=[
-            {
-                "serial": d.serial,
-                "name": d.name,
-                "model": d.model,
-                "status": d.status.value,
-                "active_tier": (tier.value if (tier := mgr.get_device_tier(d.serial)) is not None else serving),
-            }
-            for d in devices
-        ],
+    probe_ok = serving != "none" or any(bool(a.get("ok")) for a in attempted_raw)
+
+    _now = time.monotonic()
+    if probe_ok:
+        # Any probe success resets the consecutive-failure streak.
+        _retry_fail_counts[ckey] = (0, _now)
+        return _build_response(devices, attempted_raw, serving, preferred, False)
+
+    # Total probe failure: increment the streak (stale entries reset to 1).
+    _prev = _retry_fail_counts.get(ckey)
+    if _prev is None or (_now - _prev[1]) > _RETRY_FAIL_WINDOW_S:
+        _fail_count = 1
+    else:
+        _fail_count = _prev[0] + 1
+    _retry_fail_counts[ckey] = (_fail_count, _now)
+
+    if _fail_count < 3:
+        return _build_response(devices, attempted_raw, serving, preferred, False)
+
+    # 3rd consecutive failure: escalated layered soft reset (inline).
+    # No hard USB port disable/enable here (needs elevation, out of scope).
+    logger.warning("Retry: %s failed %d consecutive probes; running escalated soft reset", req.serial, _fail_count)
+
+    # Escalation step 1: drop ALL AFC slots.
+    try:
+        from backend import ios_device as _ios_mod2
+
+        _drop2 = getattr(_ios_mod2, "drop_afc_slots", None)
+        if callable(_drop2):
+            try:
+                _res2 = _drop2(None)
+                if asyncio.iscoroutine(_res2):
+                    await _res2
+            except Exception as exc:
+                logger.warning("Retry (escalated): drop_afc_slots failed: %s", exc)
+    except Exception as exc:
+        logger.debug("Retry (escalated): drop_afc_slots unavailable: %s", exc)
+
+    # Escalation step 2: clear Apple tier prefs if the helper exists
+    # (mirrors /ios-devices/recover Phase 0b).
+    try:
+        from backend import device_backend as _be_mod
+
+        _clear_prefs = getattr(_be_mod, "clear_apple_tier_prefs", None)
+        if callable(_clear_prefs):
+            try:
+                _maybe_coro = _clear_prefs(None)
+                if asyncio.iscoroutine(_maybe_coro):
+                    await _maybe_coro
+            except Exception as prefs_exc:
+                logger.warning("Retry (escalated): clear_apple_tier_prefs failed: %s", prefs_exc)
+    except Exception as prefs_import_exc:
+        logger.debug("Retry (escalated): clear_apple_tier_prefs unavailable: %s", prefs_import_exc)
+
+    # Escalation step 3: purge ALL Apple listing-cache keys
+    # (mirrors /ios-devices/recover Phase 0c).
+    try:
+        from backend.api import device_preview as _preview_mod2
+
+        _cache = getattr(_preview_mod2, "_listing_cache", None)
+        _lock = getattr(_preview_mod2, "_listing_cache_lock", None)
+        if _cache is not None and _lock is not None:
+            with _lock:
+                _apple_keys = [
+                    k
+                    for k in list(_cache.keys())
+                    if isinstance(k, tuple)
+                    and k
+                    and isinstance(k[0], str)
+                    and (
+                        k[0].startswith("ios://")
+                        or k[0].startswith("wpd://")
+                        or "apple" in k[0].lower()
+                        or "iphone" in k[0].lower()
+                        or "ipad" in k[0].lower()
+                    )
+                ]
+                for k in _apple_keys:
+                    _cache.pop(k, None)
+            if _apple_keys:
+                logger.info("Retry (escalated): purged %d Apple listing-cache key(s)", len(_apple_keys))
+    except Exception as cache_exc:
+        logger.warning("Retry (escalated): listing-cache purge failed: %s", cache_exc)
+
+    # Escalation step 4: best-effort Apple service ensure.
+    try:
+        _ensure = getattr(mgr, "ensure_apple_service_running", None)
+        if callable(_ensure):
+            try:
+                _svc_res = _ensure()
+                if asyncio.iscoroutine(_svc_res):
+                    await _svc_res
+            except Exception as svc_exc:
+                logger.warning("Retry (escalated): ensure_apple_service_running failed: %s", svc_exc)
+    except Exception as svc_exc:
+        logger.debug("Retry (escalated): ensure_apple_service_running unavailable: %s", svc_exc)
+
+    # Escalation step 5: re-enumerate + re-probe with tier rotation
+    # (least-recently-failed tier first, from the attempted trail), falling
+    # back to the normal waterfall probe. A pinned one-shot tier skips
+    # rotation and re-probes via the normal waterfall.
+    escalated_attempted: list[dict] = list(attempted_raw)
+    try:
+        if one_shot_tier is None:
+            _failed_order: list[str] = []
+            for _a in attempted_raw:
+                _t = str(_a.get("tier", ""))
+                if not _a.get("ok") and _t in ("tier1", "wpd", "tier2") and _t not in _failed_order:
+                    _failed_order.append(_t)
+            _rotation = [t for t in ("tier1", "wpd", "tier2") if t not in _failed_order] + _failed_order
+            _rot_ok = False
+            for _t in _rotation:
+                try:
+                    await mgr.browse_device(req.serial, "/DCIM", override_tier=_t)
+                    escalated_attempted.append({"tier": _t, "ok": True, "error": None})
+                    _rot_ok = True
+                    break
+                except (DeviceLockedError, DeviceNotTrustedError):
+                    raise
+                except Exception as exc:
+                    escalated_attempted.append({"tier": _t, "ok": False, "error": str(exc)[:500]})
+            if not _rot_ok:
+                _devices2, _attempted2 = await _probe_with_order()
+                devices = _devices2
+                escalated_attempted.extend(_attempted2)
+            else:
+                devices, _tier = await mgr.list_devices()
+        else:
+            _devices2, _attempted2 = await _probe_with_order()
+            devices = _devices2
+            escalated_attempted.extend(_attempted2)
+    except DeviceLockedError as exc:
+        # Terminal during escalation: abort, streak already consumed below.
+        _retry_fail_counts[ckey] = (0, time.monotonic())
+        raise HTTPException(status_code=423, detail={"status": "locked", "message": exc.message})
+    except DeviceNotTrustedError as exc:
+        _retry_fail_counts[ckey] = (0, time.monotonic())
+        raise HTTPException(status_code=403, detail={"status": "not_trusted", "message": exc.message})
+
+    # Escalation consumed the streak: reset and hint a longer client backoff.
+    _retry_fail_counts[ckey] = (0, time.monotonic())
+    logger.warning(
+        "Retry (escalated): soft reset complete for %s; suggest longer backoff before next retry", req.serial
     )
+    serving_tier_obj = mgr.get_device_tier(req.serial)
+    serving = serving_tier_obj.value if serving_tier_obj is not None else "none"
+    preferred = mgr.get_user_tier(req.serial) or "auto"
+    return _build_response(devices, escalated_attempted, serving, preferred, True)
 
 
 # ---------------------------------------------------------------------------
@@ -3382,29 +3558,10 @@ async def get_media_thumbnail(item_id: int, request: Request):
         )
 
     # ---- On cache miss: try to locate the file ----
-    # Priority 1: source_path (works for copy-mode local transfers where source still exists)
+    # Priority 1: organised archive destination (authoritative for
+    # transferred items; source may be ios:// or a disconnected drive).
     file_path: Path | None = None
-    if not db_item.source_path.startswith("ios://"):
-        try:
-            source = Path(db_item.source_path)
-            if source.is_file():
-                file_path = source
-        except Exception:
-            pass
-
-    # Priority 1.5: check Hop 1 local cache directory
-    if file_path is None:
-        from backend.engines.cache_manager import get_cache_path
-
-        try:
-            candidate = get_cache_path(CACHE_DIR, db_item.source_path, db_item.file_name)
-            if candidate.is_file():
-                file_path = candidate
-        except Exception:
-            pass
-
-    # Priority 2: reconstruct from archive destination
-    if file_path is None and db_item.session_id is not None:
+    if db_item.session_id is not None:
         async with session_scope() as session:
             session_obj = await session.get(TransferSession, db_item.session_id)
         if session_obj and session_obj.dest_root:
@@ -3417,6 +3574,27 @@ async def get_media_thumbnail(item_id: int, request: Request):
                     file_path = candidate
             except Exception:
                 pass
+
+    # Priority 2: check Hop 1 local cache directory
+    if file_path is None:
+        from backend.engines.cache_manager import get_cache_path
+
+        try:
+            candidate = get_cache_path(CACHE_DIR, db_item.source_path, db_item.file_name)
+            if candidate.is_file():
+                file_path = candidate
+        except Exception:
+            pass
+
+    # Priority 3: original source path (copy-mode local transfers where
+    # the source file still exists on disk; never for ios://).
+    if file_path is None and not db_item.source_path.startswith("ios://"):
+        try:
+            source = Path(db_item.source_path)
+            if source.is_file():
+                file_path = source
+        except Exception:
+            pass
 
     if file_path is not None:
         data = await asyncio.to_thread(generate_thumbnail_bytes, file_path)
@@ -3521,9 +3699,11 @@ async def regenerate_thumbnails(_: None = Depends(require_local_token)):
 
         # Reset previously-failed items so the worker re-attempts them
         # and status polling reports "pending" instead of stale "failed".
+        # "not_found" is transient (drive reconnect / transfer completes),
+        # so it is reset too — never strand items in a terminal state.
         retried = 0
         for item in items:
-            if item.thumbnail_status == "failed":
+            if item.thumbnail_status in ("failed", "not_found"):
                 item.thumbnail_status = "pending"
                 retried += 1
         if retried:
@@ -3539,6 +3719,7 @@ async def regenerate_thumbnails(_: None = Depends(require_local_token)):
                 "file_name": item.file_name,
                 "file_size": item.file_size,
                 "extension": item.extension,
+                "source_hash": item.source_hash,
                 "date_taken": item.date_taken,
                 "original_capture_time": item.original_capture_time,
                 "created_at": item.created_at,
@@ -3567,7 +3748,7 @@ async def regenerate_thumbnails(_: None = Depends(require_local_token)):
 
                 if file_path is None:
                     logger.warning("Thumbnail regen: source and dest both missing for item %d -- skipping", item_id)
-                    submit_and_wait(mark_thumbnail_failed(item_id))
+                    submit_and_wait(mark_thumbnail_not_found(item_id))
                     continue
 
                 data = generate_thumbnail_bytes(file_path)
@@ -4241,24 +4422,84 @@ async def get_disk_space(req: DiskSpaceRequest, _: None = Depends(require_local_
 # ---------------------------------------------------------------------------
 def _measure_folder_metadata(dir_path: str) -> dict:
     """Synchronous directory traversal returning exact size, a human string,
-    legacy GB float, and file count."""
+    legacy GB float, and file count.
+
+    Iterative ``os.scandir`` walk (``follow_symlinks=False``) so symlink
+    loops are never followed and inaccessible entries are skipped. Bounded
+    by ``_PREFLIGHT_MAX_FILES`` to guarantee termination on pathological
+    trees; sets ``truncated=True`` in the returned dict (internal only —
+    not part of ``FolderMetadataResponse``) when the cap is hit.
+    """
+    if not dir_path or not dir_path.strip():
+        raise ValueError("Path must not be empty")
     total_bytes = 0
     file_count = 0
-    p = Path(dir_path)
-    if not p.exists():
-        return {"size_bytes": 0, "size_human": "0 B", "size_gb": 0.0, "file_count": 0}
-    for entry in p.rglob("*"):
-        if entry.is_file():
+    truncated = False
+    cap = globals().get("_PREFLIGHT_MAX_FILES", 2_000_000)
+    try:
+        if not os.path.isdir(dir_path):
+            return {
+                "size_bytes": 0,
+                "size_human": _format_size(0),
+                "size_gb": 0.0,
+                "file_count": 0,
+                "truncated": False,
+            }
+    except OSError:
+        return {
+            "size_bytes": 0,
+            "size_human": _format_size(0),
+            "size_gb": 0.0,
+            "file_count": 0,
+            "truncated": False,
+        }
+    # (st_dev, st_ino) of visited dirs guards against device-bridge /
+    # hardlink cycles even though symlinks are never followed.
+    visited: set[tuple[int, int]] = set()
+    stack = [dir_path]
+    while stack:
+        current = stack.pop()
+        try:
+            st = os.stat(current, follow_symlinks=False)
+        except OSError:
+            continue
+        key = (st.st_dev, st.st_ino)
+        if key in visited:
+            continue
+        visited.add(key)
+        try:
+            with os.scandir(current) as scanner:
+                entries = list(scanner)
+        except OSError:
+            continue
+        for entry in entries:
             try:
-                total_bytes += entry.stat().st_size
+                if entry.is_file(follow_symlinks=False):
+                    try:
+                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+                    file_count += 1
+                    if file_count >= cap:
+                        truncated = True
+                        logger.warning(
+                            "Folder metadata scan hit file cap (%d) at %s — truncating",
+                            cap,
+                            dir_path,
+                        )
+                        break
+                elif entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
             except OSError:
-                pass
-            file_count += 1
+                continue
+        if truncated:
+            break
     return {
         "size_bytes": total_bytes,
         "size_human": _format_size(total_bytes),
         "size_gb": round(total_bytes / (1024**3), 2),
         "file_count": file_count,
+        "truncated": truncated,
     }
 
 
@@ -4267,6 +4508,8 @@ async def get_folder_metadata(
     req: FolderMetadataRequest, _: None = Depends(require_local_token)
 ) -> FolderMetadataResponse:
     """Return aggregate file size (GB) and file count for a directory."""
+    if not req.path or not req.path.strip():
+        raise HTTPException(status_code=400, detail="Path must not be empty")
     try:
         result = await asyncio.to_thread(_measure_folder_metadata, req.path)
     except Exception as exc:

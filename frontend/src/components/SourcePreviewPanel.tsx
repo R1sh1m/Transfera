@@ -111,6 +111,13 @@ function clearThumbFailed(absPath: string): void {
   thumbFailCache.delete(absPath);
 }
 
+/** Clear the whole module thumb-failure negative cache so cells re-enter
+ *  the fast lane after a backend escalation recovery. No UI change — the
+ *  same Retry button/spinner path calls this before refetching. */
+export function clearAllThumbFailed(): void {
+  thumbFailCache.clear();
+}
+
 // Backend grey-fallback signals a transient USB failure with HTTP 200 +
 // a placeholder JPEG. When the backend exposes it via header, treat it
 // as a failure (retry affordance + negative cache) instead of "loaded".
@@ -1609,7 +1616,104 @@ function SourcePreviewPanelInner({
     return visibleItems.every((item) => selected.has(item.abs_path));
   }, [visibleItems, selected]);
 
-  const handleSelectAll = useCallback(() => {
+  // True global toggle state: everything across all pages is selected.
+  // Single-page sources (totalPages <= 1) collapse to the visible check so
+  // the toggle still reads "Deselect all" without requiring an exact count.
+  const isGloballySelected = useMemo(() => {
+    if (metadata.total > 0 && selected.size >= metadata.total) return true;
+    if (totalPages <= 1 && allVisibleSelected) return true;
+    return false;
+  }, [selected, metadata.total, totalPages, allVisibleSelected]);
+  const [isSelectingAll, setIsSelectingAll] = useState(false);
+
+  const handleSelectAll = useCallback(async () => {
+    // Deselect path — clears the whole cross-page selection.
+    if (isGloballySelected) {
+      const next = new Set<string>();
+      selectedRef.current = next;
+      setSelected(next);
+      onSelectionConfirm?.([]);
+      return;
+    }
+    // Fast path: import-all modal data already holds every path.
+    if (importAllData && importAllData.items.length > 0) {
+      const targets =
+        filter === "all"
+          ? importAllData.items.map((i) => i.abs_path)
+          : importAllData.items
+              .filter((i) => i.type === filter)
+              .map((i) => i.abs_path);
+      const next = new Set(targets);
+      selectedRef.current = next;
+      setSelected(next);
+      onSelectionConfirm?.(targets);
+      return;
+    }
+    // Fast path: whole-source new-paths list already covers the total
+    // (fresh source where everything is new) — no extra fetch needed.
+    if (
+      metadata.total > 0 &&
+      allNewPathsRef.current !== null &&
+      allNewPathsRef.current.length >= metadata.total
+    ) {
+      const targets = allNewPathsRef.current;
+      const next = new Set(targets);
+      selectedRef.current = next;
+      setSelected(next);
+      onSelectionConfirm?.(targets);
+      return;
+    }
+    // Global path: fetch every abs_path across pages (import-all data
+    // path), then select. Falls back to the current page on any failure.
+    if (metadata.total > visibleItems.length && metadata.total > 0) {
+      setIsSelectingAll(true);
+      try {
+        const want = Math.min(metadata.total, _PREVIEW_MAX_FILES);
+        const p = new URLSearchParams({
+          page: "1",
+          page_size: String(want),
+          sort_by: sortBy || "newest",
+        });
+        let url = "";
+        if (deviceSource) {
+          p.set("device_id", deviceSource.device_id);
+          p.set("path", deviceSource.device_path);
+          if (isRecursive) p.set("recursive", "true");
+          url = `${API_BASE_URL}/api/device/ios-preview?${p}`;
+        } else {
+          p.set("path", sourcePath || "");
+          p.set("recursive", isRecursive ? "true" : "false");
+          url = `${API_BASE_URL}/api/device/preview?${p}`;
+        }
+        const res = await fetch(url, { headers: authHeaders() });
+        if (!res.ok) throw new Error("select-all fetch failed");
+        const data = await res.json();
+        const loaded: MediaPreviewItem[] = data.items || [];
+        const scoped =
+          filter === "all" ? loaded : loaded.filter((it) => it.type === filter);
+        const targets = scoped.map((it) => it.abs_path);
+        if (targets.length > 0) {
+          setKnownSizes((prev) => {
+            const nextMap = new Map(prev);
+            for (const it of scoped) {
+              if (it?.abs_path != null)
+                nextMap.set(it.abs_path, it.size_bytes || 0);
+            }
+            return nextMap;
+          });
+          const next = new Set(targets);
+          selectedRef.current = next;
+          setSelected(next);
+          onSelectionConfirm?.(targets);
+          return;
+        }
+      } catch {
+        /* fall through to per-page fallback below */
+      } finally {
+        setIsSelectingAll(false);
+      }
+    }
+    // Per-page fallback (small sources, fetch failure, or total unknown).
     const next = new Set(selectedRef.current);
     if (allVisibleSelected) {
       for (const item of visibleItems) next.delete(item.abs_path);
@@ -1619,7 +1723,19 @@ function SourcePreviewPanelInner({
     selectedRef.current = next;
     setSelected(next);
     onSelectionConfirm?.(Array.from(next));
-  }, [visibleItems, allVisibleSelected, onSelectionConfirm]);
+  }, [
+    visibleItems,
+    allVisibleSelected,
+    isGloballySelected,
+    importAllData,
+    metadata.total,
+    filter,
+    sortBy,
+    deviceSource,
+    sourcePath,
+    isRecursive,
+    onSelectionConfirm,
+  ]);
 
   const handleSelectOnlyNew = useCallback(() => {
     let targets: string[] = [];
@@ -1639,7 +1755,10 @@ function SourcePreviewPanelInner({
       const totalCount = metadata.total || visibleItems.length;
       showNotification(
         "info",
-        `No new files found — all ${totalCount > 0 ? totalCount.toLocaleString() : ""} files already appear in your library.`.replace("  ", " "),
+        `No new files found — all ${totalCount > 0 ? totalCount.toLocaleString() : ""} files already appear in your library.`.replace(
+          "  ",
+          " ",
+        ),
       );
       return;
     }
@@ -1672,6 +1791,9 @@ function SourcePreviewPanelInner({
     setLocked(false);
     setDeviceDisconnected(false);
     lockNotifiedRef.current = false;
+    // Drop the thumb-failure negative cache so previously-failed tiles
+    // re-enter the fast lane instead of rendering stale grey placeholders.
+    clearAllThumbFailed();
     queryClient.invalidateQueries({ queryKey: ["ios-devices"] });
     queryClient.invalidateQueries({ queryKey: ["device-preview"] });
     setRetryNonce((n) => n + 1);
@@ -1919,11 +2041,24 @@ function SourcePreviewPanelInner({
               <button
                 type="button"
                 onClick={handleSelectAll}
-                className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors"
+                disabled={isSelectingAll}
+                title={
+                  isGloballySelected
+                    ? "Clear the whole cross-page selection"
+                    : metadata.total > 0
+                      ? `Select all ${metadata.total} files across pages`
+                      : "Select the current page"
+                }
+                className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 inline-flex items-center gap-1"
               >
-                {allVisibleSelected
-                  ? "Deselect page"
-                  : `Select page (${visibleItems.length})`}
+                {isSelectingAll && <Loader2 className="w-3 h-3 animate-spin" />}
+                {isGloballySelected
+                  ? "Deselect all"
+                  : metadata.total > 0
+                    ? `Select all (${metadata.total})`
+                    : allVisibleSelected
+                      ? "Deselect page"
+                      : `Select page (${visibleItems.length})`}
               </button>
               {selectedCount > 0 && (
                 <button

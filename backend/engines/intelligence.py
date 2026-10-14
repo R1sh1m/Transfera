@@ -428,7 +428,9 @@ def extract_faces(file_path: str | Path) -> list[dict]:
             h = np.maximum(0.0, yy2 - yy1)
             inter = w * h
             area1 = (all_boxes[i, 2] - all_boxes[i, 0]) * (all_boxes[i, 3] - all_boxes[i, 1])
-            area2 = (all_boxes[order[1:], 2] - all_boxes[order[1:], 0]) * (all_boxes[order[1:], 3] - all_boxes[order[1:], 1])
+            area2 = (all_boxes[order[1:], 2] - all_boxes[order[1:], 0]) * (
+                all_boxes[order[1:], 3] - all_boxes[order[1:], 1]
+            )
             union = area1 + area2 - inter
             iou = inter / np.maximum(union, 1e-6)
 
@@ -469,11 +471,13 @@ def extract_faces(file_path: str | Path) -> list[dict]:
                 emb = emb / norm
             emb_list = [round(float(v), 5) for v in emb]
 
-            faces.append({
-                "bbox": [orig_x1, orig_y1, orig_x2, orig_y2],
-                "confidence": round(score_val, 4),
-                "embedding": emb_list,
-            })
+            faces.append(
+                {
+                    "bbox": [orig_x1, orig_y1, orig_x2, orig_y2],
+                    "confidence": round(score_val, 4),
+                    "embedding": emb_list,
+                }
+            )
 
         return faces
     except Exception as exc:
@@ -664,23 +668,68 @@ def structured_from_tags(tags: dict) -> dict:
             return None
 
     out: dict = {
-        "width": _i(tags.get("ImageWidth") or tags.get("ExifImageWidth")),
-        "height": _i(tags.get("ImageHeight") or tags.get("ExifImageHeight")),
-        "camera_make": (str(tags.get("Make") or "").strip() or None),
-        "camera_model": (str(tags.get("Model") or "").strip() or None),
+        "width": _i(tags.get("ImageWidth") or tags.get("ExifImageWidth") or tags.get("SourceImageWidth")),
+        "height": _i(tags.get("ImageHeight") or tags.get("ExifImageHeight") or tags.get("SourceImageHeight")),
+        "camera_make": (
+            str(
+                tags.get("Make") or tags.get("DeviceMake") or tags.get("CameraMake") or tags.get("ComAppleMake") or ""
+            ).strip()
+            or None
+        ),
+        "camera_model": (
+            str(
+                tags.get("Model")
+                or tags.get("DeviceModel")
+                or tags.get("CameraModel")
+                or tags.get("ComAppleModel")
+                or tags.get("ComAppleDeviceModel")
+                or ""
+            ).strip()
+            or None
+        ),
         "gps_lat": None,
         "gps_lon": None,
         "duration_s": None,
     }
+    # "ImageSize" form ("4032x3024") — common when width/height keys are absent.
+    if out["width"] is None or out["height"] is None:
+        try:
+            size_raw = str(tags.get("ImageSize") or "").strip().lower().replace(" ", "")
+            if "x" in size_raw:
+                w_raw, h_raw = size_raw.split("x", 1)
+                if out["width"] is None:
+                    out["width"] = _i(w_raw)
+                if out["height"] is None:
+                    out["height"] = _i(h_raw)
+        except (ValueError, TypeError, AttributeError):
+            pass
     lat = _f(tags.get("GPSLatitude"))
     lat_ref = str(tags.get("GPSLatitudeRef") or "").upper()
     lon = _f(tags.get("GPSLongitude"))
     lon_ref = str(tags.get("GPSLongitudeRef") or "").upper()
+    # "GPSPosition" form ("12.3456, -65.4321") carries signed decimals, so
+    # use them verbatim — the N/S/E/W ref logic below must not abs() them.
+    pos_lat: float | None = None
+    pos_lon: float | None = None
+    if (lat is None or lon is None) and tags.get("GPSPosition"):
+        try:
+            parts = str(tags.get("GPSPosition")).replace(";", ",").split(",")
+            if len(parts) >= 2:
+                if lat is None:
+                    pos_lat = _f(parts[0])
+                if lon is None:
+                    pos_lon = _f(parts[1])
+        except (ValueError, TypeError, AttributeError):
+            pos_lat = pos_lon = None
     if lat is not None:
         out["gps_lat"] = -abs(lat) if lat_ref == "S" else abs(lat)
+    elif pos_lat is not None:
+        out["gps_lat"] = pos_lat
     if lon is not None:
         out["gps_lon"] = -abs(lon) if lon_ref == "W" else abs(lon)
-    dur = tags.get("Duration") or tags.get("MediaDuration")
+    elif pos_lon is not None:
+        out["gps_lon"] = pos_lon
+    dur = tags.get("Duration") or tags.get("MediaDuration") or tags.get("TrackDuration")
     if dur is not None:
         d = _f(dur)
         if d is None:

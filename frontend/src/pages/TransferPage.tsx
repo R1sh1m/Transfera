@@ -68,6 +68,9 @@ const STATUS_LABELS: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+// Once-per-app-launch throttle for the keep-awake popup. Module scope =
+// survives remounts/revisits, resets on app close/reload (fresh runtime).
+const keepAwakeNotifiedSerials = new Set<string>();
 function fileIcon(name: string) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (
@@ -926,7 +929,11 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   });
 
   const activeBatch = transfer.activeBatch;
-  const totalFiles = transfer.totalFiles || transfer.totalItems || 1;
+  const rawTotal = transfer.totalFiles || transfer.totalItems || 0;
+  const isEmptySession = rawTotal === 0;
+  // Display denominator only — never used as a divisor. Shows 0 honestly
+  // for empty sessions instead of masking it with a fallback of 1.
+  const totalFiles = rawTotal;
   const isCancelled = transfer.status === "cancelled";
   const isCompleted = transfer.status === "completed";
   const isCompletedWithErrors = transfer.status === "completed_with_errors";
@@ -971,10 +978,15 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
   };
 
   // Use server-provided progress_percent for the main bar
-  // On completion: animate to 100%. On cancel/failure: freeze at last value.
-  let displayPct = transfer.progressPercent;
-  if (isCompleted || isCompletedWithErrors) {
+  // On completion: animate to 100% — unless the session was empty, in
+  // which case forcing 100% is misleading, so stay at 0%.
+  // On cancel/failure: freeze at last value.
+  let displayPct = transfer.progressPercent ?? 0;
+  if ((isCompleted || isCompletedWithErrors) && !isEmptySession) {
     displayPct = 100;
+  }
+  if (isEmptySession) {
+    displayPct = 0;
   }
 
   // Use server-computed timing values (updated each poll)
@@ -984,7 +996,9 @@ function TransferMonitor(_props: { progress: SessionProgress | undefined }) {
 
   // Determine phase text
   let phaseText = "";
-  if (transfer.status === "created") phaseText = "Ready to start";
+  if (isEmptySession && !isFailed && !isCancelled)
+    phaseText = "No files to transfer — empty session";
+  else if (transfer.status === "created") phaseText = "Ready to start";
   else if (transfer.status === "running" && activeBatch) {
     if (activeBatch.hop1Status === "transferring")
       phaseText = `Caching file ${activeBatch.completedItems} of ${activeBatch.totalItems}`;
@@ -1374,12 +1388,17 @@ export default function TransferPage() {
 
       if (!useTransferStore.getState().ui.notification) {
         if (transfer.status === "completed") {
-          useTransferStore
-            .getState()
-            .showNotification(
-              "success",
-              `${transfer.importedFiles} file${transfer.importedFiles !== 1 ? "s" : ""} transferred successfully.`,
-            );
+          // Suppress the misleading "0 files transferred successfully"
+          // toast for empty (0-item) sessions.
+          const total = transfer.totalFiles || transfer.totalItems || 0;
+          if (transfer.importedFiles > 0 || total > 0) {
+            useTransferStore
+              .getState()
+              .showNotification(
+                "success",
+                `${transfer.importedFiles} file${transfer.importedFiles !== 1 ? "s" : ""} transferred successfully.`,
+              );
+          }
         } else if (transfer.status === "completed_with_errors") {
           useTransferStore
             .getState()
@@ -1399,6 +1418,8 @@ export default function TransferPage() {
     transfer.sessionId,
     transfer.importedFiles,
     transfer.failedFiles,
+    transfer.totalFiles,
+    transfer.totalItems,
     setCompletedSnapshot,
   ]);
 
@@ -1511,20 +1532,34 @@ export default function TransferPage() {
   const isIOSDevice = transfer.sourceRoot?.startsWith("ios://") ?? false;
   const showKeepAwake = isIOSDevice && (isRunning || isPaused);
 
-  const keepAwakeNotifiedRef = useRef<number | null>(null);
+  // Canonical device serial from an ios://<serial>/… source root (mirrors
+  // backend canonical_device_serial: embedded 40-hex UDID wins, else
+  // lowercased raw id). Used for the once-per-app-launch popup throttle.
+  const iosSerial = useMemo(() => {
+    if (!transfer.sourceRoot?.startsWith("ios://")) return null;
+    const raw = transfer.sourceRoot.slice("ios://".length);
+    const slashIdx = raw.indexOf("/");
+    const devId = (slashIdx === -1 ? raw : raw.slice(0, slashIdx)).trim();
+    if (!devId) return null;
+    const m = devId.match(/[0-9a-fA-F]{40}/);
+    return (m?.[0] ?? devId).toLowerCase();
+  }, [transfer.sourceRoot]);
+
+  const keepAwakeNotifiedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (showKeepAwake && transfer.sessionId) {
-      if (keepAwakeNotifiedRef.current !== transfer.sessionId) {
-        keepAwakeNotifiedRef.current = transfer.sessionId;
-        useTransferStore
-          .getState()
-          .showNotification(
-            "warning",
-            "Keep your iPhone unlocked — preview and transfer pause if it locks. Your phone's auto-lock can't be turned off from this PC, so tap the screen now and then to keep it awake.",
-          );
-      }
-    }
-  }, [showKeepAwake, transfer.sessionId]);
+    if (!showKeepAwake || !iosSerial) return;
+    if (keepAwakeNotifiedRef.current === iosSerial) return;
+    keepAwakeNotifiedRef.current = iosSerial;
+    if (keepAwakeNotifiedSerials.has(iosSerial)) return;
+    keepAwakeNotifiedSerials.add(iosSerial);
+    // The inline keep-awake checklist strip above stays always visible.
+    useTransferStore
+      .getState()
+      .showNotification(
+        "warning",
+        "Keep your iPhone unlocked — preview and transfer pause if it locks. Your phone's auto-lock can't be turned off from this PC, so tap the screen now and then to keep it awake.",
+      );
+  }, [showKeepAwake, iosSerial]);
 
   return (
     <div className="h-full flex flex-col space-y-4">

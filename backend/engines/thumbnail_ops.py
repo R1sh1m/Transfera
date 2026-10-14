@@ -40,6 +40,24 @@ async def mark_thumbnail_failed(item_id: int) -> None:
             db_item.touch()
 
 
+async def mark_thumbnail_not_found(item_id: int) -> None:
+    """Mark a thumbnail as transiently missing (source + dest both absent).
+
+    Unlike ``mark_thumbnail_failed`` this stays retryable: regeneration
+    passes pick the item up again (``thumbnail_path`` remains NULL), so
+    reconnecting an external drive or completing the transfer recovers it.
+    Never use ``failed`` for this case.
+    """
+    from backend.database.manager import session_scope
+    from backend.database.models import MediaItem
+
+    async with session_scope() as session:
+        db_item = await session.get(MediaItem, item_id)
+        if db_item is not None and db_item.thumbnail_status != "not_found":
+            db_item.thumbnail_status = "not_found"
+            db_item.touch()
+
+
 async def set_item_thumbnail(item_id: int, thumbnail_path: str) -> None:
     """Update a single item's thumbnail_path in the database."""
     from backend.database.manager import session_scope
@@ -77,6 +95,8 @@ def resolve_thumbnail_source_path(
             created_at=entry.get("created_at"),
             file_name=file_name,
             file_size=entry.get("file_size", 0),
+            extension=entry.get("extension"),
+            source_hash=entry.get("source_hash"),
         )
         dst = locate_archive_file(dest_root, stub, layout=entry.get("folder_layout", "year/month"))
         if dst is not None:
