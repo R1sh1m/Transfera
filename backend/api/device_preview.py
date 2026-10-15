@@ -118,6 +118,56 @@ def _is_transient_thumb_error(exc: BaseException | None) -> bool:
     return False
 
 
+_LOOKUP_FAILURE_MARKERS = (
+    "all backends failed",
+    "no backends",
+    "not available",
+    "not installed",
+    "not found",
+    "no such device",
+)
+_TRANSIENT_IO_MARKERS = (
+    "timeout",
+    "timed out",
+    "busy",
+    "stalled",
+    "slot dropped",
+    "econnreset",
+    "broken pipe",
+    "locked",
+    "not trusted",
+)
+
+
+def _is_lookup_failure(exc: BaseException | None) -> bool:
+    """True when *exc* is a device/backend lookup failure, not a read failure.
+
+    The unified manager aggregates per-tier errors into
+    ``RuntimeError("All backends failed ...")`` when no tier can see the
+    device (unknown serial, helper missing, bridge down). Such errors must
+    degrade to the grey fallback — never 503 — while genuine I/O failures
+    (timeout, stalled USB stream, broken pipe) stay transient even when
+    wrapped in the same aggregate.
+    """
+    if exc is None:
+        return False
+    import re as _re
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if not any(marker in text for marker in _LOOKUP_FAILURE_MARKERS):
+        return False
+    # "stalled" is a substring of "installed" ("pymobiledevice3 not
+    # installed", "wpd_helper not installed"): only count it as an I/O
+    # marker on a word boundary so missing-dependency aggregates stay
+    # lookup failures.
+    _io_markers = [m for m in _TRANSIENT_IO_MARKERS if m != "stalled"]
+    if any(marker in text for marker in _io_markers):
+        return False
+    if _re.search(r"\bstalled\b", text):
+        return False
+    return True
+
+
 async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -> bytes | None:
     """
     Read only the first *max_bytes* bytes of a file on the iOS device via AFC.
@@ -129,11 +179,17 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
 
     Routes through the unified manager so Tier 1 (pooled AFC), WPD (helper
     --offset/--length) and Tier 2 (full-read fallback) are all handled.
-    Returns bytes on success, None on failure.
+    Returns bytes on success, None on failure. Genuine I/O failures
+    (USB timeout / stalled stream / broken pipe) are re-raised so thumbnail
+    callers can map them to 503 + Retry-After via _is_transient_thumb_error
+    instead of degrading to a grey fallback or 404/500; lookup-style
+    failures (unknown device / no backend available) still return None.
     """
     try:
         return await get_device_manager().read_device_file_partial(device_id, path, max_bytes)
     except Exception as exc:
+        if _is_transient_thumb_error(exc) and not _is_lookup_failure(exc):
+            raise
         logger.debug("_read_device_file_partial failed for %s: %s", path, exc)
         return None
 
@@ -2584,6 +2640,13 @@ async def ios_thumbnail(
 
     try:
         if ext in PREVIEW_IMAGE_EXTENSIONS:
+            # Reuse a warm pooled AFC slot when one was used recently (same
+            # keep-alive as the listing path); bounded and best-effort so a
+            # slow device never stalls the thumbnail.
+            try:
+                await asyncio.wait_for(ensure_afc_warm(device_id), timeout=5.0)
+            except Exception as exc:
+                logger.debug("ios-thumbnail AFC warmup skipped for %s: %s", device_id, exc)
             # ----------------------------------------------------------------
             # TWO-STAGE FAST PATH: Read only the first 256 KB of the file.
             # iOS HEIC/JPEG files embed a small JPEG preview (typically 20-80 KB)
@@ -2593,7 +2656,7 @@ async def ios_thumbnail(
             # failure do we pay for Stage 2 (full read). Blocking Pillow
             # decodes run in the threadpool so the event loop never blocks.
             # ----------------------------------------------------------------
-            PARTIAL_READ_BYTES = 512 * 1024  # 512 KB
+            PARTIAL_READ_BYTES = 256 * 1024  # 256 KB
 
             partial_bytes: bytes | None = None
             partial_exc: BaseException | None = None
@@ -2678,7 +2741,7 @@ async def ios_thumbnail(
                         )
                     except Exception as exc:
                         logger.debug("iOS full-read thumbnail error for %s: %s (%s)", path, exc, fail_reason)
-                        if _is_transient_thumb_error(exc):
+                        if _is_transient_thumb_error(exc) and not _is_lookup_failure(exc):
                             transient_exc = exc
                             return Response(
                                 content=b"",
@@ -2702,6 +2765,10 @@ async def ios_thumbnail(
             # NOTE: the prefix read below takes _IOS_THUMB_SEMAPHORE (the
             # listing/browse path never does) so thumbnails yield AFC slots
             # to page-turn snapshot browses.
+            try:
+                await asyncio.wait_for(ensure_afc_warm(device_id), timeout=5.0)
+            except Exception as exc:
+                logger.debug("ios-thumbnail AFC warmup skipped for %s: %s", device_id, exc)
             prefix_bytes: bytes | None = None
             try:
                 async with _IOS_THUMB_SEMAPHORE:
@@ -2765,7 +2832,7 @@ async def ios_thumbnail(
         raise
     except Exception as exc:
         logger.debug("iOS thumbnail error for %s: %s", path, exc)
-        if _is_transient_thumb_error(exc):
+        if _is_transient_thumb_error(exc) and not _is_lookup_failure(exc):
             return Response(
                 content=b"",
                 media_type="image/jpeg",

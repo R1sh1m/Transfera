@@ -77,13 +77,11 @@ export function getDeviceMeta(
   }
 
   // 2. Apple iPad
-  if (
-    modelLower.includes("ipad") ||
-    nameLower.includes("ipad")
-  ) {
+  if (modelLower.includes("ipad") || nameLower.includes("ipad")) {
     const cleanName = (name || model || "iPad").trim();
     const displayName =
-      cleanName.toLowerCase().includes("apple") || cleanName.toLowerCase().includes("ipad")
+      cleanName.toLowerCase().includes("apple") ||
+      cleanName.toLowerCase().includes("ipad")
         ? cleanName
         : cleanName;
     return {
@@ -144,16 +142,20 @@ export function getDeviceMeta(
 
   if (isCamera) {
     let brand = "Camera";
-    if (nameLower.includes("canon") || modelLower.includes("canon")) brand = "Canon";
-    else if (nameLower.includes("nikon") || modelLower.includes("nikon")) brand = "Nikon";
-    else if (nameLower.includes("sony") || modelLower.includes("sony")) brand = "Sony";
+    if (nameLower.includes("canon") || modelLower.includes("canon"))
+      brand = "Canon";
+    else if (nameLower.includes("nikon") || modelLower.includes("nikon"))
+      brand = "Nikon";
+    else if (nameLower.includes("sony") || modelLower.includes("sony"))
+      brand = "Sony";
     else if (nameLower.includes("fuji")) brand = "Fujifilm";
     else if (nameLower.includes("gopro")) brand = "GoPro";
     else if (nameLower.includes("lumix")) brand = "Panasonic";
 
     return {
       category: "camera",
-      categoryLabel: model || (brand !== "Camera" ? `${brand} Camera` : "Digital Camera"),
+      categoryLabel:
+        model || (brand !== "Camera" ? `${brand} Camera` : "Digital Camera"),
       displayName: name || model || "Digital Camera",
       shortName: model || brand,
       brand,
@@ -224,8 +226,10 @@ export function getDeviceMeta(
 
   if (isAndroidTablet) {
     let brand = "Android";
-    if (modelLower.includes("samsung") || nameLower.includes("galaxy")) brand = "Samsung";
-    else if (modelLower.includes("lenovo") || nameLower.includes("lenovo")) brand = "Lenovo";
+    if (modelLower.includes("samsung") || nameLower.includes("galaxy"))
+      brand = "Samsung";
+    else if (modelLower.includes("lenovo") || nameLower.includes("lenovo"))
+      brand = "Lenovo";
     else if (modelLower.includes("xiaomi")) brand = "Xiaomi";
 
     const displayName = name.toLowerCase().includes(brand.toLowerCase())
@@ -311,13 +315,18 @@ export function getDeviceMeta(
 
   const rawName = name || model || "Android Device";
   const displayName =
-    androidBrand !== "Android" && !rawName.toLowerCase().includes(androidBrand.toLowerCase())
+    androidBrand !== "Android" &&
+    !rawName.toLowerCase().includes(androidBrand.toLowerCase())
       ? `${androidBrand} ${rawName}`
       : rawName;
 
   return {
     category: "android_phone",
-    categoryLabel: model || (androidBrand !== "Android" ? `${androidBrand} Smartphone` : "Android Smartphone"),
+    categoryLabel:
+      model ||
+      (androidBrand !== "Android"
+        ? `${androidBrand} Smartphone`
+        : "Android Smartphone"),
     displayName: displayName.trim(),
     shortName: model || "Android",
     brand: androidBrand,
@@ -370,16 +379,35 @@ export function formatDevicePath(
   const rawWithoutPrefix = isIos
     ? path.slice("ios://".length)
     : path.slice("wpd://".length);
-  const slashIdx = rawWithoutPrefix.indexOf("/");
-  const serial = slashIdx === -1 ? rawWithoutPrefix : rawWithoutPrefix.slice(0, slashIdx);
-  const subPath = slashIdx === -1 ? "/DCIM" : rawWithoutPrefix.slice(slashIdx);
+  const slashIdx = rawWithoutPrefix.search(/[/\\]/);
+  const serial =
+    slashIdx === -1 ? rawWithoutPrefix : rawWithoutPrefix.slice(0, slashIdx);
+  const subPathRaw =
+    slashIdx === -1 ? "/DCIM" : rawWithoutPrefix.slice(slashIdx);
+  // Normalise Windows-style separators from WPD PnP IDs to the AFC "/"
+  // convention so the display path never shows a dcim mismatch.
+  const subPath = subPathRaw.replace(/\\/g, "/");
 
-  // Look up matching device in discovered devices list
-  const matchedDevice = devices?.find(
-    (d) =>
-      d.serial.toLowerCase() === serial.toLowerCase() ||
-      (d.serial.startsWith("\\\\?\\") && serial.startsWith("\\\\?\\")),
-  );
+  // Look up matching device in discovered devices list. Prefixes are
+  // interchangeable for lookup (ios:// vs wpd://): compare canonical
+  // serials on both sides so a WPD PnP ID embedding the UDID
+  // (SWD#WPDBUSENUM#...#{40-hex}...) matches its Tier 1 UDID row, and a
+  // tier-prefix flip alone never counts as a different device.
+  const canonTarget = canonicalSerial(serial);
+  const serialLower = serial.toLowerCase();
+  const matchedDevice = devices?.find((d) => {
+    const canonD = canonicalSerial(d.serial);
+    if (canonTarget && canonD && canonTarget === canonD) return true;
+    if (d.serial.toLowerCase() === serialLower) return true;
+    // Legacy confusion where both sides carry a \\?\ extended prefix.
+    if (
+      serial.startsWith("\\\\?\\") &&
+      d.serial.startsWith("\\\\?\\") &&
+      d.serial.toLowerCase().includes(serialLower)
+    )
+      return true;
+    return false;
+  });
 
   const meta = getDeviceMeta(
     matchedDevice || {
@@ -389,8 +417,11 @@ export function formatDevicePath(
     },
   );
 
-  const cleanSubPath = subPath === "/" || subPath === "/DCIM" ? "DCIM" : subPath.replace(/^\//, "");
-  const cleanPath = `${meta.displayName} (${cleanSubPath})`;
+  const cleanSubPath =
+    subPath === "/" || subPath.toLowerCase() === "/dcim"
+      ? "DCIM"
+      : subPath.replace(/^\//, "").replace(/\/+$/, "");
+  const cleanPath = `${meta.displayName} (${cleanSubPath || "DCIM"})`;
 
   return {
     isDevice: true,
@@ -402,12 +433,22 @@ export function formatDevicePath(
 
 /**
  * Stable device identity across Tier 1 / WPD serial formats. Mirrors
- * backend canonical_device_serial: extracts 40-hex UDID when embedded,
- * or returns normalized lowercase serial.
+ * backend canonical_device_serial: strips any ios:// or wpd:// prefix and
+ * path suffix, extracts the 40-hex UDID when embedded (e.g. a WPD PnP ID
+ * like SWD#WPDBUSENUM#{guid}#...{UDID}...), else returns the normalized
+ * lowercase serial. Both sides of a comparison must go through here so
+ * exact/lowercase-only matching can't miss UDID-embedded variants.
  */
-export function canonicalSerial(serial: string | null | undefined): string | null {
+export function canonicalSerial(
+  serial: string | null | undefined,
+): string | null {
   if (!serial) return null;
-  const m = serial.match(/[0-9a-fA-F]{40}/);
+  const trimmed = serial.trim();
+  if (!trimmed) return null;
+  const withoutPrefix = trimmed
+    .replace(/^(ios|wpd|afc):\/\//i, "")
+    .split(/[/\\]/)[0]!;
+  const m = withoutPrefix.match(/[0-9a-fA-F]{40}/);
   if (m?.[0]) return m[0].toLowerCase();
-  return serial.toLowerCase();
+  return withoutPrefix.toLowerCase();
 }

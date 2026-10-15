@@ -529,24 +529,33 @@ async def browse_ios_device(req: IOSBrowseRequest, _: None = Depends(require_loc
     # Verify device is connected and ready via unified manager.  Rather
     # than returning a bare 404/400 here, we first sniff the device
     # status from the most recent listing so we can differentiate
-    # LOCKED / NOT_TRUSTED states early.
-    devices, _tier = await manager.list_devices()
-    device = next((d for d in devices if d.serial == req.serial), None)
+    # LOCKED / NOT_TRUSTED states early.  Matching is canonical (UDID
+    # embedded in WPD PnP ids == Tier-1 serial) so a tier flap between
+    # poll and browse never false-404s.  The listing is advisory only:
+    # on a miss we still attempt the browse waterfall directly and only
+    # 404 when that also fails.
+    try:
+        devices, _tier = await manager.list_devices()
+    except Exception as exc:
+        logger.debug("browse_ios_device: list_devices failed, trying browse anyway: %s", exc)
+        devices = []
+    try:
+        _req_canon = canonical_device_serial(req.serial)
+    except Exception:
+        _req_canon = req.serial
 
-    if device is None:
-        # Device not found in ANY tier's listing.  May have been
-        # disconnected, or no backend can see it yet.
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "status": "disconnected",
-                "message": "Device is not connected or not reachable. "
-                "Ensure the device is plugged in via USB and unlocked.",
-            },
-        )
+    def _canon(serial: str | None) -> str:
+        try:
+            return canonical_device_serial(serial)
+        except Exception:
+            return serial or ""
+
+    device = next((d for d in devices if _canon(getattr(d, "serial", None)) == _req_canon), None)
+    device_known = device is not None
 
     # Early-exit for terminal device states that no backend can work around.
-    if device.status == DeviceStatus.LOCKED:
+    # Only when the device was positively identified in that state.
+    if device is not None and device.status == DeviceStatus.LOCKED:
         raise HTTPException(
             status_code=423,
             detail={
@@ -603,6 +612,18 @@ async def browse_ios_device(req: IOSBrowseRequest, _: None = Depends(require_loc
                     "status": "not_trusted",
                     "message": "Please tap 'Trust This Computer' on your "
                     "iPhone and enter your passcode, then try again.",
+                },
+            )
+        if not device_known:
+            # No listing row AND the waterfall failed: the device is not
+            # reachable on any tier (tier flap / unplugged). Report
+            # disconnected rather than a generic error.
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "status": "disconnected",
+                    "message": "Device is not connected or not reachable. "
+                    "Ensure the device is plugged in via USB and unlocked.",
                 },
             )
         raise HTTPException(
@@ -685,6 +706,15 @@ async def browse_ios_device(req: IOSBrowseRequest, _: None = Depends(require_loc
             req.serial,
             normalised_path,
         )
+        if not device_known:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "status": "disconnected",
+                    "message": "Device is not connected or not reachable. "
+                    "Ensure the device is plugged in via USB and unlocked.",
+                },
+            )
         raise HTTPException(
             status_code=500,
             detail={

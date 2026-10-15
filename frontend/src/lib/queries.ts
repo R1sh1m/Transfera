@@ -3,7 +3,12 @@
 // Server-state bindings for all backend endpoints.
 // ---------------------------------------------------------------------------
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useMutation,
+  useQueryClient,
+  keepPreviousData,
+} from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import apiClient from "./api-client";
 import { extractErrorMessage, isAbortError } from "./utils";
@@ -737,6 +742,12 @@ export function useValidatePath(path: string | null) {
 // ---------------------------------------------------------------------------
 // iOS Device Support
 // ---------------------------------------------------------------------------
+// Consecutive transient-empty /ios-devices polls suppressed by the
+// hysteresis in useIOSDevices below. Module-level so it survives
+// re-renders; reset as soon as a non-empty poll (or a second consecutive
+// empty) resolves it.
+let emptyIOSPollCount = 0;
+
 export function useIOSDevices(enabled = true) {
   // Back off while a transfer runs: every poll costs a usbmux lockdown
   // handshake per device, which contends with the transfer's own USB
@@ -744,15 +755,40 @@ export function useIOSDevices(enabled = true) {
   const transferActive = useTransferStore((s) =>
     ["running", "paused"].includes(s.transfer.status),
   );
+  const qc = useQueryClient();
   return useQuery({
     queryKey: ["ios-devices"],
     queryFn: async () => {
       const { data } =
         await apiClient.get<IOSDeviceListResponse>("/ios-devices");
+      // Hysteresis: a single transient empty poll (usbmux hiccup, WPD
+      // rescan) must not flash the UI to "disconnected". Retain the
+      // previous non-empty list for 1 poll; only accept the empty list
+      // when it persists across 2 consecutive polls.
+      const prev = qc.getQueryData<IOSDeviceListResponse>(["ios-devices"]);
+      if (
+        data.devices.length === 0 &&
+        prev &&
+        prev.devices.length > 0 &&
+        emptyIOSPollCount < 1
+      ) {
+        emptyIOSPollCount += 1;
+        return prev;
+      }
+      emptyIOSPollCount = 0;
       return data;
     },
     refetchInterval: transferActive ? 30000 : 5000,
-    staleTime: 3000,
+    // Longer than the 5 s poll so a slow poll doesn't mark data stale
+    // mid-flight and flash loading/empty states.
+    staleTime: 6000,
+    // Keep showing the last good list while a poll is in flight or fails.
+    placeholderData: keepPreviousData,
+    // Retry transient failures with backoff instead of surfacing an
+    // instant error/empty state; previous data stays visible meanwhile.
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
+    refetchOnWindowFocus: false,
     enabled,
   });
 }

@@ -41,6 +41,15 @@ _DEFAULT_CHUNK_SIZE = 100 * 1024
 # Subprocess timeouts (seconds)
 _LIST_TIMEOUT = 10
 _BROWSE_TIMEOUT = 15
+# Transparent-container child-listing cache: root "." polls otherwise fan
+# out N+1 list-folder subprocesses (one per container). Cache each
+# container's children briefly so repeated polls reuse them.
+_CONTAINER_CACHE_TTL_S = 30.0
+_CONTAINER_CACHE_MAX = 32
+_container_cache: dict[tuple[str, str], tuple[float, list]] = {}
+# Bound on extra list-folder probes per root browse so a device exposing
+# many root objects can never stall the poll.
+_ROOT_CONTAINER_PROBES_MAX = 8
 # A stalled MTP stream must fail the file, never hang the batch: bound each
 # stdout chunk read (large files stream many chunks; a wedged chunk aborts).
 _WPD_CHUNK_TIMEOUT_SECONDS = 120.0
@@ -351,16 +360,42 @@ class WpdBackend:
         # child is itself a container — i.e. none are media files — this is an
         # intermediate container), flatten it by including its grandchildren.
         if clean_path == ".":
+            import time as _time
+
             flat: list[dict] = []
+            _probes = 0
             for e in entries_raw:
                 name = e.get("name", "")
                 if name == "DCIM" or name == "Photos":
+                    flat.append(e)
+                    continue
+                # Skip obvious leaf files without a probe: containers
+                # report as non-folders, but real media files at root are
+                # never containers.
+                _ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if _ext in ("jpg", "jpeg", "heic", "heif", "png", "mp4", "mov"):
+                    flat.append(e)
+                    continue
+                if _probes >= _ROOT_CONTAINER_PROBES_MAX:
+                    flat.append(e)
+                    continue
+                _cache_key = (serial, name)
+                _cached = _container_cache.get(_cache_key)
+                if _cached is not None and (_time.monotonic() - _cached[0]) <= _CONTAINER_CACHE_TTL_S:
+                    child_raw = _cached[1]
+                    if child_raw:
+                        flat.extend(child_raw)
+                        continue
                     flat.append(e)
                     continue
                 try:
                     args = ["list-folder", "--device", serial, "--path", name]
                     child_stdout, _ = await self._run(args, timeout=_BROWSE_TIMEOUT)
                     child_raw = json.loads(child_stdout)
+                    _probes += 1
+                    if len(_container_cache) >= _CONTAINER_CACHE_MAX:
+                        _container_cache.pop(next(iter(_container_cache)))
+                    _container_cache[_cache_key] = (_time.monotonic(), child_raw)
                     if child_raw:
                         flat.extend(child_raw)
                         continue
@@ -421,22 +456,38 @@ class WpdBackend:
             await reader.close()
 
     async def read_partial(self, serial: str, path: str, max_bytes: int) -> bytes | None:
-        """Read up to *max_bytes* from the start of a file (thumbnail fast path)."""
-        clean_path = path.strip("/") or "."
-        stdout, _ = await self._run(
-            [
-                "read-file",
-                "--device",
-                serial,
-                "--path",
-                clean_path,
-                "--offset",
-                "0",
-                "--length",
-                str(max(0, max_bytes)),
-            ],
-            timeout=_BROWSE_TIMEOUT,
-        )
+        """Read up to *max_bytes* from the start of a file (thumbnail fast path).
+
+        Returns None when the helper lacks --offset/--length support
+        (non-zero exit) or yields no bytes, so callers fall back to a
+        full read without surfacing an error.
+        """
+        # AFC-compatible normalisation: backslashes become forward slashes
+        # and the helper receives the path without a leading slash, while
+        # every path we expose (browse entries) keeps the leading slash.
+        normalised = path.replace("\\", "/")
+        if not normalised.startswith("/"):
+            normalised = f"/{normalised}"
+        clean_path = normalised.strip("/") or "."
+        try:
+            stdout, _ = await self._run(
+                [
+                    "read-file",
+                    "--device",
+                    serial,
+                    "--path",
+                    clean_path,
+                    "--offset",
+                    "0",
+                    "--length",
+                    str(max(0, max_bytes)),
+                ],
+                timeout=_BROWSE_TIMEOUT,
+            )
+        except WpdError:
+            # Older wpd_helper builds reject --offset/--length: not an
+            # error for the caller, just no prefix available.
+            return None
         if not stdout:
             return None
         return bytes(stdout[:max_bytes]) if len(stdout) > max_bytes else bytes(stdout)

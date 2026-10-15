@@ -50,6 +50,7 @@ from backend.ios_device import (
     canonical_device_serial,
     check_driver_status,
     drop_afc_slots,
+    invalidate_trust_cache,
     is_ios_support_available,
 )
 from backend.ios_device import (
@@ -92,6 +93,12 @@ _DEVICE_TIER_USER_FILE = _PREFERENCE_DIR / "device_tier_user_prefs.json"
 
 # Valid per-device user override values. "auto" clears the override.
 _VALID_USER_TIERS = frozenset({"auto", "tier1", "wpd", "tier2"})
+
+# Empty-poll hysteresis: a single poll that finds nothing (transient usbmux
+# miss right after plug/unlock) must not wipe the tier map, persisted prefs,
+# or known-iOS set. Only after this many *consecutive* empty polls is the
+# last-known state purged.
+_EMPTY_LIST_PURGE_THRESHOLD = 3
 
 # Regex for iOS UDID detection.
 # iOS UDIDs are either 40-character hex strings or the "0000XXXX-XXXXXXXX"
@@ -822,6 +829,10 @@ class DeviceBackendManager:
         # apply iOS isolation rules without re-checking every call.
         self._ios_serials: set[str] = set()
 
+        # Consecutive empty list_devices() polls (hysteresis counter for
+        # the tier-map purge below).
+        self._empty_list_polls: int = 0
+
         # Auto-activation state -- set after initialize() probes each tier
         self._apple_driver_installable: bool = False
         self._apple_driver_package_name: str | None = None
@@ -1551,10 +1562,20 @@ class DeviceBackendManager:
                                         break
                                 except Exception:
                                     continue
-                    elif any(
-                        (d.serial or "").lower() == (existing.serial or "").lower() for existing in all_found_devices
-                    ):
-                        is_dup = True
+                    else:
+                        # Canonical identity: Tier-1 UDID vs WPD PnP id
+                        # embedding that UDID (any letter case) is one phone.
+                        # Raw lower-compare would flap when the serving tier
+                        # changes the serial format between polls.
+                        for existing in all_found_devices:
+                            try:
+                                if canonical_device_serial(existing.serial) == d_canonical:
+                                    is_dup = True
+                                    break
+                            except Exception:
+                                if (d.serial or "").lower() == (existing.serial or "").lower():
+                                    is_dup = True
+                                    break
 
                     if not is_dup:
                         all_found_devices.append(d)
@@ -1629,7 +1650,25 @@ class DeviceBackendManager:
                     "DeviceBackend: purged %d stale device(s) from tier map",
                     len(stale),
                 )
+            self._empty_list_polls = 0
             return all_found_devices, primary_tier
+
+        # Empty-poll hysteresis: one empty poll is usually a transient
+        # usbmux miss, not an unplug. Keep the last-known tier map, prefs,
+        # and iOS set until _EMPTY_LIST_PURGE_THRESHOLD consecutive empty
+        # polls; only then purge. (Managers built via __new__ in tests may
+        # lack the counter — getattr keeps those working.)
+        empty_polls = getattr(self, "_empty_list_polls", 0) + 1
+        self._empty_list_polls = empty_polls
+        if empty_polls < _EMPTY_LIST_PURGE_THRESHOLD:
+            logger.debug(
+                "DeviceBackend: empty poll %d/%d — keeping last-known tier map (%d entries)",
+                empty_polls,
+                _EMPTY_LIST_PURGE_THRESHOLD,
+                len(self._device_tier_map),
+            )
+            return [], DeviceAccessTier.NONE
+        self._empty_list_polls = 0
 
         if self._device_tier_map:
             logger.debug(
@@ -1717,8 +1756,14 @@ class DeviceBackendManager:
                 # Lock is transient: drop pooled AFC slots so a stale
                 # session can never report Ready on the next poll — the
                 # next caller reconnects and re-probes trust fresh.
+                # The cached trust verdict is dropped too so the next
+                # enumeration runs a full probe instead of reusing READY.
                 try:
                     drop_afc_slots(serial)
+                except Exception:
+                    pass
+                try:
+                    invalidate_trust_cache(serial)
                 except Exception:
                     pass
                 logger.warning(
@@ -1744,6 +1789,10 @@ class DeviceBackendManager:
                             drop_afc_slots(serial)
                         except Exception:
                             pass
+                        try:
+                            invalidate_trust_cache(serial)
+                        except Exception:
+                            pass
                         raise DeviceLockedError(
                             serial,
                             detail="Your iPhone is locked. Please unlock it and tap "
@@ -1762,6 +1811,10 @@ class DeviceBackendManager:
                         )
                         try:
                             drop_afc_slots(serial)
+                        except Exception:
+                            pass
+                        try:
+                            invalidate_trust_cache(serial)
                         except Exception:
                             pass
                         raise DeviceNotTrustedError(

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
+import random
 import re
 import threading
 import time
@@ -64,13 +65,26 @@ _BROWSE_TIMEOUT = 25.0
 # Resilience for the flaky Windows usbmux path: right after plug/unlock the
 # phone shows up in WPD instantly but usbmux needs another second or two to
 # enumerate it, and a busy usbmux can briefly return [] or refuse the
-# lockdown handshake. A couple of quick retries turn those transient misses
-# into a stable Tier 1 row instead of a USB-fallback flicker.
-_LIST_EMPTY_RETRIES = 2
+# lockdown handshake. A few quick retries with a little jitter turn those
+# transient misses into a stable Tier 1 row instead of a USB-fallback
+# flicker. Total retry budget stays bounded (~1.5 s for empty-list retries,
+# ~2 s sleeps across lockdown attempts excluding handshake timeouts).
+_LIST_EMPTY_RETRIES = 3
 _LIST_EMPTY_RETRY_DELAY = 0.4
+_LIST_RETRY_JITTER = 0.15
 _LOCKDOWN_TIMEOUT = 2.0
-_LOCKDOWN_RETRIES = 1
+_LOCKDOWN_RETRIES = 2
 _DRIVER_SOCKET_TIMEOUT = 2.0
+# Trust-probe cache: the all_values dump costs dozens of USB round trips
+# (up to _TRUST_PROBE_TIMEOUT each poll). Steady-state polls reuse the
+# cached verdict and skip the probe; a full probe runs only for a new
+# serial, an explicit force_full_probe (retry/recover), or cache expiry.
+_TRUST_CACHE_TTL_SECONDS = 30.0
+# Grace window for a recent READY: a single trust-probe *timeout* inside
+# this window keeps reporting READY for one poll instead of flickering to
+# LOCKED (the cache entry is left untouched so the next poll re-probes
+# promptly; a second consecutive timeout is accepted as genuinely locked).
+_TRUST_RECENT_READY_WINDOW_SECONDS = 90.0
 # A wedged AFC read must fail the file, never hang the batch/transfer:
 # full reads get a generous budget (large videos on slow links), prefix
 # reads and stats must return quickly.
@@ -194,14 +208,98 @@ def _require_pymobiledevice3():
 
 
 # ---------------------------------------------------------------------------
+# Trust-probe cache (per serial, short TTL)
+# ---------------------------------------------------------------------------
+# Maps canonical serial -> (verdict, monotonic timestamp, consecutive
+# probe-timeout count). Guarded because enumeration runs lockdown I/O on
+# worker threads while the cache itself is touched from the event loop.
+_TRUST_CACHE: dict[str, tuple[DeviceStatus, float, int]] = {}
+_TRUST_CACHE_GUARD = threading.Lock()
+
+
+def _retry_delay() -> float:
+    """Empty-list/lockdown retry delay with a little jitter."""
+    return _LIST_EMPTY_RETRY_DELAY + random.uniform(0, _LIST_RETRY_JITTER)
+
+
+def _trust_cache_key(serial: str | None) -> str:
+    try:
+        return canonical_device_serial(serial)
+    except Exception:
+        return (serial or "").lower()
+
+
+def _get_cached_trust(serial: str) -> DeviceStatus | None:
+    """Fresh cached trust verdict, or None on miss/expiry."""
+    key = _trust_cache_key(serial)
+    with _TRUST_CACHE_GUARD:
+        entry = _TRUST_CACHE.get(key)
+    if entry is None:
+        return None
+    status, timestamp, _streak = entry
+    if time.monotonic() - timestamp < _TRUST_CACHE_TTL_SECONDS:
+        return status
+    return None
+
+
+def _last_known_trust(serial: str) -> tuple[DeviceStatus | None, float | None, int]:
+    """Last cached verdict regardless of TTL -> (status, age_s, timeout_streak)."""
+    key = _trust_cache_key(serial)
+    with _TRUST_CACHE_GUARD:
+        entry = _TRUST_CACHE.get(key)
+    if entry is None:
+        return None, None, 0
+    status, timestamp, streak = entry
+    return status, time.monotonic() - timestamp, streak
+
+
+def _set_cached_trust(serial: str, status: DeviceStatus, timeout_streak: int = 0) -> None:
+    with _TRUST_CACHE_GUARD:
+        _TRUST_CACHE[_trust_cache_key(serial)] = (status, time.monotonic(), timeout_streak)
+
+
+def _note_trust_timeout_grace(serial: str) -> None:
+    """Record one graced probe timeout without refreshing the verdict timestamp."""
+    key = _trust_cache_key(serial)
+    with _TRUST_CACHE_GUARD:
+        entry = _TRUST_CACHE.get(key)
+        if entry is None:
+            return
+        status, timestamp, streak = entry
+        _TRUST_CACHE[key] = (status, timestamp, streak + 1)
+
+
+def invalidate_trust_cache(serial: str | None = None) -> None:
+    """Drop cached trust verdict(s) so the next poll runs a full probe.
+
+    Called on explicit retry/recover paths (e.g. a terminal locked/trust
+    error from an operation) and keyed canonically so a Tier-1 UDID
+    invalidates the same entry a PnP id would use.
+    """
+    with _TRUST_CACHE_GUARD:
+        if serial is None:
+            _TRUST_CACHE.clear()
+        else:
+            _TRUST_CACHE.pop(_trust_cache_key(serial), None)
+
+
+# ---------------------------------------------------------------------------
 # Device enumeration
 # ---------------------------------------------------------------------------
-async def list_ios_devices() -> list[IOSDevice]:
+async def list_ios_devices(*, force_full_probe: bool = False) -> list[IOSDevice]:
     """
     Enumerate connected iOS devices via usbmux.
 
     Returns a list of IOSDevice objects. Each device includes its
     real name, UDID, model, iOS version, and connection status.
+
+    The expensive ``all_values`` trust probe is cached per serial for
+    ``_TRUST_CACHE_TTL_SECONDS``: steady-state polls reuse the cached
+    verdict from ``short_info`` alone. A full probe runs for a new
+    serial, when ``force_full_probe`` is set (explicit retry/recover),
+    or after cache expiry. A single probe *timeout* never flips a
+    recently-READY device to LOCKED without confirmation (one grace
+    poll; the next poll re-probes promptly).
 
     Handles the following error states gracefully:
     - pymobiledevice3 not installed → returns empty list
@@ -255,7 +353,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                     _attempt + 1,
                     exc,
                 )
-                await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+                await asyncio.sleep(_retry_delay())
                 continue
             logger.warning("Failed to list usbmux devices: %s", exc)
             return []
@@ -266,7 +364,7 @@ async def list_ios_devices() -> list[IOSDevice]:
         # returning [] must not flip the UI to USB fallback, so retry
         # briefly before accepting "no devices".
         for _retry in range(_LIST_EMPTY_RETRIES):
-            await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+            await asyncio.sleep(_retry_delay())
             try:
                 mux_devices = list_devices()
             except (ConnectionFailedToUsbmuxdError, ConnectionError):
@@ -275,7 +373,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                 logger.debug("usbmux empty-list retry failed: %s", exc)
                 break
             if mux_devices:
-                logger.info(
+                logger.debug(
                     "usbmux found %d device(s) after empty-list retry",
                     len(mux_devices),
                 )
@@ -302,7 +400,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                         serial,
                         _attempt + 1,
                     )
-                    await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+                    await asyncio.sleep(_retry_delay())
                     continue
                 raise
             except Exception as exc:
@@ -317,7 +415,7 @@ async def list_ios_devices() -> list[IOSDevice]:
                         exc,
                         _attempt + 1,
                     )
-                    await asyncio.sleep(_LIST_EMPTY_RETRY_DELAY)
+                    await asyncio.sleep(_retry_delay())
                     last_exc = exc
                     continue
                 raise
@@ -341,20 +439,57 @@ async def list_ios_devices() -> list[IOSDevice]:
                 # timeout — bound it so a locked/slow device degrades to a
                 # clear LOCKED state instead of hanging the request past the
                 # client's timeout. Matches the handshake-timeout treatment.
-                status = DeviceStatus.READY
-                try:
-                    _ = await asyncio.wait_for(
-                        asyncio.to_thread(lambda: lockdown.all_values),
-                        timeout=_TRUST_PROBE_TIMEOUT,
-                    )
-                except TimeoutError:
+                # The verdict is cached per serial: a fresh cached READY
+                # skips the probe entirely so steady-state polls stay cheap
+                # and cannot flicker on one slow round trip.
+                cached_trust = None if force_full_probe else _get_cached_trust(serial)
+                if cached_trust is not None:
+                    status = cached_trust
                     logger.debug(
-                        "Device %s trust probe timed out — treating as locked",
+                        "Device %s trust verdict reused from cache (%s)",
                         serial,
+                        status.value,
                     )
-                    status = DeviceStatus.LOCKED
-                except Exception:
-                    status = DeviceStatus.NOT_TRUSTED
+                else:
+                    status = DeviceStatus.READY
+                    try:
+                        _ = await asyncio.wait_for(
+                            asyncio.to_thread(lambda: lockdown.all_values),
+                            timeout=_TRUST_PROBE_TIMEOUT,
+                        )
+                        _set_cached_trust(serial, DeviceStatus.READY)
+                    except TimeoutError:
+                        last, age, streak = _last_known_trust(serial)
+                        if (
+                            not force_full_probe
+                            and last == DeviceStatus.READY
+                            and age is not None
+                            and age < _TRUST_RECENT_READY_WINDOW_SECONDS
+                            and streak < 1
+                        ):
+                            # Single transient timeout on a recently-READY
+                            # phone: keep READY for this poll without
+                            # refreshing the cache, so the next poll
+                            # re-probes promptly. A second consecutive
+                            # timeout is accepted as genuinely locked.
+                            logger.debug(
+                                "Device %s trust probe timed out %.1fs after READY — "
+                                "keeping ready for one poll (grace)",
+                                serial,
+                                age,
+                            )
+                            _note_trust_timeout_grace(serial)
+                            status = DeviceStatus.READY
+                        else:
+                            logger.debug(
+                                "Device %s trust probe timed out — treating as locked",
+                                serial,
+                            )
+                            _set_cached_trust(serial, DeviceStatus.LOCKED)
+                            status = DeviceStatus.LOCKED
+                    except Exception:
+                        _set_cached_trust(serial, DeviceStatus.NOT_TRUSTED)
+                        status = DeviceStatus.NOT_TRUSTED
 
                 logger.info(
                     "Device detected: %s (%s) serial=%s status=%s ios=%s",
