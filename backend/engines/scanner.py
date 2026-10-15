@@ -556,14 +556,34 @@ async def _scan_ios_device(
                                                 _parse_exif_datetime as _parse_dt,
                                             )
 
-                                            return _parse_dt(str(raw).strip())
+                                            meta.date_taken = _parse_dt(str(raw).strip())
+                                        # IFD Make (271) / Model (272) — same
+                                        # if-None pattern: never overwrite.
+                                        try:
+                                            _make = exif.get(271)
+                                            _model = exif.get(272)
+                                            if _make and not meta.camera_make:
+                                                meta.camera_make = str(_make).strip() or None
+                                            if _model and not meta.camera_model:
+                                                meta.camera_model = str(_model).strip() or None
+                                        except Exception:
+                                            pass
+                                        # Pillow image dims as fallback when
+                                        # ExifTool is unavailable.
+                                        try:
+                                            _w, _h = img.size
+                                            if meta.width is None and _w:
+                                                meta.width = int(_w)
+                                                meta.height = int(_h)
+                                        except Exception:
+                                            pass
+                                        return meta.date_taken
                                 except Exception:
                                     return None
                                 return None
 
                             dt = await _asyncio.to_thread(_decode)
                             if dt is not None:
-                                meta.date_taken = dt
                                 return
                         except Exception:
                             pass
@@ -579,8 +599,24 @@ async def _scan_ios_device(
                                 tmp_path = tmp.name
                             try:
                                 m2 = extract_metadata(Path(tmp_path))
-                                if m2 and m2.date_taken:
-                                    return m2.date_taken
+                                if m2 is not None:
+                                    if m2.date_taken and meta.date_taken is None:
+                                        meta.date_taken = m2.date_taken
+                                    # Copy camera/dims/gps/duration via
+                                    # if-None pattern (never overwrite).
+                                    if meta.camera_make is None and m2.camera_make:
+                                        meta.camera_make = m2.camera_make
+                                    if meta.camera_model is None and m2.camera_model:
+                                        meta.camera_model = m2.camera_model
+                                    if meta.width is None and m2.width is not None:
+                                        meta.width = m2.width
+                                        meta.height = m2.height
+                                    if meta.gps_lat is None and m2.gps_lat is not None:
+                                        meta.gps_lat = m2.gps_lat
+                                        meta.gps_lon = m2.gps_lon
+                                    if meta.duration_s is None and m2.duration_s is not None:
+                                        meta.duration_s = m2.duration_s
+                                    return meta.date_taken
                             finally:
                                 try:
                                     Path(tmp_path).unlink(missing_ok=True)
@@ -1172,9 +1208,35 @@ async def _upsert_media_item(
             # Reuse existing row — but update session_id so the item is
             # associated with the *current* session, not a stale one from
             # an earlier scan that happened to share the same source_path.
+            # Also backfill NULL camera/dims/gps/duration when the fresh
+            # scan meta now carries values (if-None pattern).
             if session_id is not None:
                 stmt = update(MediaItem).where(MediaItem.id == existing_id).values(session_id=session_id)
                 await session.execute(stmt)
+            try:
+                _reuse_updates: dict = {}
+                _cur = await session.get(MediaItem, existing_id)
+                if _cur is not None:
+                    if getattr(_cur, "camera_make", None) is None and meta.camera_make:
+                        _reuse_updates["camera_make"] = meta.camera_make
+                    if getattr(_cur, "camera_model", None) is None and meta.camera_model:
+                        _reuse_updates["camera_model"] = meta.camera_model
+                    if getattr(_cur, "width", None) is None and meta.width is not None:
+                        _reuse_updates["width"] = meta.width
+                        _reuse_updates["height"] = meta.height
+                    if getattr(_cur, "gps_lat", None) is None and meta.gps_lat is not None:
+                        _reuse_updates["gps_lat"] = meta.gps_lat
+                        _reuse_updates["gps_lon"] = meta.gps_lon
+                    if getattr(_cur, "duration_s", None) is None and meta.duration_s is not None:
+                        _reuse_updates["duration_s"] = meta.duration_s
+                    if getattr(_cur, "date_taken", None) is None and meta.date_taken is not None:
+                        _reuse_updates["date_taken"] = meta.date_taken
+                if _reuse_updates:
+                    await session.execute(
+                        update(MediaItem).where(MediaItem.id == existing_id).values(**_reuse_updates)
+                    )
+            except Exception:
+                pass
             logger.debug("Reusing existing row id=%d for %s", existing_id, meta.file_path)
             return existing_id
 

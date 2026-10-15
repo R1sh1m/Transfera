@@ -359,7 +359,7 @@ export default function MediaDetailModal({
                 >
                   {[activeItem.camera_make, activeItem.camera_model]
                     .filter(Boolean)
-                    .join(" ") || "Unknown"}
+                    .join(" ") || "—"}
                 </p>
               </div>
 

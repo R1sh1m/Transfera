@@ -164,7 +164,7 @@ export function useSession(id: number | null) {
   });
 }
 
-export function useCreateSession() {
+export function useCreateSession(options?: { silent?: boolean }) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (req: SessionCreate) => {
@@ -179,9 +179,14 @@ export function useCreateSession() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["sessions"] });
-      useTransferStore
-        .getState()
-        .showNotification("success", "Backup session created");
+      // Silent when the caller auto-starts immediately after create
+      // (DeviceSetup → TransferPage auto-start fires "Backup started"):
+      // emitting both toasts back-to-back reads as a duplicate.
+      if (!options?.silent) {
+        useTransferStore
+          .getState()
+          .showNotification("success", "Backup session created");
+      }
     },
     onError: (error) => {
       // Toast only on a real client-side abort/timeout (the 120 s ceiling
@@ -1503,6 +1508,10 @@ export function useDownloadModels() {
 export function useBackfill() {
   const qc = useQueryClient();
   return useMutation({
+    // Shared mutationKey so every "Index library" button observes the same
+    // in-flight state via useIsMutating({ mutationKey: ["backfill"] }) —
+    // both buttons disable together and only one network request runs.
+    mutationKey: ["backfill"],
     mutationFn: async () => {
       // Backfill walks every media row and runs phash/dims/tags/face
       // clustering server-side — large libraries routinely exceed the 30 s

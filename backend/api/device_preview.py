@@ -192,6 +192,41 @@ async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -
         return None
 
 
+def _read_hop1_cache_bytes(device_id: str, path: str, file_size: int | None = None) -> bytes | None:
+    """Best-effort read of the Hop-1 transfer cache copy (avoids USB re-read).
+
+    When a previous transfer already staged this device file locally,
+    decode the staged bytes instead of paying for another USB read —
+    the same bytes the transfer path uses. The staged file is only
+    trusted when its size matches the listing's *file_size* (when known),
+    so a same-name replacement on the device can never yield a stale
+    thumbnail. Returns None on any miss. Never raises. Sync: callers run
+    it via asyncio.to_thread.
+    """
+    try:
+        from backend.config import CACHE_DIR
+        from backend.engines.cache_manager import get_cache_path
+
+        file_name = os.path.basename(path.rstrip("/")) or "file"
+        cached = get_cache_path(Path(CACHE_DIR), f"ios://{device_id}{path}", file_name)
+        if not cached.is_file():
+            return None
+        try:
+            staged_size = cached.stat().st_size
+            if staged_size > 200 * 1024 * 1024:
+                return None
+            if file_size and staged_size != file_size:
+                return None
+        except OSError:
+            return None
+        data = cached.read_bytes()
+        if data and len(data) > 100:
+            return data
+    except Exception:
+        pass
+    return None
+
+
 router = APIRouter(prefix="/api/device")
 
 # Supported extensions for preview scanning. Image set mirrors the iPhone-native
@@ -416,6 +451,15 @@ _IOS_THUMB_SEMAPHORE = asyncio.Semaphore(_IOS_THUMB_MAX_CONCURRENT)
 # 4 MB halves USB cost vs 8 MB; faststart moov-up-front files still resolve,
 # while moov-at-EOF prefixes keep 503 + Retry-After semantics (never grey).
 _VIDEO_PREFIX_BYTES = 4 * 1024 * 1024
+
+# Full-read fallback caps: Stage-2 full transfer reads reuse the transfer
+# path (get_device_manager().read_device_file) with a bounded wait so a
+# stalled USB read degrades to 503 + Retry-After instead of hanging the
+# request. Photos always fall back to a full read (no size skip); videos
+# fall back to a full read when the prefix yields no frame (moov-at-EOF)
+# up to _VIDEO_FULL_FALLBACK_MAX_BYTES, larger videos stay retryable 503.
+_VIDEO_FULL_FALLBACK_MAX_BYTES = 64 * 1024 * 1024
+_IOS_THUMB_FULL_READ_TIMEOUT_S = 60.0
 
 
 class _ListingCacheEntry:
@@ -2578,9 +2622,16 @@ async def ios_thumbnail(
         None, description="Client retry counter — ignored for cache keys so retries hit disk/RAM cache"
     ),
     cache: str | None = Query(None, description="Cache policy: 'only' returns 404 on miss without USB/decode IO"),
+    full: int | None = Query(
+        None, description="Force full-file transfer read: skips the fail-cache and Stage-1 partial prefix"
+    ),
     _token_auth: None = Depends(require_local_token_or_query),
 ):
     _ignored_retry = retry  # explicitly ignored: must not bust the disk/RAM cache keys below
+    # ?full=1 manual retry: bypass the persistent fail-cache and the 256 KB
+    # Stage-1 prefix probe, forcing the full transfer read path. RAM/disk
+    # thumbnail caches are still honored (cheap and always correct).
+    force_full = bool(full)
     if len(path) > 1024 or ".." in path.replace("\\", "/").split("/"):
         raise HTTPException(status_code=400, detail="Invalid device path")
     # Stat-failure rows (browse_device fallback) report size=0/mtime=0 —
@@ -2609,11 +2660,19 @@ async def ios_thumbnail(
             headers={"Cache-Control": "public, max-age=86400, immutable", "X-Thumb-Status": "hit"},
         )
 
-    if cache == "only":
+    if cache == "only" and not force_full:
         return Response(
             status_code=404,
             headers={"X-Thumb-Status": "miss"},
         )
+
+    # Hop-1 transfer cache: a previous transfer may have already staged this
+    # exact file locally — decode those bytes before spending USB reads.
+    hop1_bytes: bytes | None = None
+    try:
+        hop1_bytes = await asyncio.to_thread(_read_hop1_cache_bytes, device_id, path, file_size)
+    except Exception:
+        hop1_bytes = None
 
     ext = os.path.splitext(path)[1].lower()
     if ext in (".heic", ".heif"):
@@ -2623,8 +2682,11 @@ async def ios_thumbnail(
     fail_reason = "unknown"
 
     # Persistent negative cache: truly-undecodable files (24 h TTL,
-    # size+mtime keyed) skip Pillow/ffmpeg AND USB entirely.
-    if ext in PREVIEW_IMAGE_EXTENSIONS:
+    # size+mtime keyed) skip Pillow/ffmpeg AND USB entirely. Only
+    # "undecodable"/"no-pillow-heif" recorded AFTER a full decode fails are
+    # ever stored (partial-*/transient reasons are never persistent);
+    # ?full=1 bypasses the lookup so a manual retry always re-attempts.
+    if ext in PREVIEW_IMAGE_EXTENSIONS and not force_full:
         try:
             _fail_hit = _thumb_fail_get(device_id, path, file_size, file_mtime)
         except Exception:
@@ -2656,16 +2718,31 @@ async def ios_thumbnail(
             # ----------------------------------------------------------------
             PARTIAL_READ_BYTES = 256 * 1024  # 256 KB
 
+            # Hop-1 staged bytes decode first (no USB cost, full-file bytes).
+            if hop1_bytes and len(hop1_bytes) > 100:
+                jpeg_bytes = await _thumb_photo_bytes_worker(hop1_bytes, size, ext)
+                if jpeg_bytes and len(jpeg_bytes) > 10:
+                    logger.debug("iOS Hop1-cache thumbnail hit for %s (%d bytes)", path, len(hop1_bytes))
+                else:
+                    jpeg_bytes = None
+
             partial_bytes: bytes | None = None
             partial_exc: BaseException | None = None
-            try:
-                # Gated: listing/snapshot browses never take this semaphore,
-                # so thumbnail reads yield AFC slots to page-turn listings.
-                async with _IOS_THUMB_SEMAPHORE:
-                    partial_bytes = await _read_device_file_partial(device_id, path, max_bytes=PARTIAL_READ_BYTES)
-            except Exception as exc:
-                partial_exc = exc
-                logger.debug("iOS partial read raised for %s: %s", path, exc)
+            if jpeg_bytes and len(jpeg_bytes) > 10:
+                pass  # Hop-1 hit: skip USB entirely.
+            elif force_full:
+                # ?full=1 manual retry: skip the 256 KB prefix probe and go
+                # straight to the Stage-2 full transfer read below.
+                fail_reason = "full-retry"
+            else:
+                try:
+                    # Gated: listing/snapshot browses never take this semaphore,
+                    # so thumbnail reads yield AFC slots to page-turn listings.
+                    async with _IOS_THUMB_SEMAPHORE:
+                        partial_bytes = await _read_device_file_partial(device_id, path, max_bytes=PARTIAL_READ_BYTES)
+                except Exception as exc:
+                    partial_exc = exc
+                    logger.debug("iOS partial read raised for %s: %s", path, exc)
 
             if partial_bytes and len(partial_bytes) >= 4096:
                 # Out-of-process: EXIF-extract + Pillow decode run in the
@@ -2689,68 +2766,75 @@ async def ios_thumbnail(
                     )
                     jpeg_bytes = None
             else:
-                logger.debug(
-                    "iOS partial read unusable for %s (bytes=%s, heif_available=%s) — falling back to full read",
-                    path,
-                    len(partial_bytes) if partial_bytes else 0,
-                    _ensure_heif_opener(),
-                )
-                fail_reason = "partial-truncated"
+                # Hop-1 hit or ?full=1: no prefix probe ran — keep the reason
+                # set above (never a partial-* reason on those paths).
+                if partial_bytes is None and (force_full or (jpeg_bytes and len(jpeg_bytes) > 10)):
+                    pass
+                else:
+                    logger.debug(
+                        "iOS partial read unusable for %s (bytes=%s, heif_available=%s) — falling back to full read",
+                        path,
+                        len(partial_bytes) if partial_bytes else 0,
+                        _ensure_heif_opener(),
+                    )
+                    fail_reason = "partial-truncated"
                 if partial_exc is not None and _is_transient_thumb_error(partial_exc):
                     transient_exc = partial_exc
 
-            # Stage 2: full-read fallback before ever returning grey.
+            # Stage 2: full-read fallback before ever returning grey. No size
+            # skip: the transfer read is bounded by timeout below, and a
+            # stalled read degrades to 503 + Retry-After (never grey).
             if not jpeg_bytes or len(jpeg_bytes) <= 10:
                 jpeg_bytes = None
-                if file_size and file_size > 50 * 1024 * 1024:
-                    fail_reason = "file-too-large"
-                else:
-                    try:
-                        async with _IOS_THUMB_SEMAPHORE:
-                            file_bytes = await get_device_manager().read_device_file(device_id, path)
-                        if file_bytes and len(file_bytes) > 100:
-                            jpeg_bytes = await _thumb_photo_bytes_worker(file_bytes, size, ext)
-                            if jpeg_bytes and len(jpeg_bytes) > 10:
-                                logger.debug("iOS full-read thumbnail hit for %s (%d bytes)", path, len(file_bytes))
-                            else:
-                                logger.debug(
-                                    "iOS full-read decode failed for %s (%d bytes, ext=%s, "
-                                    "heif_available=%s) — truly undecodable",
-                                    path,
-                                    len(file_bytes),
-                                    ext,
-                                    _ensure_heif_opener(),
-                                )
-                                fail_reason = (
-                                    "no-pillow-heif"
-                                    if (ext in (".heic", ".heif") and not _ensure_heif_opener())
-                                    else "undecodable"
-                                )
+                try:
+                    async with _IOS_THUMB_SEMAPHORE:
+                        file_bytes = await asyncio.wait_for(
+                            get_device_manager().read_device_file(device_id, path),
+                            timeout=_IOS_THUMB_FULL_READ_TIMEOUT_S,
+                        )
+                    if file_bytes and len(file_bytes) > 100:
+                        jpeg_bytes = await _thumb_photo_bytes_worker(file_bytes, size, ext)
+                        if jpeg_bytes and len(jpeg_bytes) > 10:
+                            logger.debug("iOS full-read thumbnail hit for %s (%d bytes)", path, len(file_bytes))
                         else:
-                            logger.debug("iOS full read empty for %s — transient?", path)
-                            fail_reason = "full-read-empty"
-                    except FileNotFoundError as exc:
-                        logger.debug("iOS thumbnail not-found for %s: %s", path, exc)
+                            logger.debug(
+                                "iOS full-read decode failed for %s (%d bytes, ext=%s, "
+                                "heif_available=%s) — truly undecodable",
+                                path,
+                                len(file_bytes),
+                                ext,
+                                _ensure_heif_opener(),
+                            )
+                            fail_reason = (
+                                "no-pillow-heif"
+                                if (ext in (".heic", ".heif") and not _ensure_heif_opener())
+                                else "undecodable"
+                            )
+                    else:
+                        logger.debug("iOS full read empty for %s — transient?", path)
+                        fail_reason = "full-read-empty"
+                except FileNotFoundError as exc:
+                    logger.debug("iOS thumbnail not-found for %s: %s", path, exc)
+                    return Response(
+                        content=b"",
+                        media_type="image/jpeg",
+                        status_code=404,
+                        headers={"X-Thumb-Status": "not-found"},
+                    )
+                except Exception as exc:
+                    logger.debug("iOS full-read thumbnail error for %s: %s (%s)", path, exc, fail_reason)
+                    if _is_transient_thumb_error(exc) and not _is_lookup_failure(exc):
+                        transient_exc = exc
                         return Response(
                             content=b"",
                             media_type="image/jpeg",
-                            status_code=404,
-                            headers={"X-Thumb-Status": "not-found"},
+                            status_code=503,
+                            headers={
+                                "Retry-After": "2",
+                                "X-Thumb-Status": "transient-read-failed",
+                            },
                         )
-                    except Exception as exc:
-                        logger.debug("iOS full-read thumbnail error for %s: %s (%s)", path, exc, fail_reason)
-                        if _is_transient_thumb_error(exc) and not _is_lookup_failure(exc):
-                            transient_exc = exc
-                            return Response(
-                                content=b"",
-                                media_type="image/jpeg",
-                                status_code=503,
-                                headers={
-                                    "Retry-After": "2",
-                                    "X-Thumb-Status": "transient-read-failed",
-                                },
-                            )
-                        fail_reason = f"full-read-failed: {exc}"
+                    fail_reason = f"full-read-failed: {exc}"
 
         else:
             # Video fast path: read only the first 4 MB and extract one
@@ -2768,63 +2852,118 @@ async def ios_thumbnail(
             except Exception as exc:
                 logger.debug("ios-thumbnail AFC warmup skipped for %s: %s", device_id, exc)
             prefix_bytes: bytes | None = None
-            try:
-                async with _IOS_THUMB_SEMAPHORE:
-                    prefix_bytes = await _read_device_file_partial(device_id, path, max_bytes=_VIDEO_PREFIX_BYTES)
-            except Exception as exc:
-                logger.debug("iOS video prefix read raised for %s: %s", path, exc)
-                if _is_transient_thumb_error(exc):
-                    return Response(
-                        content=b"",
-                        media_type="image/jpeg",
-                        status_code=503,
-                        headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
-                    )
-            if prefix_bytes and len(prefix_bytes) > 4096:
+            hop1_decided = False  # True when Hop-1 staged bytes settled it.
+            if hop1_bytes and len(hop1_bytes) > 4096:
+                # Hop-1 staged bytes first (full file, no USB cost).
                 try:
-                    jpeg_bytes = await _thumb_frame_bytes_worker(prefix_bytes, size, ext or ".mp4")
+                    jpeg_bytes = await _thumb_frame_bytes_worker(hop1_bytes, size, ext or ".mp4")
                 except subprocess.TimeoutExpired as exc:
-                    logger.debug("iOS ffmpeg timeout for %s: %s", path, exc)
+                    logger.debug("iOS ffmpeg timeout (Hop-1) for %s: %s", path, exc)
                     return Response(
                         content=b"",
                         media_type="image/jpeg",
                         status_code=503,
                         headers={"Retry-After": "2", "X-Thumb-Status": "ffmpeg-timeout"},
                     )
-                if not jpeg_bytes or len(jpeg_bytes) <= 100:
-                    logger.debug(
-                        "iOS video prefix has no decodable frame for %s (%d bytes) — "
-                        "likely moov-at-EOF/truncated prefix",
-                        path,
-                        len(prefix_bytes),
-                    )
+                if jpeg_bytes and len(jpeg_bytes) > 100:
+                    logger.debug("iOS Hop1-cache video thumbnail hit for %s", path)
+                    fail_reason = "ok"
+                else:
+                    # Size-guarded Hop-1 bytes ARE the current full file, so a
+                    # decode failure here means truly undecodable: skip USB.
                     jpeg_bytes = None
-                    fail_reason = "prefix-no-frame"
-            else:
-                logger.debug(
-                    "iOS video prefix read unusable for %s (bytes=%s)",
-                    path,
-                    len(prefix_bytes) if prefix_bytes else 0,
-                )
-                fail_reason = "prefix-read-failed"
+                    fail_reason = "undecodable"
+                hop1_decided = True
+            if not hop1_decided:
+                if force_full:
+                    # ?full=1 manual retry: skip the 4 MB prefix probe and go
+                    # straight to the Stage-2 full transfer read below.
+                    fail_reason = "full-retry"
+                else:
+                    try:
+                        async with _IOS_THUMB_SEMAPHORE:
+                            prefix_bytes = await _read_device_file_partial(device_id, path, max_bytes=_VIDEO_PREFIX_BYTES)
+                    except Exception as exc:
+                        logger.debug("iOS video prefix read raised for %s: %s", path, exc)
+                        if _is_transient_thumb_error(exc):
+                            return Response(
+                                content=b"",
+                                media_type="image/jpeg",
+                                status_code=503,
+                                headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
+                            )
+                if prefix_bytes and len(prefix_bytes) > 4096:
+                    try:
+                        jpeg_bytes = await _thumb_frame_bytes_worker(prefix_bytes, size, ext or ".mp4")
+                    except subprocess.TimeoutExpired as exc:
+                        logger.debug("iOS ffmpeg timeout for %s: %s", path, exc)
+                        return Response(
+                            content=b"",
+                            media_type="image/jpeg",
+                            status_code=503,
+                            headers={"Retry-After": "2", "X-Thumb-Status": "ffmpeg-timeout"},
+                        )
+                    if not jpeg_bytes or len(jpeg_bytes) <= 100:
+                        logger.debug(
+                            "iOS video prefix has no decodable frame for %s (%d bytes) — "
+                            "likely moov-at-EOF/truncated prefix",
+                            path,
+                            len(prefix_bytes),
+                        )
+                        jpeg_bytes = None
+                        fail_reason = "prefix-no-frame"
+                elif not force_full:
+                    logger.debug(
+                        "iOS video prefix read unusable for %s (bytes=%s)",
+                        path,
+                        len(prefix_bytes) if prefix_bytes else 0,
+                    )
+                    fail_reason = "prefix-read-failed"
 
-            # Stage 2 for video: If prefix extraction yields no frame (e.g. MOOV at EOF in Live Photos or
-            # non-faststart videos) and file size is <= 16 MB, perform full read fallback.
-            if not jpeg_bytes and file_size and file_size <= 16 * 1024 * 1024:
+            # Stage 2 for video: a prefix with no decodable frame (e.g. MOOV
+            # at EOF) is NOT undecodable — fall back to the full transfer
+            # read up to _VIDEO_FULL_FALLBACK_MAX_BYTES, bounded by timeout
+            # (a stalled read degrades to 503, never grey). Beyond the cap
+            # the retryable 503 below stands.
+            if (
+                not hop1_decided
+                and not jpeg_bytes
+                and (file_size is None or file_size <= _VIDEO_FULL_FALLBACK_MAX_BYTES)
+            ):
                 try:
                     logger.debug(
-                        "iOS video prefix had no frame for %s (%d bytes) — attempting full read fallback",
+                        "iOS video prefix had no frame for %s (%s bytes) — attempting full read fallback",
                         path,
                         file_size,
                     )
                     async with _IOS_THUMB_SEMAPHORE:
-                        full_video_bytes = await get_device_manager().read_device_file(device_id, path)
+                        full_video_bytes = await asyncio.wait_for(
+                            get_device_manager().read_device_file(device_id, path),
+                            timeout=_IOS_THUMB_FULL_READ_TIMEOUT_S,
+                        )
                     if full_video_bytes and len(full_video_bytes) > 4096:
                         jpeg_bytes = await _thumb_frame_bytes_worker(full_video_bytes, size, ext or ".mp4")
                         if jpeg_bytes and len(jpeg_bytes) > 10:
                             fail_reason = "ok"
+                        else:
+                            fail_reason = "prefix-no-frame"
+                except (TimeoutError, subprocess.TimeoutExpired) as v_err:
+                    logger.debug("iOS full video read timed out for %s: %s", path, v_err)
+                    return Response(
+                        content=b"",
+                        media_type="image/jpeg",
+                        status_code=503,
+                        headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
+                    )
                 except Exception as v_err:
                     logger.debug("iOS full video read thumbnail attempt failed for %s: %s", path, v_err)
+                    if _is_transient_thumb_error(v_err):
+                        return Response(
+                            content=b"",
+                            media_type="image/jpeg",
+                            status_code=503,
+                            headers={"Retry-After": "2", "X-Thumb-Status": "transient-read-failed"},
+                        )
 
     except HTTPException:
         raise
@@ -2875,13 +3014,23 @@ async def ios_thumbnail(
         )
     # Truly undecodable (full bytes present but Pillow/ffmpeg cannot decode,
     # unsupported type, or no-heif-codec): grey 200 with a reason header so
-    # the frontend can distinguish fallback from a real thumbnail.
+    # the frontend can distinguish fallback from a real thumbnail. Only
+    # "undecodable"/"no-pillow-heif" recorded AFTER a full decode fails are
+    # persisted — partial-*/transient reasons never reach this cache (they
+    # are not members of _PERSISTENT_FAIL_REASONS, and _thumb_fail_put
+    # drops non-members defensively). When pillow-heif is missing the
+    # failure is environmental, not per-file: never persist it, so a later
+    # request after codec install retries the decode instead of serving
+    # the negative cache.
     logger.debug("iOS thumbnail grey fallback for %s: reason=%s", path, fail_reason)
     if ext in PREVIEW_IMAGE_EXTENSIONS and fail_reason in _PERSISTENT_FAIL_REASONS:
-        try:
-            _thumb_fail_put(device_id, path, file_size, file_mtime, fail_reason)
-        except Exception:
+        if ext in (".heic", ".heif") and not _ensure_heif_opener():
             pass
+        else:
+            try:
+                _thumb_fail_put(device_id, path, file_size, file_mtime, fail_reason)
+            except Exception:
+                pass
     grey = _generate_gray_fallback()
     return Response(
         content=grey,

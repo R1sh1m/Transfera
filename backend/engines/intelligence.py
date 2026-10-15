@@ -53,6 +53,11 @@ _FACE_READ_TIMEOUT = 600
 _FACE_DOWNLOAD_CHUNK = 1024 * 256
 _FACE_MAX_RETRIES = 3
 
+# Single canonical cosine-similarity cut for greedy face clustering.
+# Engine default, API _cluster default, and backfill default must all
+# reference this — never hard-code 0.50/0.55 at call sites.
+FACE_CLUSTER_THRESHOLD = 0.55
+
 # Background face-download state — same shape as clip._download_state
 # ({status, downloaded_bytes, error} + ready/missing/total_bytes in the
 # status snapshot) so callers can treat both uniformly. Separate object;
@@ -485,7 +490,7 @@ def extract_faces(file_path: str | Path) -> list[dict]:
         return []
 
 
-def cluster_faces_greedy(face_items: list[dict], threshold: float = 0.55) -> list[list[int]]:
+def cluster_faces_greedy(face_items: list[dict], threshold: float = FACE_CLUSTER_THRESHOLD) -> list[list[int]]:
     """Greedy cosine clustering of face embeddings.
 
     Takes a list of face dicts/tuples containing 'id' and 'embedding'.

@@ -113,6 +113,55 @@ def test_capabilities_no_models(test_client):
     assert "phash_available" in body
 
 
+def test_structured_from_tags_iphone_make_model():
+    """iPhone EXIF (Make=Apple, Model=iPhone XX) must parse to camera fields."""
+    from backend.engines.intelligence import structured_from_tags
+
+    tags = {"Make": "Apple", "Model": "iPhone 15 Pro", "ImageWidth": "4032", "ImageHeight": "3024"}
+    s = structured_from_tags(tags)
+    assert s["camera_make"] == "Apple"
+    assert s["camera_model"] == "iPhone 15 Pro"
+    assert s["width"] == 4032 and s["height"] == 3024
+
+
+def test_face_cluster_threshold_unified():
+    """Single canonical threshold (0.55) across engine, _cluster, backfill defaults."""
+    import inspect
+
+    from backend.api import intelligence_routes as routes
+    from backend.engines import intelligence as eng
+
+    assert eng.FACE_CLUSTER_THRESHOLD == 0.55
+    assert inspect.signature(eng.cluster_faces_greedy).parameters["threshold"].default == 0.55
+    assert inspect.signature(routes._cluster_and_sync_people).parameters["threshold"].default == 0.55
+    _bf_default = inspect.signature(routes.backfill_intelligence).parameters["threshold"].default
+    _bf_val = getattr(_bf_default, "default", _bf_default)
+    assert _bf_val == 0.55
+    # Near-identical embeddings cluster together; orthogonal ones split.
+    # (skipped when numpy is absent — cluster_faces_greedy needs it.)
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        import pytest
+
+        pytest.skip("numpy not installed; cannot exercise cluster_faces_greedy")
+    dim = 8
+    same = [1.0] * dim
+    same2 = [1.0] * dim
+    ortho_a = [1.0 if i == 0 else 0.0 for i in range(dim)]
+    ortho_b = [1.0 if i == 1 else 0.0 for i in range(dim)]
+    clusters = eng.cluster_faces_greedy(
+        [
+            {"id": 1, "embedding": same},
+            {"id": 2, "embedding": same2},
+            {"id": 3, "embedding": ortho_a},
+            {"id": 4, "embedding": ortho_b},
+        ]
+    )
+    assert any(set(c) == {1, 2} for c in clusters)
+    assert len(clusters) >= 2
+
+
 def test_manifest_chain_deterministic():
     from backend.api.intelligence_routes import _manifest_chain
     from backend.api.schemas import ManifestItemSchema

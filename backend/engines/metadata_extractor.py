@@ -217,6 +217,8 @@ def _bootstrap_exiftool() -> str | None:
     """
     global _resolved_exiftool, _bootstrap_done
     if _bootstrap_done:
+        if _resolved_exiftool:
+            logger.debug("ExifTool resolved path (cached): %s", _resolved_exiftool)
         return _resolved_exiftool
     _bootstrap_done = True
 

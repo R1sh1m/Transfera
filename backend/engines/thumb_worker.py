@@ -114,6 +114,11 @@ def _decode_photo_bytes(data: bytes, size: int, suffix: str = ".heic") -> bytes 
 
     if not data or len(data) <= 100:
         return None
+    # HEIC/HEIF needs the pillow-heif opener registered BEFORE any Pillow
+    # decode below (both the embedded-preview open and the full decode);
+    # without it an HEIC open raises and the file would look undecodable.
+    if (suffix or "").lower() in (".heic", ".heif"):
+        _ensure_pillow_heif()
     # Fast path: embedded EXIF preview via the persistent ExifTool session.
     # Runs in the child already, so a spawn-heavy fallback here is contained.
     try:

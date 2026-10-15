@@ -143,6 +143,13 @@ function isGreyFallbackResponse(res: Response): boolean {
   return v.startsWith("fallback") || GREY_FALLBACK_STATUSES.has(v);
 }
 
+// Manual-retry param: ?full=1 forces the backend past the persistent
+// fail-cache and the Stage-1 partial/prefix probe straight to the full
+// transfer read (reuses transfer logic). Cleared implicitly per attempt.
+function appendFullParam(url: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}full=1`;
+}
+
 // Fast-lane probe param: backends that honor `cache=only` answer L2 hits
 // instantly (X-Thumb-Status: hit) and misses without touching USB;
 // backends that ignore it return the full image, which the fast path
@@ -182,6 +189,7 @@ export function getPreviewThumbnailUrl(
   size = 200,
   fileSize?: number | null,
   fileMtime?: number | null,
+  full = false,
 ): string {
   // <img> tags can't send the X-Local-Token header, so the token rides
   // along as ?token= (accepted by the thumbnail endpoints only).
@@ -206,6 +214,7 @@ export function getPreviewThumbnailUrl(
       size: String(size),
       ...validation,
       ...(token ? { token } : {}),
+      ...(full ? { full: "1" } : {}),
     });
     return `${API_BASE_URL}/api/device/ios-thumbnail?${p}`;
   }
@@ -263,6 +272,10 @@ function MediaThumbCell({
   const slotEpochRef = useRef<number | null>(null);
   const observedRef = useRef(false);
   const mountedRef = useRef(true);
+  // Manual-retry flag: the next gated fetch appends ?full=1 so the backend
+  // skips its fail-cache + Stage-1 probe and forces the full transfer read.
+  // Set by the Retry button, cleared on a confirmed load.
+  const forceFullRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -324,6 +337,7 @@ function MediaThumbCell({
     retryCountRef.current = 0;
     observedRef.current = false;
     slotEpochRef.current = null;
+    forceFullRef.current = false;
     if (retryCount !== 0) setRetryCount(0);
     if (imgSrc !== null) setImgSrc(null);
     if (loadState !== "none") setLoadState("none");
@@ -345,7 +359,12 @@ function MediaThumbCell({
     const epochAtStart = fastQueue.getEpoch();
     const controller = new AbortController();
     fetchAbortRef.current = controller;
-    const url = makeThumbnailUrl(item);
+    // Manual retry (?full=1) bypasses the backend fail-cache and forces the
+    // full transfer read; grey-fallback 200s stay errors (retry affordance)
+    // and 503/Retry-After backoff below is unchanged.
+    const url = forceFullRef.current
+      ? appendFullParam(makeThumbnailUrl(item))
+      : makeThumbnailUrl(item);
     // Server-driven backoff: a 503 carries Retry-After (seconds); capture
     // it before throwing so the catch below can honor it instead of the
     // static USB-relief delays.
@@ -455,7 +474,11 @@ function MediaThumbCell({
     const epochAtStart = fastQueue.getEpoch();
     const controller = new AbortController();
     fetchAbortRef.current = controller;
-    const url = appendCacheOnlyParam(makeThumbnailUrl(item));
+    // Manual retry re-enters through the fast lane but with ?full=1 (no
+    // cache=only probe — the backend forces the full transfer read).
+    const url = forceFullRef.current
+      ? appendFullParam(makeThumbnailUrl(item))
+      : appendCacheOnlyParam(makeThumbnailUrl(item));
 
     fetch(url, { signal: controller.signal })
       .then((res) => {
@@ -604,6 +627,7 @@ function MediaThumbCell({
 
   const handleLoad = () => {
     releaseSlot();
+    forceFullRef.current = false;
     setLoadState("loaded");
   };
 
@@ -632,13 +656,19 @@ function MediaThumbCell({
 
   const handleManualRetry = (e: React.MouseEvent) => {
     e.stopPropagation();
+    // Manual retry: drop the frontend negative caches (single tile + the
+    // module all-fail cache) and force the backend full transfer read via
+    // ?full=1, re-entering through the fast lane. Grey-fallback 200s keep
+    // rendering the retry affordance; 503/Retry-After backoff is unchanged.
     clearThumbFailed(item.abs_path);
+    clearAllThumbFailed();
     cleanupPending();
     revokeBlob();
     releaseSlot();
     retryCountRef.current = 0;
     setRetryCount(0);
     setImgSrc(null);
+    forceFullRef.current = true;
     // Manual retry re-enters through the fast lane (cheap cache-only probe
     // first, slow extract on miss).
     beginGatedFetch();
@@ -2067,8 +2097,12 @@ function SourcePreviewPanelInner({
                 className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1"
               >
                 {allVisibleSelected
-                  ? (metadata.total > visibleItems.length ? "Deselect page" : "Deselect all")
-                  : (metadata.total > visibleItems.length ? `Select page (${visibleItems.length})` : `Select all (${visibleItems.length})`)}
+                  ? metadata.total > visibleItems.length
+                    ? "Deselect page"
+                    : "Deselect all"
+                  : metadata.total > visibleItems.length
+                    ? `Select page (${visibleItems.length})`
+                    : `Select all (${visibleItems.length})`}
               </button>
               {metadata.total > visibleItems.length && (
                 <button
@@ -2082,7 +2116,9 @@ function SourcePreviewPanelInner({
                   }
                   className="text-xs font-normal text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 inline-flex items-center gap-1"
                 >
-                  {isSelectingAll && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {isSelectingAll && (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  )}
                   {isGloballySelected
                     ? "Deselect all"
                     : `Select all (${metadata.total})`}

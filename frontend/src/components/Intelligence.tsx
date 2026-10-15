@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useIsMutating } from "@tanstack/react-query";
 import {
   CalendarDays,
   Sparkles,
@@ -151,6 +151,10 @@ export function FaceThumb({
 export function CapabilitiesBadge() {
   const { data } = useCapabilities();
   const backfill = useBackfill();
+  // Global in-flight state (shared mutationKey ["backfill"]): disables this
+  // button together with PeoplePanel's while indexing runs anywhere.
+  const backfillMutations = useIsMutating({ mutationKey: ["backfill"] });
+  const isIndexing = backfillMutations > 0 || backfill.isPending;
   const downloadModels = useDownloadModels();
   const backendReady = useBackendReady();
   const { data: modelStatus } = useModelStatus(false);
@@ -285,7 +289,7 @@ export function CapabilitiesBadge() {
             },
           });
         }}
-        disabled={backfill.isPending || !backendReady}
+        disabled={isIndexing || !backendReady}
         className="px-3 py-1 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40"
         title={
           backendReady
@@ -293,7 +297,7 @@ export function CapabilitiesBadge() {
             : ENGINE_WAITING_LABEL
         }
       >
-        {backfill.isPending ? "Indexing…" : "Index library"}
+        {isIndexing ? "Indexing…" : "Index library"}
       </button>
       {backfillProgress && (
         <span className="px-2 py-0.5 rounded-pill border border-border text-xs text-muted-foreground bg-muted/50">
@@ -565,6 +569,10 @@ export function PeoplePanel({
   const { data, isLoading } = usePeople();
   const rename = useRenamePerson();
   const backfill = useBackfill();
+  // Same shared indexing state as CapabilitiesBadge — both buttons disable
+  // together while a backfill runs from either surface.
+  const backfillMutations = useIsMutating({ mutationKey: ["backfill"] });
+  const isIndexing = backfillMutations > 0 || backfill.isPending;
   const downloadModels = useDownloadModels();
   const backendReady = useBackendReady();
   const { data: modelStatus } = useModelStatus(downloadModels.isPending);
@@ -709,7 +717,7 @@ export function PeoplePanel({
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           <button
             onClick={() => backfill.mutate()}
-            disabled={backfill.isPending || !backendReady}
+            disabled={isIndexing || !backendReady}
             className="px-3 py-1.5 rounded-pill bg-action text-white text-xs hover:bg-action/90 active:scale-[0.95] disabled:opacity-40"
             title={
               backendReady
@@ -717,7 +725,7 @@ export function PeoplePanel({
                 : ENGINE_WAITING_LABEL
             }
           >
-            {backfill.isPending ? "Indexing…" : "Index library"}
+            {isIndexing ? "Indexing…" : "Index library"}
           </button>
           {!modelsReady && !modelsBusy && (
             <button
@@ -984,9 +992,7 @@ export function PersonDetail({
           <div className="text-xs text-muted-foreground">
             {facesQuery.isLoading
               ? "Loading photos…"
-              : mediaCards.length === 1
-                ? "1 photo"
-                : `${mediaCards.length} photos`}
+              : `${faces.length} ${faces.length === 1 ? "face" : "faces"} across ${mediaCards.length} ${mediaCards.length === 1 ? "photo" : "photos"}`}
           </div>
         </div>
         <button

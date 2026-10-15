@@ -299,6 +299,12 @@ export const TOAST_AUTO_DISMISS_MS: Record<NotificationItem["type"], number> = {
 };
 let _notifSeq = 0;
 
+// Toast dedup: skip re-firing the same type+message within a short window.
+// Create→auto-start and StrictMode double-effects otherwise stack identical
+// toasts. Terminal toasts are unaffected (distinct messages each fire).
+const _recentToastAt = new Map<string, number>();
+const TOAST_DEDUP_WINDOW_MS = 5_000;
+
 function nextNotifId(): string {
   _notifSeq += 1;
   return `${Date.now().toString(36)}-${_notifSeq.toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -306,6 +312,7 @@ function nextNotifId(): string {
 
 function pushNotification(
   existing: NotificationItem[],
+  current: UIState["notification"],
   type: NotificationItem["type"],
   message: string,
   actions?: NotificationAction[],
@@ -313,6 +320,18 @@ function pushNotification(
   notifications: NotificationItem[];
   notification: UIState["notification"];
 } {
+  const key = `${type}:${message}`;
+  const now = Date.now();
+  const last = _recentToastAt.get(key);
+  if (last !== undefined && now - last < TOAST_DEDUP_WINDOW_MS) {
+    // Duplicate within the window — keep existing stack untouched.
+    return { notifications: existing, notification: current };
+  }
+  _recentToastAt.set(key, now);
+  // Prune stale entries so the map can't grow without bound.
+  for (const [k, t] of _recentToastAt) {
+    if (now - t >= TOAST_DEDUP_WINDOW_MS) _recentToastAt.delete(k);
+  }
   const item: NotificationItem = {
     id: nextNotifId(),
     type,
@@ -593,6 +612,7 @@ function handleWsEventReducer(
       if (isError) {
         const queued = pushNotification(
           state.ui.notifications,
+          state.ui.notification,
           "warning",
           `${imported} transferred, ${failed} failed. See library for details.`,
         );
@@ -604,6 +624,7 @@ function handleWsEventReducer(
       } else {
         const queued = pushNotification(
           state.ui.notifications,
+          state.ui.notification,
           "success",
           `${imported} file${imported !== 1 ? "s" : ""} transferred successfully.`,
         );
@@ -620,6 +641,7 @@ function handleWsEventReducer(
     case "error": {
       const queued = pushNotification(
         state.ui.notifications,
+        state.ui.notification,
         "error",
         (d.message as string) ?? "Unknown error",
       );
@@ -830,7 +852,13 @@ export const useTransferStore = create<TransferStore>()(
         set((s) => ({
           ui: {
             ...s.ui,
-            ...pushNotification(s.ui.notifications, type, message, actions),
+            ...pushNotification(
+              s.ui.notifications,
+              s.ui.notification,
+              type,
+              message,
+              actions,
+            ),
           },
         })),
 

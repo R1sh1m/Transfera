@@ -50,6 +50,10 @@ import { isDesktop, openPath, setTrayProgress } from "@/lib/desktop";
 import { getLocalToken, API_BASE_URL } from "@/lib/api-client";
 import { VerifiedCheckBadge } from "@/components/VerifiedCheckBadge";
 import type { SessionProgress, RecentItemProgress } from "@/types/api";
+import {
+  keepAwakeNotifiedSerials,
+  canonicalSerialFromSourceRoot,
+} from "@/lib/keep-awake";
 
 // Keep track of session IDs that have already been started to prevent double-triggering
 // on component mount/remount in React Strict Mode.
@@ -68,9 +72,9 @@ const STATUS_LABELS: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-// Once-per-app-launch throttle for the keep-awake popup. Module scope =
-// survives remounts/revisits, resets on app close/reload (fresh runtime).
-const keepAwakeNotifiedSerials = new Set<string>();
+// NOTE: the keep-awake popup throttle lives in @/lib/keep-awake (shared with
+// DeviceSetupPage) — do NOT add a page-local Set here or the popup fires
+// twice (once per page).
 function fileIcon(name: string) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (
@@ -1550,18 +1554,13 @@ export default function TransferPage() {
   const isIOSDevice = transfer.sourceRoot?.startsWith("ios://") ?? false;
   const showKeepAwake = isIOSDevice && (isRunning || isPaused);
 
-  // Canonical device serial from an ios://<serial>/… source root (mirrors
-  // backend canonical_device_serial: embedded 40-hex UDID wins, else
-  // lowercased raw id). Used for the once-per-app-launch popup throttle.
-  const iosSerial = useMemo(() => {
-    if (!transfer.sourceRoot?.startsWith("ios://")) return null;
-    const raw = transfer.sourceRoot.slice("ios://".length);
-    const slashIdx = raw.indexOf("/");
-    const devId = (slashIdx === -1 ? raw : raw.slice(0, slashIdx)).trim();
-    if (!devId) return null;
-    const m = devId.match(/[0-9a-fA-F]{40}/);
-    return (m?.[0] ?? devId).toLowerCase();
-  }, [transfer.sourceRoot]);
+  // Canonical device serial from the ios://<serial>/… source root (shared
+  // helper mirrors backend canonical_device_serial). Used for the
+  // once-per-app-launch popup throttle.
+  const iosSerial = useMemo(
+    () => canonicalSerialFromSourceRoot(transfer.sourceRoot),
+    [transfer.sourceRoot],
+  );
 
   const keepAwakeNotifiedRef = useRef<string | null>(null);
   useEffect(() => {

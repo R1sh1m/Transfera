@@ -37,6 +37,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { getDeviceMeta } from "@/lib/device-utils";
+import { canonicalSerial, keepAwakeNotifiedSerials } from "@/lib/keep-awake";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   useConfig,
@@ -503,22 +504,9 @@ function formatDate(dateStr: string): string {
   }
 }
 
-// Stable device identity across Tier 1 / WPD serial formats. Mirrors
-// backend canonical_device_serial: a WPD PnP id often embeds the 40-hex
-// UDID — extracting it keeps import-state lookups and tier matching stable
-// when the serving tier flaps. (Backend canonicalizes too; this keeps the
-// query key stable on the client.)
-function canonicalSerial(serial: string | null | undefined): string | null {
-  if (!serial) return null;
-  const m = serial.match(/[0-9a-fA-F]{40}/);
-  if (m?.[0]) return m[0].toLowerCase();
-  return serial;
-}
-
-// Keep-awake popup throttle: once per app launch per device. Module-level
-// Set survives remounts/page revisits within the same JS runtime and resets
-// automatically when the app is closed/reloaded (fresh runtime = empty Set).
-const keepAwakeNotifiedSerials = new Set<string>();
+// NOTE: canonicalSerial + the keep-awake popup throttle live in
+// @/lib/keep-awake (shared with TransferPage) — do NOT redeclare them here
+// or the popup fires twice (once per page).
 
 // ---------------------------------------------------------------------------
 // SourcePicker — Two distinct entry points
@@ -2711,7 +2699,7 @@ export default function DeviceSetupPage() {
   const [batchSize, setBatchSize] = useState(100);
 
   const { data: config, isLoading: configLoading } = useConfig();
-  const createSession = useCreateSession();
+  const createSession = useCreateSession({ silent: true });
   // Centralized engine-readiness flag — the Start action gates on this while
   // navigation and cached previews stay interactive.
   const backendReady = useBackendReady();

@@ -47,6 +47,7 @@ from backend.api.schemas import (
 )
 from backend.database.manager import session_scope
 from backend.database.models import Face, MediaItem, Person, TransferSession
+from backend.engines.intelligence import FACE_CLUSTER_THRESHOLD
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intelligence", tags=["intelligence"])
@@ -593,17 +594,21 @@ async def semantic_search(
     )
 
 
-async def _cluster_and_sync_people(session, threshold: float = 0.50) -> int:
+async def _cluster_and_sync_people(session, threshold: float = FACE_CLUSTER_THRESHOLD) -> int:
     """Cluster faces into Person rows.
 
     ``threshold`` is the cosine-similarity cut for greedy clustering
-    (default 0.50, lowered from 0.55 for more inclusive ArcFace grouping);
-    the backfill endpoint exposes it as a query param. Cover selection is
-    threshold-independent (highest confidence on distinct media) and
-    unchanged.
+    (single canonical default FACE_CLUSTER_THRESHOLD = 0.55; the
+    backfill endpoint exposes it as a query param defaulting to the
+    same constant). Cover selection is threshold-independent (highest
+    confidence on distinct media) and unchanged.
     """
     from backend.database.models import Face, Person
+    from backend.engines.intelligence import FACE_CLUSTER_THRESHOLD as _DEFAULT_THRESHOLD
     from backend.engines.intelligence import cluster_faces_greedy
+
+    if threshold is None:
+        threshold = _DEFAULT_THRESHOLD
 
     res = await session.execute(select(Face).where(Face.embedding_json.isnot(None)))
     faces = list(res.scalars().all())
@@ -626,7 +631,7 @@ async def _cluster_and_sync_people(session, threshold: float = 0.50) -> int:
         logger.debug("Face clustering: no valid face embeddings after parsing")
         return 0
 
-    # Default 0.50 (lowered from 0.55) for more inclusive clustering with ArcFace embeddings
+    # Default 0.55 (canonical FACE_CLUSTER_THRESHOLD) for ArcFace embeddings
     clusters = cluster_faces_greedy(face_payload, threshold=threshold)
     logger.info(
         "Face clustering: formed %d clusters from %d faces (threshold=%.2f)",
@@ -707,7 +712,16 @@ async def _cluster_and_sync_people(session, threshold: float = 0.50) -> int:
         for f in cl_faces:
             f.person_id = person.id
 
-        person.face_count = len(cl_faces)
+        # Reconcile: face_count is always the live COUNT(Face) for this
+        # person, never a stale increment — keeps uniform counts even
+        # when faces move between clusters across backfills.
+        try:
+            _cnt = await session.execute(
+                select(func.count(Face.id)).where(Face.person_id == person.id)
+            )
+            person.face_count = int(_cnt.scalar() or 0)
+        except Exception:
+            person.face_count = len(cl_faces)
         if person.cover_face_id is None and ranked:
             fallback = next(
                 (f for f in ranked if f.media_id not in cover_owner or cover_owner.get(f.media_id) == person.id),
@@ -718,13 +732,29 @@ async def _cluster_and_sync_people(session, threshold: float = 0.50) -> int:
                 cover_owner[fallback.media_id] = person.id
         person.updated_at = datetime.now(UTC)
 
+    # Delete orphan Person rows with zero faces (live COUNT check) so
+    # stale/empty people never linger after re-clustering.
+    try:
+        _all_persons = list((await session.execute(select(Person))).scalars().all())
+        for _p in _all_persons:
+            try:
+                _c = await session.execute(select(func.count(Face.id)).where(Face.person_id == _p.id))
+                _n = int(_c.scalar() or 0)
+                _p.face_count = _n
+                if _n == 0:
+                    await session.delete(_p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return len(clusters)
 
 
 @router.post("/backfill", response_model=BackfillResponse)
 async def backfill_intelligence(
     limit: int = Query(2000, ge=1, le=10000),
-    threshold: float = Query(0.50, ge=0.0, le=1.0),
+    threshold: float = Query(FACE_CLUSTER_THRESHOLD, ge=0.0, le=1.0),
     _: None = Depends(require_local_token),
 ) -> BackfillResponse:
     """Fill missing phash / dimensions / tags / embeddings / faces for completed items.
@@ -733,7 +763,10 @@ async def backfill_intelligence(
     only touches rows with NULL fields. Pure-Pillow and on-board ONNX.
 
     ``threshold`` is the face-clustering cosine-similarity cut passed to
-    :func:`_cluster_and_sync_people` (default 0.50; omit for prior behavior).
+    :func:`_cluster_and_sync_people` (default FACE_CLUSTER_THRESHOLD).
+    Paging is deterministic: completed items are scanned ``ORDER BY id``
+    with ``LIMIT``; call repeatedly with larger offsets (re-run fills the
+    next NULL-field window) until ``scanned < limit``.
     """
     import asyncio
     import io
@@ -776,8 +809,19 @@ async def backfill_intelligence(
 
     scanned = phash_filled = dims_filled = tags_filled = embeddings_filled = faces_filled = 0
     async with session_scope() as session:
-        result = await session.execute(select(MediaItem).where(MediaItem.final_status == "completed").limit(limit))
+        # Deterministic paging: ORDER BY id + LIMIT so repeated calls
+        # walk the vault oldest-first; re-run until scanned < limit.
+        result = await session.execute(
+            select(MediaItem).where(MediaItem.final_status == "completed").order_by(MediaItem.id).limit(limit)
+        )
         items = list(result.scalars().all())
+        logger.info(
+            "Backfill: scanned=%d (limit=%d) faces_ready=%s threshold=%.2f",
+            len(items),
+            limit,
+            faces_ready,
+            threshold,
+        )
         sessions: dict[int, TransferSession | None] = {}
 
         async def _resolve_path(mi: MediaItem) -> Path | None:

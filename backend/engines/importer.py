@@ -217,12 +217,17 @@ async def _import_single_item(
     # results from the cache file are valid for files that have EXIF.
     # Skip entirely when the scanner already resolved a date (audit item 3:
     # one ExifTool round-trip per file max, never a redundant re-extract).
-    if ext in {".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4", ".m4v", ".3gp"} and item.date_taken is None:
+    # Camera/dims/gps/duration persist via the if-None pattern (same as
+    # date): only fill NULL columns, never overwrite scanner values.
+    hop2_meta = None
+    _needs_hop2_meta = item.date_taken is None or item.camera_make is None or item.camera_model is None or item.width is None
+    if ext in {".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4", ".m4v", ".3gp"} and _needs_hop2_meta:
         try:
             from backend.engines.metadata_extractor import extract_metadata_batch
 
             meta_results = extract_metadata_batch([cache_file])
             meta = meta_results.get(str(cache_file.resolve()))
+            hop2_meta = meta
             if meta and meta.date_taken:
                 capture_dt = meta.date_taken
             elif meta and meta.date_created:
@@ -267,6 +272,7 @@ async def _import_single_item(
 
     # 2b. For iOS sources with no prior date_taken, update the item's date_taken NOW
     #     so compute_archive_path uses the real EXIF capture date for folder placement.
+    #     Camera/dims/gps/duration ride along via the same if-None pattern.
     if capture_dt is not None and item.date_taken is None:
         from backend.engines.date_resolver import is_date_sane
 
@@ -276,8 +282,34 @@ async def _import_single_item(
                 if db_item is not None and db_item.date_taken is None:
                     db_item.date_taken = capture_dt
                     db_item.date_source = "exif"
+                    if hop2_meta is not None:
+                        if db_item.camera_make is None and hop2_meta.camera_make:
+                            db_item.camera_make = hop2_meta.camera_make
+                        if db_item.camera_model is None and hop2_meta.camera_model:
+                            db_item.camera_model = hop2_meta.camera_model
+                        if db_item.width is None and hop2_meta.width is not None:
+                            db_item.width = hop2_meta.width
+                            db_item.height = hop2_meta.height
+                        if db_item.gps_lat is None and hop2_meta.gps_lat is not None:
+                            db_item.gps_lat = hop2_meta.gps_lat
+                            db_item.gps_lon = hop2_meta.gps_lon
+                        if db_item.duration_s is None and hop2_meta.duration_s is not None:
+                            db_item.duration_s = hop2_meta.duration_s
                     db_item.touch()
             item.date_taken = capture_dt
+            if hop2_meta is not None:
+                if item.camera_make is None and hop2_meta.camera_make:
+                    item.camera_make = hop2_meta.camera_make
+                if item.camera_model is None and hop2_meta.camera_model:
+                    item.camera_model = hop2_meta.camera_model
+                if item.width is None and hop2_meta.width is not None:
+                    item.width = hop2_meta.width
+                    item.height = hop2_meta.height
+                if getattr(item, "gps_lat", None) is None and hop2_meta.gps_lat is not None:
+                    item.gps_lat = hop2_meta.gps_lat
+                    item.gps_lon = hop2_meta.gps_lon
+                if getattr(item, "duration_s", None) is None and hop2_meta.duration_s is not None:
+                    item.duration_s = hop2_meta.duration_s
     # Check destination disk space before copying (memoized per drive+size).
 
     is_ok, free_b, req_b = _check_dest_free_memoized(dest_root, item.file_size or 0)
@@ -294,7 +326,7 @@ async def _import_single_item(
     existing = locate_archive_file(dest_root, item, layout=folder_layout, verify_hash=True)
     if existing and existing.is_file() and item.source_hash:
         logger.debug("Destination already verified: %s", existing.name)
-        await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt)
+        await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt, meta=hop2_meta)
         await cleanup_cache_file(cache_dir, item)
         if move_mode:
             await _unlink_source(item)
@@ -457,7 +489,7 @@ async def _import_single_item(
 
     # 6. Success — restore mtime, mark completed, clean up cache, optionally unlink source
     _restore_mtime(dst, capture_dt, source_created_ts=source_created_ts)
-    await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt)
+    await _mark_item_hop2(item, HopStatus.COMPLETED, capture_dt=capture_dt, meta=hop2_meta)
     await cleanup_cache_file(cache_dir, item)
     if move_mode:
         await _unlink_source(item)
@@ -930,8 +962,14 @@ async def _mark_item_hop2(
     status: HopStatus,
     error: str | None = None,
     capture_dt: datetime | None = None,
+    meta=None,
 ) -> None:
-    """Update a single item's hop2_status and final_status."""
+    """Update a single item's hop2_status and final_status.
+
+    ``meta`` is an optional FileMetadata from the Hop 2 ExifTool extract;
+    camera/dims/gps/duration persist via the if-None pattern (only fill
+    NULL columns, never overwrite scanner values).
+    """
     async with session_scope() as session:
         db_item = await session.get(MediaItem, item.id)
         if db_item is not None:
@@ -941,6 +979,19 @@ async def _mark_item_hop2(
                 db_item.error_message = error
             if capture_dt is not None:
                 db_item.original_capture_time = capture_dt
+            if meta is not None:
+                if db_item.camera_make is None and getattr(meta, "camera_make", None):
+                    db_item.camera_make = meta.camera_make
+                if db_item.camera_model is None and getattr(meta, "camera_model", None):
+                    db_item.camera_model = meta.camera_model
+                if db_item.width is None and getattr(meta, "width", None) is not None:
+                    db_item.width = meta.width
+                    db_item.height = meta.height
+                if db_item.gps_lat is None and getattr(meta, "gps_lat", None) is not None:
+                    db_item.gps_lat = meta.gps_lat
+                    db_item.gps_lon = meta.gps_lon
+                if db_item.duration_s is None and getattr(meta, "duration_s", None) is not None:
+                    db_item.duration_s = meta.duration_s
             db_item.touch()
 
 
