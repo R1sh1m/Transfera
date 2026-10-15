@@ -440,12 +440,17 @@ _LISTING_MAX_KEYS = 16
 # iOS thumbnail concurrency gate (listing priority)
 # ---------------------------------------------------------------------------
 # The AFC pool has 4 slots; recursive walks and thumbnail reads compete for
-# them. Thumbnail device reads take this semaphore (3 permits) while the
+# them. Thumbnail device reads take this semaphore (4 permits) while the
 # listing/browse path (_listing_quick_snapshot, _fetch_ios_entries browse)
 # deliberately does NOT — so a page turn's single snapshot browse never
 # queues behind a page of in-flight thumbnail reads.
-_IOS_THUMB_MAX_CONCURRENT = 3
+_IOS_THUMB_MAX_CONCURRENT = 4
 _IOS_THUMB_SEMAPHORE = asyncio.Semaphore(_IOS_THUMB_MAX_CONCURRENT)
+
+# Background prefetch gate — lower priority than foreground thumb requests.
+# Uses only 2 of the 4 AFC permits so foreground requests always win slots.
+_IOS_PREFETCH_MAX_CONCURRENT = 2
+_IOS_PREFETCH_SEMAPHORE = asyncio.Semaphore(_IOS_PREFETCH_MAX_CONCURRENT)
 
 # Device video prefix: first N bytes fetched for single-frame extraction.
 # 4 MB halves USB cost vs 8 MB; faststart moov-up-front files still resolve,
@@ -460,6 +465,184 @@ _VIDEO_PREFIX_BYTES = 4 * 1024 * 1024
 # up to _VIDEO_FULL_FALLBACK_MAX_BYTES, larger videos stay retryable 503.
 _VIDEO_FULL_FALLBACK_MAX_BYTES = 64 * 1024 * 1024
 _IOS_THUMB_FULL_READ_TIMEOUT_S = 60.0
+
+# ---------------------------------------------------------------------------
+# Page-level thumbnail prefetch (background task fired by ios_preview_directory)
+# ---------------------------------------------------------------------------
+# Key: (device_id, page_scan_id) — one prefetch task per unique page slice.
+_ios_prefetch_inflight: set[tuple[str, str]] = set()
+_ios_prefetch_lock = threading.Lock()
+
+
+async def _prefetch_page_thumbnails(
+    device_id: str,
+    page_items: list,
+    prefetch_key: tuple[str, str],
+    thumb_size: int = 200,
+) -> None:
+    """Background coroutine: generate + disk-cache thumbnails for *page_items*.
+
+    Runs at background priority (_IOS_PREFETCH_SEMAPHORE, 2 permits) so
+    foreground thumbnail requests always get the remaining AFC slots first.
+    Each item is skipped when its thumbnail is already in the RAM or disk cache
+    (cache hit check is free — no USB). Errors per item are silently swallowed
+    so one bad file can't abort the whole page.
+    """
+    try:
+        for it in page_items:
+            try:
+                abs_path = it.get("abs_path", "")
+                if not abs_path.startswith(f"ios://{device_id}"):
+                    continue
+                dev_path = abs_path[len(f"ios://{device_id}"):] or "/"
+                ext = os.path.splitext(dev_path)[1].lower()
+                if ext not in PREVIEW_EXTENSIONS:
+                    continue
+
+                file_size: int | None = it.get("size_bytes") or None
+                file_mtime: float | None = it.get("mtime") or None
+
+                # Skip already-cached items — free check, no USB.
+                cache_key = (f"ios:{device_id}:{dev_path}", thumb_size)
+                if _get_thumb_cache(cache_key) is not None:
+                    continue
+                disk_key = _device_thumb_disk_key(device_id, dev_path, thumb_size, file_size, file_mtime)
+                disk_hit = await asyncio.to_thread(_read_disk_thumb, disk_key)
+                if disk_hit is not None:
+                    _put_thumb_cache(cache_key, disk_hit)
+                    continue
+
+                # Skip files already known to be undecodable.
+                try:
+                    fail_hit = _thumb_fail_get(device_id, dev_path, file_size, file_mtime)
+                except Exception:
+                    fail_hit = None
+                if fail_hit is not None:
+                    continue
+
+                # --- Generate thumbnail via USB, guarded by the prefetch semaphore ---
+                jpeg_bytes: bytes | None = None
+                try:
+                    if ext in PREVIEW_IMAGE_EXTENSIONS:
+                        if ext in (".heic", ".heif"):
+                            _ensure_heif_opener()
+                        # Hop-1 staged bytes first (free).
+                        hop1: bytes | None = None
+                        try:
+                            hop1 = await asyncio.to_thread(
+                                _read_hop1_cache_bytes, device_id, dev_path, file_size
+                            )
+                        except Exception:
+                            pass
+                        if hop1 and len(hop1) > 100:
+                            jpeg_bytes = await _thumb_photo_bytes_worker(hop1, thumb_size, ext)
+                        if not jpeg_bytes or len(jpeg_bytes) <= 10:
+                            # Stage 1: 256 KB prefix probe via the prefetch semaphore.
+                            PARTIAL_READ_BYTES = 256 * 1024
+                            partial: bytes | None = None
+                            try:
+                                async with _IOS_PREFETCH_SEMAPHORE:
+                                    partial = await asyncio.wait_for(
+                                        _read_device_file_partial(device_id, dev_path, PARTIAL_READ_BYTES),
+                                        timeout=15.0,
+                                    )
+                            except Exception:
+                                partial = None
+                            if partial and len(partial) >= 4096:
+                                jpeg_bytes = await _thumb_photo_bytes_worker(partial, thumb_size, ext)
+                        if not jpeg_bytes or len(jpeg_bytes) <= 10:
+                            # Stage 2: full-file read.
+                            jpeg_bytes = None
+                            try:
+                                async with _IOS_PREFETCH_SEMAPHORE:
+                                    file_bytes = await asyncio.wait_for(
+                                        get_device_manager().read_device_file(device_id, dev_path),
+                                        timeout=_IOS_THUMB_FULL_READ_TIMEOUT_S,
+                                    )
+                                if file_bytes and len(file_bytes) > 100:
+                                    jpeg_bytes = await _thumb_photo_bytes_worker(file_bytes, thumb_size, ext)
+                            except Exception:
+                                pass
+                    else:
+                        # Video: prefix probe only (no full-file in background).
+                        hop1 = None
+                        try:
+                            hop1 = await asyncio.to_thread(
+                                _read_hop1_cache_bytes, device_id, dev_path, file_size
+                            )
+                        except Exception:
+                            pass
+                        if hop1 and len(hop1) > 4096:
+                            try:
+                                jpeg_bytes = await _thumb_frame_bytes_worker(hop1, thumb_size, ext or ".mp4")
+                            except Exception:
+                                jpeg_bytes = None
+                        if not jpeg_bytes or len(jpeg_bytes) <= 100:
+                            prefix: bytes | None = None
+                            try:
+                                async with _IOS_PREFETCH_SEMAPHORE:
+                                    prefix = await asyncio.wait_for(
+                                        _read_device_file_partial(device_id, dev_path, _VIDEO_PREFIX_BYTES),
+                                        timeout=30.0,
+                                    )
+                            except Exception:
+                                prefix = None
+                            if prefix and len(prefix) > 4096:
+                                try:
+                                    jpeg_bytes = await _thumb_frame_bytes_worker(prefix, thumb_size, ext or ".mp4")
+                                except Exception:
+                                    jpeg_bytes = None
+
+                    if jpeg_bytes and len(jpeg_bytes) > 10:
+                        _put_thumb_cache(cache_key, jpeg_bytes)
+                        await asyncio.to_thread(_write_disk_thumb, disk_key, jpeg_bytes)
+                        try:
+                            _store_lqip_for_thumb(device_id, dev_path, file_size, file_mtime, jpeg_bytes)
+                        except Exception:
+                            pass
+                        try:
+                            _thumb_fail_clear(device_id, dev_path, file_size, file_mtime)
+                        except Exception:
+                            pass
+                        logger.debug("prefetch cached thumbnail for %s", dev_path)
+
+                except Exception as item_exc:
+                    logger.debug("prefetch thumb error for %s: %s", dev_path, item_exc)
+                    continue
+
+            except Exception as outer_exc:
+                logger.debug("prefetch item error: %s", outer_exc)
+                continue
+    finally:
+        with _ios_prefetch_lock:
+            _ios_prefetch_inflight.discard(prefetch_key)
+
+
+def _schedule_page_prefetch(
+    device_id: str,
+    page_items: list,
+    scan_id: str,
+    thumb_size: int = 200,
+) -> None:
+    """Fire-and-forget: launch _prefetch_page_thumbnails for this page if not
+    already in-flight. The key is (device_id, scan_id) so sort/filter changes
+    that produce the same scan share one prefetch task. Best-effort: any error
+    here is silently ignored — thumbnails simply load from USB as before.
+    """
+    prefetch_key = (device_id, scan_id)
+    with _ios_prefetch_lock:
+        if prefetch_key in _ios_prefetch_inflight:
+            return
+        _ios_prefetch_inflight.add(prefetch_key)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        with _ios_prefetch_lock:
+            _ios_prefetch_inflight.discard(prefetch_key)
+        return
+    loop.create_task(
+        _prefetch_page_thumbnails(device_id, list(page_items), prefetch_key, thumb_size)
+    )
 
 
 class _ListingCacheEntry:
@@ -2557,6 +2740,14 @@ async def ios_preview_directory(
     page_items = items[start_idx : start_idx + page_size]
     # Inline LQIP backfill for the sliced page only (local cache IO, no USB).
     _attach_lqip_to_page_items(device_id, page_items)
+
+    # Background prefetch: generate + disk-cache thumbnails for this page so
+    # the next frontend request gets instant cache hits instead of USB reads.
+    # One task per (device_id, scan_id) — subsequent pages get their own task.
+    try:
+        _schedule_page_prefetch(device_id, page_items, scan_id or "")
+    except Exception as _pf_err:
+        logger.debug("thumbnail prefetch schedule skipped: %s", _pf_err)
 
     cached_ent = None
     with _listing_cache_lock:

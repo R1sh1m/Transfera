@@ -54,6 +54,7 @@ import DuplicateModal from "@/components/DuplicateModal";
 import CloseGuardModal from "@/components/CloseGuardModal";
 import ThemeToggle from "@/components/ThemeToggle";
 import PageErrorBoundary from "@/components/PageErrorBoundary";
+import TopRightUpdaterIcon from "@/components/TopRightUpdaterIcon";
 import { useDeviceWatcher } from "@/hooks/use-device-watcher";
 
 function DeviceWatcher() {
@@ -420,7 +421,10 @@ function TitleBar() {
         </div>
         <span className="text-sm font-semibold text-foreground">Transfera</span>
       </div>
-      <WindowControls />
+      <div className="flex items-center gap-2">
+        <TopRightUpdaterIcon />
+        <WindowControls />
+      </div>
     </div>
   );
 }

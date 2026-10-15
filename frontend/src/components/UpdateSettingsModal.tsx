@@ -21,6 +21,7 @@ import {
 import { useUpdaterStore } from "@/store/updater";
 import { openExternal } from "@/lib/desktop";
 import ReleaseNotesView from "@/components/ReleaseNotesView";
+import { APP_VERSION } from "@/version";
 
 function formatTimestamp(ts: number | null): string {
   if (!ts) return "Never";
@@ -43,6 +44,7 @@ export default function UpdateSettingsModal() {
   const isSettingsOpen = useUpdaterStore((s) => s.isSettingsOpen);
   const setIsSettingsOpen = useUpdaterStore((s) => s.setIsSettingsOpen);
   const status = useUpdaterStore((s) => s.status);
+  const currentStoreVersion = useUpdaterStore((s) => s.currentVersion);
   const updateInfo = useUpdaterStore((s) => s.updateInfo);
   const downloadProgress = useUpdaterStore((s) => s.downloadProgress);
   const errorMessage = useUpdaterStore((s) => s.errorMessage);
@@ -62,7 +64,7 @@ export default function UpdateSettingsModal() {
 
   if (!isSettingsOpen) return null;
 
-  const currentVersion = updateInfo?.currentVersion || "1.0.0";
+  const currentVersion = updateInfo?.currentVersion || currentStoreVersion || APP_VERSION;
 
   return (
     <AnimatePresence>
@@ -207,8 +209,10 @@ export default function UpdateSettingsModal() {
                   </div>
                   <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
                     <div
-                      className="bg-action h-full transition-all duration-200"
-                      style={{ width: `${downloadProgress ?? 10}%` }}
+                      className="bg-action h-full transition-[width] duration-150 ease-out"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, downloadProgress ?? 0))}%`,
+                      }}
                     />
                   </div>
                 </div>

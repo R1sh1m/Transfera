@@ -7,6 +7,7 @@
 import { create } from "zustand";
 import { isTauri, restartApp, showNotification } from "@/lib/desktop";
 import { updaterErrorMessage } from "./updaterErrors";
+import { APP_VERSION } from "@/version";
 
 export { updaterErrorMessage };
 
@@ -29,6 +30,7 @@ export interface UpdateInfo {
 
 export interface UpdaterState {
   status: UpdateStatus;
+  currentVersion: string;
   updateInfo: UpdateInfo | null;
   downloadProgress: number | null;
   downloadedBytes: number | null;
@@ -38,16 +40,21 @@ export interface UpdaterState {
   autoCheckEnabled: boolean;
   autoDownloadEnabled: boolean;
   isSettingsOpen: boolean;
+  isBannerHidden: boolean;
 
   // Actions
   checkForUpdates: (manual?: boolean) => Promise<void>;
   downloadUpdate: () => Promise<void>;
+  cancelDownload: () => Promise<void>;
   installAndRestart: () => Promise<void>;
   dismiss: () => void;
+  hideBanner: () => void;
+  unhideBanner: () => void;
   resolveReleaseNotes: () => Promise<string | null>;
   setAutoCheckEnabled: (enabled: boolean) => void;
   setAutoDownloadEnabled: (enabled: boolean) => void;
   setIsSettingsOpen: (open: boolean) => void;
+  setCurrentVersion: (version: string) => void;
 }
 
 const STORAGE_KEY_AUTO_CHECK = "transfera_updater_auto_check";
@@ -183,9 +190,11 @@ let downloadedFlag = false;
 // Set when dismiss() is called mid-download so the in-flight promise
 // completion does not resurrect the banner.
 let downloadCancelled = false;
+let downloadInProgress = false;
 
 export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   status: "idle",
+  currentVersion: APP_VERSION,
   updateInfo: null,
   downloadProgress: null,
   downloadedBytes: null,
@@ -195,6 +204,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   autoCheckEnabled: getInitialBool(STORAGE_KEY_AUTO_CHECK, true),
   autoDownloadEnabled: getInitialBool(STORAGE_KEY_AUTO_DOWNLOAD, true),
   isSettingsOpen: false,
+  isBannerHidden: false,
 
   checkForUpdates: async (manual = false) => {
     const { status, autoDownloadEnabled } = get();
@@ -244,13 +254,14 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
 
-      let currentVersion = "1.0.0";
+      let currentVersion = get().currentVersion || APP_VERSION;
       try {
         const { getVersion } = await import("@tauri-apps/api/app");
         currentVersion = await getVersion();
       } catch {
-        /* fallback */
+        /* fallback to store/package version */
       }
+      set({ currentVersion });
 
       if (update && update.available) {
         // Manual re-check while a download already completed: keep the
@@ -313,7 +324,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         }
         activeUpdateResource = null;
         downloadedFlag = false;
-        set({ updateInfo: null, status: "up-to-date" });
+        set({ updateInfo: null, status: "up-to-date", currentVersion });
 
         if (manual) {
           const { useTransferStore } = await import("@/store/transfer");
@@ -347,12 +358,14 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   },
 
   downloadUpdate: async () => {
-    // Re-entrancy guard: banner + settings modal can invoke concurrently
-    // on the same resource object.
-    if (get().status === "downloading") return;
+    // Re-entrancy guard: strictly prevent multiple concurrent download streams
+    if (downloadInProgress || get().status === "downloading") {
+      console.debug("[updater] Download already running — skipping duplicate request");
+      return;
+    }
     if (!activeUpdateResource || !isTauri) return;
 
-    // New download attempt supersedes any prior dismiss-during-download.
+    downloadInProgress = true;
     downloadCancelled = false;
     const resource = activeUpdateResource;
 
@@ -367,21 +380,45 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     try {
       let total = 0;
       let downloaded = 0;
+      let lastReportedPct = 0;
+      let lastDispatchTime = 0;
 
       await resource.download((event: any) => {
-        if (!event) return;
+        if (!event || downloadCancelled || activeUpdateResource !== resource) return;
+
         if (event.event === "Started") {
           total = event.data?.contentLength || 0;
           set({ totalBytes: total });
         } else if (event.event === "Progress") {
           downloaded += event.data?.chunkLength || 0;
-          set({ downloadedBytes: downloaded });
           if (total > 0) {
-            const pct = Math.min(100, Math.round((downloaded / total) * 100));
-            set({ downloadProgress: pct });
+            const rawPct = Math.min(99, Math.round((downloaded / total) * 100));
+            // Guarantee monotonic non-decreasing percentage so it never jumps backwards
+            const pct = Math.max(lastReportedPct, rawPct);
+            const now = performance.now();
+
+            // Throttle UI updates to at most once per 80ms or on >=1% change
+            // and combine downloadedBytes and downloadProgress into a single set()
+            if (pct > lastReportedPct && (now - lastDispatchTime >= 80 || pct - lastReportedPct >= 1)) {
+              lastReportedPct = pct;
+              lastDispatchTime = now;
+              set({
+                downloadedBytes: downloaded,
+                downloadProgress: pct,
+              });
+            }
+          } else {
+            const now = performance.now();
+            if (now - lastDispatchTime >= 150) {
+              lastDispatchTime = now;
+              set({ downloadedBytes: downloaded });
+            }
           }
         } else if (event.event === "Finished") {
-          set({ downloadProgress: 100 });
+          set({
+            downloadProgress: 100,
+            downloadedBytes: total > 0 ? total : downloaded,
+          });
         }
       });
 
@@ -411,6 +448,8 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       }
       const msg = updaterErrorMessage(err, "Failed to download update.");
       set({ status: "error", errorMessage: msg });
+    } finally {
+      downloadInProgress = false;
     }
   },
 
@@ -475,32 +514,60 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     }
   },
 
+  cancelDownload: async () => {
+    downloadCancelled = true;
+    downloadInProgress = false;
+    set({
+      status: "idle",
+      downloadProgress: null,
+      downloadedBytes: null,
+      totalBytes: null,
+      errorMessage: null,
+      isBannerHidden: false,
+    });
+    try {
+      const { useTransferStore } = await import("@/store/transfer");
+      useTransferStore
+        .getState()
+        .showNotification("info", "Update download cancelled.");
+    } catch {
+      /* ignore */
+    }
+  },
+
+  hideBanner: () => {
+    set({ isBannerHidden: true });
+  },
+
+  unhideBanner: () => {
+    set({ isBannerHidden: false });
+  },
+
+  setCurrentVersion: (version: string) => {
+    if (version && version !== get().currentVersion) {
+      set({ currentVersion: version });
+    }
+  },
+
   dismiss: () => {
     const { status } = get();
-    // Dismissing mid-download cancels the banner resurrection: the
-    // in-flight download promise checks downloadCancelled on completion.
+    // If downloading, hide the banner onto the top-right icon while
+    // the engine continues downloading in background. Use cancelDownload() to abort.
     if (status === "downloading") {
-      downloadCancelled = true;
-      set({
-        status: "idle",
-        updateInfo: null,
-        downloadProgress: null,
-        downloadedBytes: null,
-        totalBytes: null,
-        errorMessage: null,
-      });
+      set({ isBannerHidden: true });
       return;
     }
     // If downloaded, keep updateInfo so UI pills and settings know it's ready,
-    // but close the toast / banner
+    // but hide the banner
     if (status === "downloaded") {
-      set({ status: "idle" });
+      set({ status: "idle", isBannerHidden: true });
     } else {
       set({
         status: "idle",
         updateInfo: null,
         downloadProgress: null,
         errorMessage: null,
+        isBannerHidden: false,
       });
     }
   },

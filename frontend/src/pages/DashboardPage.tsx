@@ -37,6 +37,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useUpdaterStore } from "@/store/updater";
+import { APP_VERSION } from "@/version";
 import {
   useSessionList,
   useRecovery,
@@ -822,6 +823,8 @@ function BackendStatusCard() {
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const installAndRestart = useUpdaterStore((s) => s.installAndRestart);
   const setIsSettingsOpen = useUpdaterStore((s) => s.setIsSettingsOpen);
+  const currentStoreVersion = useUpdaterStore((s) => s.currentVersion);
+  const setCurrentVersion = useUpdaterStore((s) => s.setCurrentVersion);
 
   // Tauri shell version (differs from backend health version during dev).
   useEffect(() => {
@@ -829,13 +832,24 @@ function BackendStatusCard() {
     import("@tauri-apps/api/app")
       .then(({ getVersion }) => getVersion())
       .then((v) => {
-        if (!cancelled) setAppVersion(v);
+        if (!cancelled) {
+          setAppVersion(v);
+          setCurrentVersion(v);
+        }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setCurrentVersion]);
+
+  useEffect(() => {
+    if (health?.version) {
+      setCurrentVersion(health.version);
+    }
+  }, [health?.version, setCurrentVersion]);
+
+  const displayVersion = appVersion || health?.version || currentStoreVersion || APP_VERSION;
 
   const restOnline = !healthLoading && !healthError && health?.status === "ok";
   const restColor = healthLoading
@@ -916,14 +930,14 @@ function BackendStatusCard() {
       )}
 
       {/* App Version badge */}
-      {health?.version && (
+      {displayVersion && (
         <button
           type="button"
           onClick={() => setIsSettingsOpen(true)}
           className="text-[10px] font-normal text-muted-foreground bg-muted hover:bg-muted/80 px-1.5 py-0.5 rounded transition-colors shrink-0 whitespace-nowrap"
           title="Click to view update settings and release info"
         >
-          v{health.version}
+          v{displayVersion}
         </button>
       )}
 
@@ -934,7 +948,7 @@ function BackendStatusCard() {
         disabled={
           updaterStatus === "checking" || updaterStatus === "downloading"
         }
-        title={`Check for updates${appVersion ? ` (app v${appVersion})` : ""} — runs update check`}
+        title={`Check for updates (app v${displayVersion}) — runs update check`}
         className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0 disabled:opacity-50"
         aria-label="Check for updates"
       >
