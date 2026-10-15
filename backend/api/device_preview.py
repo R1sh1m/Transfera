@@ -163,9 +163,7 @@ def _is_lookup_failure(exc: BaseException | None) -> bool:
     _io_markers = [m for m in _TRANSIENT_IO_MARKERS if m != "stalled"]
     if any(marker in text for marker in _io_markers):
         return False
-    if _re.search(r"\bstalled\b", text):
-        return False
-    return True
+    return not _re.search(r"\bstalled\b", text)
 
 
 async def _read_device_file_partial(device_id: str, path: str, max_bytes: int) -> bytes | None:
