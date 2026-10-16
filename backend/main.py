@@ -6,11 +6,18 @@ Serves compiled React frontend as SPA from frontend/dist/.
 
 from __future__ import annotations
 
+import multiprocessing
+import sys
+
+# Windows PyInstaller child worker guard: must execute before any heavy
+# application imports or initialization when spawned as a multiprocessing child.
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 import asyncio
 import contextlib
 import logging
 import os
-import sys
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -488,6 +495,7 @@ app = create_app()
 # CLI runner
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     import uvicorn
 
     if getattr(sys, "frozen", False):

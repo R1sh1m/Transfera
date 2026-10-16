@@ -45,7 +45,9 @@
 !macro NSIS_HOOK_PREINSTALL
   DetailPrint "Stopping any running Transfera processes..."
   nsExec::ExecToLog 'taskkill /F /IM transfera.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM Transfera.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM transfera-engine.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM wpd_helper.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM exiftool.exe /T'
   Sleep 2000
 !macroend
@@ -53,7 +55,10 @@
 !macro NSIS_HOOK_PREUNINSTALL
   DetailPrint "Stopping any running Transfera processes..."
   nsExec::ExecToLog 'taskkill /F /IM transfera.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM Transfera.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM transfera-engine.exe /T'
+  nsExec::ExecToLog 'taskkill /F /IM wpd_helper.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM exiftool.exe /T'
   Sleep 2000
 !macroend
+

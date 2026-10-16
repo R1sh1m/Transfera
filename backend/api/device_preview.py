@@ -28,7 +28,7 @@ from fastapi.responses import Response
 
 from backend.api.auth import require_local_token, require_local_token_or_query
 from backend.device_backend import DeviceLockedError, DeviceNotTrustedError, DeviceStatus, WpdDeviceAccessDenied
-from backend.ios_device import drop_afc_slots, ensure_afc_warm
+from backend.ios_device import canonical_device_serial, drop_afc_slots, ensure_afc_warm
 from backend.tier2_manager import get_device_manager
 
 _PREVIEW_MAX_FILES = 5000
@@ -2475,7 +2475,18 @@ async def ios_preview_directory(
 
     # Verify device is connected and ready via unified manager
     devices, _tier = await manager.list_devices()
-    device = next((d for d in devices if d.serial == device_id), None)
+    try:
+        _req_canon = canonical_device_serial(device_id)
+    except Exception:
+        _req_canon = device_id
+
+    def _canon(serial: str | None) -> str:
+        try:
+            return canonical_device_serial(serial)
+        except Exception:
+            return serial or ""
+
+    device = next((d for d in devices if _canon(getattr(d, "serial", None)) == _req_canon), None)
 
     if device is None:
         raise HTTPException(
@@ -2490,7 +2501,7 @@ async def ios_preview_directory(
     # Early-exit for terminal device states that no backend can work around.
     # A preview-time lock also purges cached pages/slots so the next poll
     # re-probes trust fresh (lock is transient, never cached as Ready).
-    if device.status == DeviceStatus.LOCKED:
+    if device is not None and device.status == DeviceStatus.LOCKED:
         _purge_device_preview_state(device_id)
         raise HTTPException(
             status_code=423,
@@ -2500,7 +2511,7 @@ async def ios_preview_directory(
                 "'Trust This Computer' when prompted, then try again.",
             },
         )
-    if device.status == DeviceStatus.NOT_TRUSTED:
+    if device is not None and device.status == DeviceStatus.NOT_TRUSTED:
         _purge_device_preview_state(device_id)
         raise HTTPException(
             status_code=403,

@@ -495,6 +495,14 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     try {
       set({ status: "installing", errorMessage: null });
 
+      // Signal backend engine to gracefully finish transfers, stop ExifTool, and shut down
+      try {
+        const { default: apiClient } = await import("@/lib/api-client");
+        await apiClient.post("/api/shutdown").catch(() => {});
+      } catch {
+        /* ignore */
+      }
+
       // In Tauri v2 Windows, install launches the updater installer and exits.
       // Option restartAfterInstall defaults to true.
       await activeUpdateResource.install({ restartAfterInstall: true });

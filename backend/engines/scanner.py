@@ -573,8 +573,8 @@ async def _scan_ios_device(
                                         try:
                                             _w, _h = img.size
                                             if meta.width is None and _w:
-                                                meta.width = int(_w)
-                                                meta.height = int(_h)
+                                                meta.width = _w
+                                                meta.height = _h
                                         except Exception:
                                             pass
                                         return meta.date_taken

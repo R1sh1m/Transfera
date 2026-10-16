@@ -564,7 +564,7 @@ async def browse_ios_device(req: IOSBrowseRequest, _: None = Depends(require_loc
                 "'Trust This Computer' when prompted, then try again.",
             },
         )
-    if device.status == DeviceStatus.NOT_TRUSTED:
+    if device is not None and device.status == DeviceStatus.NOT_TRUSTED:
         raise HTTPException(
             status_code=403,
             detail={
@@ -753,7 +753,18 @@ async def get_ios_device_file_info(
     normalised_path = req.path.replace("\\", "/")
 
     devices, _tier = await manager.list_devices()
-    device = next((d for d in devices if d.serial == req.serial), None)
+    try:
+        _req_canon = canonical_device_serial(req.serial)
+    except Exception:
+        _req_canon = req.serial
+
+    def _canon(serial: str | None) -> str:
+        try:
+            return canonical_device_serial(serial)
+        except Exception:
+            return serial or ""
+
+    device = next((d for d in devices if _canon(getattr(d, "serial", None)) == _req_canon), None)
     if device is None:
         raise HTTPException(status_code=404, detail={"status": "disconnected", "message": "Device not found"})
     if device.status == DeviceStatus.LOCKED:

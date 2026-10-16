@@ -38,6 +38,7 @@ import logging
 import multiprocessing
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -84,7 +85,11 @@ _MAX_BYTES_PAYLOAD = 32 * 1024 * 1024
 
 
 def _worker_disabled() -> bool:
-    return os.environ.get("TRANSFERA_THUMB_WORKER_DISABLE", "").strip().lower() in ("1", "true", "yes")
+    if os.environ.get("TRANSFERA_THUMB_WORKER_FORCE", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if os.environ.get("TRANSFERA_THUMB_WORKER_DISABLE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    return bool(getattr(sys, "frozen", False))
 
 
 # ---------------------------------------------------------------------------
@@ -551,19 +556,20 @@ def _run_in_worker(kind: str, payload: bytes | str, size: int, suffix: str, time
 
 
 def _run_or_fallback(kind: str, payload: bytes | str, size: int, suffix: str, timeout: float) -> bytes | None:
-    """Worker decode with in-process fallback (disabled env / spawn failure).
+    """Worker decode with in-process fallback (disabled env / spawn failure / worker crash).
 
-    Worker timeouts/crashes still RAISE (callers map them); only the inability
-    to spawn at all falls back inline so thumbnails keep working.
+    Timeouts still RAISE ThumbWorkerTimeout so callers map them to transient 503;
+    spawn failures or worker child crashes fall back to in-process decode so thumbnails
+    render reliably instead of degrading to grey placeholders.
     """
     if _worker_disabled():
         return _decode_in_process(kind, payload, size, suffix)
     try:
         return _run_in_worker(kind, payload, size, suffix, timeout)
-    except (ThumbWorkerTimeout, ThumbWorkerCrash):
+    except ThumbWorkerTimeout:
         raise
     except Exception as exc:
-        logger.debug("thumb worker spawn failed (%s) — in-process fallback: %s", kind, exc)
+        logger.debug("thumb worker failed (%s) — in-process fallback: %s", kind, exc)
         return _decode_in_process(kind, payload, size, suffix)
 
 
